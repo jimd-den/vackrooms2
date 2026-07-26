@@ -1,0 +1,102 @@
+# wasm_frontend — the browser front end of the voxel engine.
+#
+# Clean Architecture placement:
+#   application/  Use-case layer for the interactive client (player physics,
+#                 chunk streaming policy, frame orchestration). Pure Rust,
+#                 unit-tested natively. Defines the ports (RendererPort,
+#                 ChunkSourcePort) that outer layers implement.
+#   adapters/     Interface adapters: input mapping, SVO atlas assembly, and
+#                 the local chunk source that drives the `vackrooms` core
+#                 use cases (generation -> collision SVO -> renderer-selected
+#                 presentation artifacts).
+#   drivers/      Frameworks & Drivers: portable WebGPU pipelines plus browser
+#                 surface/event/rAF plumbing. DOM-facing code is wasm-only;
+#                 native Vulkan tests execute the same pipeline modules.
+[package]
+name = "wasm_frontend"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+vulkan-tests = []
+
+[[test]]
+name = "vulkan_renderers"
+path = "tests/vulkan_renderers.rs"
+required-features = ["vulkan-tests"]
+
+[dependencies]
+bytemuck = { version = "1.25", features = ["derive"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+vackrooms = { path = ".." }
+
+# Keep the portable renderer pipelines buildable on the host. Native tests
+# select Vulkan explicitly and render into headless textures; the `play`
+# binary opens a real window through winit.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "30.0", default-features = false, features = ["std", "vulkan", "wgsl"] }
+winit = "0.30"
+pollster = "1.0"
+# Rasterizes the vendored Bytesized face into the native HUD glyph atlas.
+fontdue = "0.9"
+
+# Browser bindings are wasm-only so `cargo test` on the host runs the pure
+# application/adapters layers without pulling in web-sys.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+wasm-bindgen-futures = "0.4"
+wgpu = { version = "30.0", default-features = false, features = ["std", "webgpu", "wgsl"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Location",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "CssStyleDeclaration",
+    "Event",
+    "EventTarget",
+    "KeyboardEvent",
+    "MouseEvent",
+    "TouchEvent",
+    "TouchList",
+    "Touch",
+    "Navigator",
+    "Performance",
+    "Worker",
+    "WorkerOptions",
+    "WorkerType",
+    "MessageEvent",
+    "console",
+    "Storage",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "WebGl2RenderingContext",
+    "WebGlProgram",
+    "WebGlQuery",
+    "WebGlShader",
+    "WebGlTexture",
+    "WebGlBuffer",
+    "WebGlVertexArrayObject",
+    "WebGlUniformLocation",
+    "WebGlFramebuffer",
+] }
+
+[dev-dependencies]
+pollster = "1.0"
+# Parallel pixel loops for the path-traced reference example.
+rayon = "1.10"
+criterion = "0.8"
+
+[[bench]]
+name = "generation"
+harness = false
+
+[[bench]]
+name = "rendering"
+harness = false

@@ -1,0 +1,1512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Vackrooms — WASM Voxel Engine</title>
+    <link rel="icon" href="data:,">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bytesized&display=swap" rel="stylesheet">
+    <!--
+        Thin presentation shell. All engine logic — procedural generation,
+        SVO construction, lighting, streaming, physics, WebGPU rendering,
+        touch/mouse/keyboard input — lives in the Rust wasm module loaded at
+        the bottom of this file. The JavaScript here only bootstraps the
+        module and binds the settings menu to the engine's exported setters.
+
+        Query flags:  ?spec=high          -> 20u chunks, 5x5 streaming, 0.1u voxels
+                      ?voxel_size=0.1     -> override scene voxel size (validated)
+                      ?renderer=splat     -> instanced GPU face splats
+                      ?renderer=raymarch  -> fullscreen SVO raymarcher (debug)
+                      ?renderer=cpu       -> CPU microvoxel splatting, presented by WebGPU
+                      (default)           -> low-spec profile, GPU surface meshes
+                      ?seed=… ?pillars= ?walls= ?atria= ?lights=
+                      ?workers=auto|0|1|2|3|4 -> chunk-generation concurrency
+                      ?rt_<optimization>=0|1 (also exposed in Settings)
+                      ?force_anomaly=pillars|blackout|pits|archway|redroom (debug spawn)
+    -->
+    <style>
+        /* ------------------------------------------------------------------
+           Field-terminal shell. The interface reads like research-grade
+           DOS-era survival instrumentation from a cutting-edge dimensional
+           experiment: sparse text channels, thin 1px rules, square
+           geometry, explicit units, no chrome. Quiet during calm
+           exploration; present only when the body or the situation makes a
+           signal relevant. No scanlines, no phosphor, no glow by default.
+           ------------------------------------------------------------------ */
+        :root {
+            --ink: #ffffff;        /* primary readable signal: plain white */
+            --quiet: #b4b4b4;      /* dormant structure: neutral grey */
+            --route: #d7bd70;      /* viable route / architectural direction */
+            --system: #7caeaa;     /* stable technical signal */
+            --hazard: #d45a4c;     /* danger only */
+            --critical: #f0dfcf;   /* urgent focus */
+            --panel: rgba(7, 10, 8, 0.44);
+            --panel-solid: rgba(7, 10, 8, 0.9);
+            --hairline: rgba(127, 139, 130, 0.4);
+            /* Bytesized is an 8px-grid pixel face; render it at 16px
+               multiples so the grid stays crisp. Fallbacks keep the
+               terminal legible when the font is unreachable offline. */
+            --mono: "Bytesized", "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
+            /* Dense reading surfaces (the settings menu) use a normal
+               monospace, not the pixel face. */
+            --ui: "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
+            --fs: clamp(16px, 0.9vw + 12px, 24px);
+            --fs-small: clamp(16px, 0.7vw + 11px, 20px);
+            --fs-ui: clamp(13px, 0.4vw + 11px, 15px);
+        }
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+            font-family: var(--mono);
+            font-size: var(--fs);
+            color: var(--ink);
+            /* Touch: the page itself never scrolls or zooms. */
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            overscroll-behavior: none;
+        }
+        /* Render canvas: backing-store resolution is managed by the engine
+           (adaptive scale); CSS stretches it to the full viewport. */
+        #view {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+            touch-action: none;
+        }
+        /* Plain text over the scene: no shadows, no etching. */
+        .etch { text-shadow: none; }
+
+        /* Partial corner brackets instead of complete boxes. */
+        .bracket { position: relative; }
+        .bracket::before, .bracket::after {
+            content: "";
+            position: absolute;
+            width: 7px;
+            height: 7px;
+            pointer-events: none;
+        }
+        .bracket::before {
+            top: -1px; left: -1px;
+            border-top: 1px solid var(--quiet);
+            border-left: 1px solid var(--quiet);
+        }
+        .bracket::after {
+            bottom: -1px; right: -1px;
+            border-bottom: 1px solid var(--quiet);
+            border-right: 1px solid var(--quiet);
+        }
+
+        /* Center mark: a single restrained fixation point. */
+        #reticle {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 3px;
+            height: 3px;
+            margin: -2px 0 0 -2px;
+            border: 1px solid var(--quiet);
+            opacity: 0.55;
+            pointer-events: none;
+        }
+
+        /* ---- Body trace: heart glyph, pulse figure, supply ticks --------- */
+        #body-trace {
+            position: absolute;
+            left: calc(14px + env(safe-area-inset-left, 0px));
+            bottom: calc(34px + env(safe-area-inset-bottom, 0px));
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            pointer-events: none;
+            --beat-period: 1030ms;
+            --beat-amp: 0.12;
+        }
+        #pulse-glyph {
+            width: 15px;
+            height: 15px;
+            display: block;
+            stroke: var(--quiet);
+            fill: none;
+            stroke-width: 1.2;
+            transform-origin: 50% 55%;
+            animation: beat var(--beat-period) steps(1, end) infinite;
+            opacity: 0.8;
+        }
+        /* The beat is a stepped contraction, not a bouncy tween: brief
+           systole, long diastole. Amplitude follows the body's strain. */
+        @keyframes beat {
+            0%   { transform: scale(calc(1 + 0.22 * var(--beat-amp))); opacity: 1; }
+            12%  { transform: scale(1); opacity: 0.8; }
+            100% { transform: scale(1); opacity: 0.8; }
+        }
+        #hud-bpm {
+            font-size: var(--fs);
+            letter-spacing: 0.08em;
+            color: var(--quiet);
+            min-width: 3ch;
+        }
+        #hud-bpm:not(:empty)::after {
+            content: " bpm";
+            font-size: var(--fs-small);
+            color: var(--quiet);
+        }
+        #body-trace[data-signal="active"] #pulse-glyph { stroke: var(--ink); }
+        #body-trace[data-signal="active"] #hud-bpm { color: var(--ink); }
+        #body-trace[data-signal="strained"] #pulse-glyph { stroke: var(--route); }
+        #body-trace[data-signal="strained"] #hud-bpm { color: var(--route); }
+        #body-trace[data-signal="critical"] #pulse-glyph {
+            stroke: var(--hazard);
+            /* The only sanctioned glow: a temporary critical-state cue. */
+            filter: drop-shadow(0 0 3px rgba(212, 90, 76, 0.6));
+        }
+        #body-trace[data-signal="critical"] #hud-bpm { color: var(--hazard); }
+
+        /* Carried supplies: discrete ticks, not meters. */
+        #supply-rack {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            font-size: 14px;
+            line-height: 1;
+            letter-spacing: 2px;
+        }
+        #supply-water { color: var(--system); }
+        #supply-ration { color: var(--quiet); }
+        #supply-water:not(:empty)::before { content: "aw "; color: var(--quiet); letter-spacing: 0; }
+        #supply-ration:not(:empty)::before { content: "rn "; color: var(--quiet); letter-spacing: 0; }
+
+        /* Steps: a recovered record along the lower edge. */
+        #hud-steps-wrap {
+            position: absolute;
+            left: calc(15px + env(safe-area-inset-left, 0px));
+            bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+            font-size: var(--fs-small);
+            letter-spacing: 0.12em;
+            color: var(--quiet);
+            pointer-events: none;
+        }
+        #hud-steps { color: var(--ink); }
+        #hud-steps-wrap .unit { margin-left: 5px; }
+
+        /* ---- Route anchor: near the center mark, only when real -------- */
+        #route-anchor {
+            display: none;
+            position: absolute;
+            left: 50%;
+            bottom: 22%;
+            transform: translateX(-50%);
+            text-align: center;
+            pointer-events: none;
+            padding: 3px 10px 4px;
+            border-left: 1px solid var(--hairline);
+        }
+        #route-target {
+            font-size: var(--fs-small);
+            letter-spacing: 0.2em;
+            color: var(--quiet);
+        }
+        #route-bearing {
+            font-size: var(--fs);
+            letter-spacing: 0.14em;
+            color: var(--route);
+            margin-top: 1px;
+        }
+        #route-range {
+            font-size: var(--fs-small);
+            letter-spacing: 0.12em;
+            color: var(--ink);
+            margin-top: 1px;
+        }
+
+        /* Top-right locality readout: which stratum the wanderer is in. */
+        #hud-section {
+            position: absolute;
+            top: calc(12px + env(safe-area-inset-top, 0px));
+            right: calc(14px + env(safe-area-inset-right, 0px));
+            font-size: var(--fs-small);
+            letter-spacing: 0.16em;
+            text-align: right;
+            color: var(--quiet);
+            pointer-events: none;
+        }
+
+        /* ---- Death: signal interruption, not a jump scare --------------- */
+        #death-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            background: rgba(4, 3, 2, 0.88);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.8s ease;
+            z-index: 5;
+            letter-spacing: 0.4em;
+            text-align: center;
+        }
+        #death-overlay .rule { width: 120px; height: 1px; background: var(--hairline); }
+        #death-overlay .headline {
+            font-size: clamp(14px, 2.4vw, 24px);
+            color: var(--critical);
+        }
+        #death-overlay .sub {
+            font-size: var(--fs-small);
+            letter-spacing: 0.24em;
+            color: var(--quiet);
+        }
+        #death-overlay.shown { opacity: 1; }
+
+        /* ---- Diagnostic aperture (F3 / Settings > Debug) ---------------- */
+        #diagnostics {
+            display: none;
+            position: absolute;
+            top: calc(40px + env(safe-area-inset-top, 0px));
+            left: calc(12px + env(safe-area-inset-left, 0px));
+            width: min(620px, calc(100vw - 24px));
+            max-height: 72vh;
+            overflow-y: auto;
+            background: rgba(7, 10, 8, 0.78);
+            border-top: 1px solid var(--hairline);
+            border-bottom: 1px solid var(--hairline);
+            padding: 8px 12px 10px;
+            pointer-events: none;
+            z-index: 6;
+        }
+        .diag-section { margin: 0 0 8px; padding-left: 8px; border-left: 1px solid var(--hairline); }
+        .diag-section h4 {
+            margin: 0 0 3px;
+            font-size: var(--fs-small);
+            font-weight: normal;
+            letter-spacing: 0.28em;
+            color: var(--system);
+        }
+        .diag-section pre {
+            margin: 0;
+            font-family: var(--mono);
+            font-size: var(--fs-small);
+            line-height: 1.5;
+            white-space: pre-wrap;
+            color: var(--ink);
+        }
+        #diag-engine pre b { color: var(--critical); font-weight: normal; }
+
+        /* Small screens: clear both thumb zones — the locality label
+           tightens and the aperture narrows. */
+        @media (max-width: 700px) {
+            #hud-section { letter-spacing: 0.08em; max-width: 55vw; }
+            #body-trace { bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+            #hud-steps-wrap { bottom: calc(36px + env(safe-area-inset-bottom, 0px)); }
+            #route-anchor { bottom: 30%; }
+            #overlay h1 { font-size: 28px !important; }
+        }
+
+        /* ---- Entry overlay ---------------------------------------------- */
+        #overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(2, 3, 2, 0.82);
+            cursor: pointer;
+            text-align: center;
+            z-index: 10;
+        }
+        #overlay h1 {
+            font-size: 34px;
+            font-weight: normal;
+            letter-spacing: 0.55em;
+            text-indent: 0.55em;
+            color: var(--ink);
+            margin: 0 0 6px;
+            padding: 10px 26px;
+            position: relative;
+        }
+        #overlay h1::before, #overlay h1::after {
+            content: "";
+            position: absolute;
+            width: 10px;
+            height: 10px;
+        }
+        #overlay h1::before { top: 0; left: 0; border-top: 1px solid var(--quiet); border-left: 1px solid var(--quiet); }
+        #overlay h1::after { bottom: 0; right: 0; border-bottom: 1px solid var(--quiet); border-right: 1px solid var(--quiet); }
+        #overlay p { font-size: var(--fs); color: var(--quiet); padding: 0 16px; line-height: 1.7; }
+        #play-msg { display: none; margin-bottom: 22px; color: var(--ink); }
+        #play-msg .alt { color: var(--quiet); }
+
+        button {
+            font-family: var(--mono);
+            border-radius: 0;
+        }
+        /* Touch hardware gets generous targets everywhere: the field
+           terminal is operated with thumbs on a phone. 44px is the floor. */
+        @media (pointer: coarse) {
+            .tab-btn { min-height: 52px; font-size: var(--fs-small); }
+            #settings-btn { min-height: 52px; padding: 14px 26px; }
+            .setting-row select,
+            .setting-row input[type="text"],
+            .setting-row input[type="number"] { padding: 14px; min-height: 48px; }
+            .setting-row input[type="range"] { height: 44px; }
+            .setting-row input[type="checkbox"] {
+                width: 28px;
+                height: 28px;
+                accent-color: var(--system);
+            }
+            .inline-switch { display: flex; align-items: center; justify-content: space-between; min-height: 48px; }
+            .menu-actions button { min-height: 52px; }
+            #touch-ui button { min-width: 64px; min-height: 64px; }
+        }
+        #settings-btn {
+            padding: 10px 22px;
+            background: transparent;
+            border: 1px solid var(--hairline);
+            color: var(--ink);
+            cursor: pointer;
+            font-size: var(--fs-small);
+            letter-spacing: 0.18em;
+            transition: border-color 0.15s, color 0.15s;
+            min-height: 44px;
+        }
+        #settings-btn:hover { border-color: var(--ink); color: var(--critical); }
+
+        /* ---- Settings: maintenance parameters --------------------------- */
+        #settings-menu,
+        #settings-menu * {
+            font-family: var(--ui);
+            font-size: var(--fs-ui);
+        }
+        /* Full-screen configuration surface on every device. Content sits
+           in a centered readable column; padding respects notches and home
+           indicators on phones. */
+        #settings-menu {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: var(--panel-solid);
+            border: none;
+            box-sizing: border-box;
+            padding:
+                calc(20px + env(safe-area-inset-top, 0px))
+                calc(24px + env(safe-area-inset-right, 0px))
+                calc(24px + env(safe-area-inset-bottom, 0px))
+                calc(24px + env(safe-area-inset-left, 0px));
+            overflow-y: auto;
+            z-index: 20;
+            color: var(--ink);
+            text-align: left;
+            cursor: default;
+            touch-action: pan-y;   /* the menu itself may scroll */
+        }
+        #settings-menu > * {
+            max-width: 760px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        #settings-menu h2 {
+            margin: 0 auto 12px;
+            color: var(--ink);
+            font-size: var(--fs-small);
+            font-weight: normal;
+            letter-spacing: 0.34em;
+            border-bottom: 1px solid var(--hairline);
+            padding-bottom: 9px;
+        }
+
+        .tabs-bar {
+            display: flex;
+            border-bottom: 1px solid var(--hairline);
+            margin-bottom: 14px;
+            gap: 2px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        .tab-btn {
+            flex: 1;
+            padding: 9px 4px;
+            background: transparent;
+            border: none;
+            color: var(--quiet);
+            cursor: pointer;
+            font-size: var(--fs-small);
+            letter-spacing: 0.08em;
+            text-align: center;
+            transition: color 0.15s;
+            border-bottom: 1px solid transparent;
+            margin-bottom: -1px;
+            min-width: 64px;
+            min-height: 40px;
+        }
+        .tab-btn.active {
+            color: var(--critical);
+            border-bottom: 1px solid var(--route);
+        }
+
+        .setting-row { margin-bottom: 14px; }
+        .setting-row label { display: block; margin-bottom: 5px; font-size: var(--fs-small); color: var(--quiet); }
+        .setting-row .value { color: var(--critical); float: right; }
+        .setting-row select, .setting-row input[type="text"], .setting-row input[type="number"] {
+            width: 100%;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid var(--hairline);
+            border-radius: 0;
+            color: var(--ink);
+            font-family: var(--mono);
+            box-sizing: border-box;
+            font-size: var(--fs-small);
+            outline: none;
+        }
+        .setting-row select:focus, .setting-row input[type="text"]:focus,
+        .setting-row input[type="number"]:focus {
+            border-color: var(--system);
+        }
+        .setting-row input[type="range"] {
+            width: 100%;
+            accent-color: var(--system);
+            height: 28px;
+            background: transparent;
+            cursor: pointer;
+        }
+        .settings-group {
+            margin: 12px 0 16px;
+            padding: 10px 12px 1px;
+            border-left: 1px solid var(--hairline);
+        }
+        .settings-group h3 {
+            margin: 0 0 10px;
+            color: var(--system);
+            font-size: 14px;
+            font-weight: normal;
+            letter-spacing: 0.26em;
+            text-transform: uppercase;
+        }
+
+        /* Checkboxes: square state indicators, not pill toggles. */
+        .setting-row.inline-switch {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 13px;
+            min-height: 28px;
+        }
+        .setting-row.inline-switch label {
+            display: inline;
+            margin-bottom: 0;
+        }
+        .setting-row.inline-switch input[type="checkbox"] {
+            appearance: none;
+            width: 30px;
+            height: 18px;
+            margin: 0;
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid var(--hairline);
+            position: relative;
+            outline: none;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .setting-row.inline-switch input[type="checkbox"]::before {
+            content: "";
+            position: absolute;
+            inset: 3px;
+            right: 15px;
+            background: var(--quiet);
+            opacity: 0.35;
+            transition: none;
+        }
+        .setting-row.inline-switch input[type="checkbox"]:checked::before {
+            inset: 3px;
+            left: 15px;
+            right: 3px;
+            background: var(--system);
+            opacity: 1;
+        }
+        .setting-row.inline-switch input[type="checkbox"]:focus-visible {
+            border-color: var(--system);
+        }
+
+        .hint { font-size: var(--fs-small); color: var(--quiet); margin: 10px 0; line-height: 1.5; }
+
+        .settings-actions { display: flex; gap: 6px; margin-top: 14px; }
+        .settings-actions button {
+            flex: 1;
+            padding: 12px 8px;
+            background: transparent;
+            border: 1px solid var(--hairline);
+            color: var(--ink);
+            cursor: pointer;
+            min-height: 44px;
+            font-size: var(--fs-small);
+            letter-spacing: 0.08em;
+            transition: border-color 0.15s, color 0.15s;
+        }
+        .settings-actions button:hover { border-color: var(--ink); }
+        #apply-settings-btn { border-color: var(--route); color: var(--route); }
+        #apply-settings-btn:hover { color: var(--critical); border-color: var(--critical); }
+
+        /* ---- Touch chrome ----------------------------------------------- */
+        #touch-ui {
+            display: none;
+            position: absolute;
+            top: calc(10px + env(safe-area-inset-top, 0px));
+            left: calc(10px + env(safe-area-inset-left, 0px));
+            gap: 8px;
+            z-index: 5;
+        }
+        #touch-ui button {
+            width: 52px;
+            height: 52px;
+            font-size: 14px;
+            letter-spacing: 0.1em;
+            background: var(--panel);
+            color: var(--ink);
+            border: 1px solid var(--hairline);
+            font-family: var(--mono);
+            touch-action: none;
+        }
+        #btn-flare { color: var(--route); }
+        #btn-drink { color: var(--system); }
+        #touch-hint {
+            position: absolute;
+            bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+            width: 100%;
+            text-align: center;
+            font-size: 14px;
+            letter-spacing: 0.1em;
+            color: rgba(127, 139, 130, 0.6);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="view"></canvas>
+
+    <div id="reticle"></div>
+
+    <!-- Route anchor: appears only when a real resident door is known. -->
+    <div id="route-anchor" class="etch">
+        <div id="route-target">THRESHOLD / —</div>
+        <div id="route-bearing">VECTOR ---°</div>
+        <div id="route-range">RANGE — m</div>
+    </div>
+
+    <!-- Body trace: the only permanent vital presence. -->
+    <div id="body-trace" class="etch" data-signal="quiet">
+        <svg id="pulse-glyph" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 14 L1.5 7.5 L1.5 4 L4.5 1.5 L8 4.5 L11.5 1.5 L14.5 4 L14.5 7.5 Z"/>
+        </svg>
+        <span id="hud-bpm"></span>
+        <div id="supply-rack"><span id="supply-water"></span><span id="supply-ration"></span></div>
+    </div>
+    <div id="hud-steps-wrap" class="etch"><span id="hud-steps">0</span><span class="unit">steps</span></div>
+
+    <div id="hud-section" class="etch">&hellip;</div>
+
+    <div id="death-overlay">
+        <div class="rule"></div>
+        <div class="headline">TELEMETRY LOST</div>
+        <div class="sub">subject reacquired at anchor point</div>
+        <div class="rule"></div>
+    </div>
+
+    <!-- Diagnostic aperture: engine channels stay in the DOM permanently;
+         the report body is re-rendered by the wasm driver while open. -->
+    <div id="diagnostics">
+        <section class="diag-section" id="diag-engine">
+            <h4>ENGINE</h4>
+            <pre>renderer <b id="hud-renderer">—</b>   fps <b id="hud-fps">—</b>   frame <b id="hud-gpu">—</b>
+chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b id="hud-scale">—</b></pre>
+        </section>
+        <div id="debug-overlay"></div>
+    </div>
+
+    <!-- Touch-session chrome; the wasm driver toggles its visibility. -->
+    <div id="touch-ui">
+        <button id="btn-menu" aria-label="Menu">MENU</button>
+        <button id="btn-flashlight" aria-label="Flashlight">LAMP</button>
+        <button id="btn-flare" aria-label="Drop flare">FLARE</button>
+        <button id="btn-drink" aria-label="Drink almond water">AW</button>
+        <button id="btn-eat" aria-label="Eat ration">MRE</button>
+        <div id="touch-hint">left: move &middot; right: look</div>
+    </div>
+
+    <div id="overlay">
+        <h1>VACKROOMS</h1>
+        <p id="status-msg">Generating world in WebAssembly&hellip;</p>
+        <p id="play-msg">
+            Click to enter &mdash; WASD move &middot; mouse look &middot; F lamp &middot; G flare &middot; R drink &middot; T eat &middot; ESC release<br>
+            <span class="alt">Touch: tap to enter &mdash; left thumb move &middot; right thumb look</span>
+        </p>
+        <button id="settings-btn" style="display: none;">SETTINGS</button>
+    </div>
+
+    <div id="settings-menu" class="bracket">
+        <h2>CONFIGURATION &mdash; FIELD TERMINAL</h2>
+
+        <div class="tabs-bar">
+            <button class="tab-btn active" data-tab="tab-controls">Controls</button>
+            <button class="tab-btn" data-tab="tab-graphics">Graphics</button>
+            <button class="tab-btn" data-tab="tab-optimizations">Optimize</button>
+            <button class="tab-btn" data-tab="tab-world">World</button>
+            <button class="tab-btn" data-tab="tab-cpu">CPU render</button>
+            <button class="tab-btn" data-tab="tab-debug">Debug</button>
+        </div>
+
+        <!-- Controls Tab -->
+        <div id="tab-controls" class="tab-content">
+            <div class="setting-row">
+                <label for="control-scheme">Control scheme</label>
+                <select id="control-scheme">
+                    <option value="modern">Modern (WASD move, mouse look)</option>
+                    <option value="doom">Doom (AD rotate, QE strafe)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-sensitivity">Look sensitivity <span class="value" id="sensitivity-value">1.0</span></label>
+                <input type="range" id="setting-sensitivity" min="0.2" max="3.0" step="0.1" value="1.0">
+            </div>
+            <div class="setting-row inline-switch">
+                <label for="setting-invert-y">Invert Y axis</label>
+                <input type="checkbox" id="setting-invert-y">
+            </div>
+            <div class="setting-row inline-switch">
+                <label for="setting-assist-consume">Assisted consumption (auto drink/eat when low)</label>
+                <input type="checkbox" id="setting-assist-consume">
+            </div>
+            <p class="hint">Provisions are used deliberately: R drinks almond water, T eats a ration. The assisted option restores automatic use for accessibility.</p>
+        </div>
+
+        <!-- Graphics Tab -->
+        <div id="tab-graphics" class="tab-content" style="display: none;">
+            <div class="setting-row">
+                <label for="setting-quality">World detail <span class="value">reload</span></label>
+                <select id="setting-quality">
+                    <option value="low">Standard (0.2u voxels, 3&times;3 chunks)</option>
+                    <option value="high">High (0.1u voxels, 5&times;5 chunks)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-voxel-size">Scene voxel size <span class="value">reload</span></label>
+                <select id="setting-voxel-size">
+                    <option value="">Profile default</option>
+                    <option value="0.4">0.4u — coarse (high profile only)</option>
+                    <option value="0.2">0.2u — balanced</option>
+                    <option value="0.1">0.1u — fine</option>
+                    <option value="0.05">0.05u — ultra (standard profile only)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-backend">Graphics backend <span class="value">reload</span></label>
+                <select id="setting-backend">
+                    <option value="auto">Automatic (WebGPU with WebGL2 fallback)</option>
+                    <option value="webgpu">WebGPU (modern secure browsers)</option>
+                    <option value="webgl">WebGL2 compatibility</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-renderer">Renderer <span class="value">reload</span></label>
+                <select id="setting-renderer">
+                    <option value="surface">GPU surfaces (default)</option>
+                    <option value="splat">GPU face splats (microvoxel)</option>
+                    <option value="raymarch">GPU SVO raymarcher (debug)</option>
+                    <option value="cpu">CPU splatter (software)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-generation-workers">Chunk generation workers <span class="value">reload</span></label>
+                <select id="setting-generation-workers">
+                    <option value="auto">Auto — use every hardware thread but one</option>
+                    <option value="0">0 — synchronous fallback</option>
+                    <option value="1">1 generation worker</option>
+                    <option value="2">2 generation workers</option>
+                    <option value="4">4 generation workers</option>
+                    <option value="8">8 generation workers</option>
+                    <option value="12">12 generation workers</option>
+                    <option value="16">16 generation workers</option>
+                    <option value="24">24 generation workers</option>
+                    <option value="32">32 generation workers</option>
+                </select>
+            </div>
+            <p class="hint">Workers generate and stream world chunks. They do not parallelize the CPU splat renderer; explicit counts are clamped to available hardware.</p>
+            <div class="setting-row">
+                <label for="setting-scale">Render scale</label>
+                <select id="setting-scale">
+                    <option value="0">Auto (adaptive)</option>
+                    <option value="0.5">50% — fastest</option>
+                    <option value="0.65">65%</option>
+                    <option value="0.8">80%</option>
+                    <option value="1">100% — sharpest</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-fov">Field of view <span class="value" id="fov-value">75&deg;</span></label>
+                <input type="range" id="setting-fov" min="55" max="100" step="1" value="75">
+            </div>
+        </div>
+
+        <!-- Renderer Optimizations Tab -->
+        <div id="tab-optimizations" class="tab-content" style="display: none;">
+            <p class="hint">Each switch has a correct fallback path. Disable one at a time to isolate image or performance regressions; changes apply immediately.</p>
+            <div class="settings-group">
+                <h3>CPU splatter</h3>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-hiz">Hierarchical Z rejection</label>
+                    <input type="checkbox" id="setting-rt-hiz" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-mips">Projected-size MIP collapse</label>
+                    <input type="checkbox" id="setting-rt-mips" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-beam_occlusion">Flashlight scene visibility rays</label>
+                    <input type="checkbox" id="setting-rt-beam_occlusion" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-deferred">Reject hidden splats before shading</label>
+                    <input type="checkbox" id="setting-rt-deferred" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-ao">Sibling-count ambient occlusion</label>
+                    <input type="checkbox" id="setting-rt-ao" checked>
+                </div>
+            </div>
+            <div class="settings-group">
+                <h3>Shared traversal</h3>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-f2b">CPU / splat / ray front-to-back</label>
+                    <input type="checkbox" id="setting-rt-f2b" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-cull">Conservative chunk culling</label>
+                    <input type="checkbox" id="setting-rt-cull" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-bake">CPU / raster approximate diffuse fill</label>
+                    <input type="checkbox" id="setting-rt-bake">
+                </div>
+            </div>
+            <div class="settings-group">
+                <h3>GPU renderers</h3>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-skip">Raymarch empty-SVO skipping</label>
+                    <input type="checkbox" id="setting-rt-skip" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-shadows">Direct-light visibility</label>
+                    <input type="checkbox" id="setting-rt-shadows" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-cells">Splat CPU cell-range culling</label>
+                    <input type="checkbox" id="setting-rt-cells" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-budget">Splat face budget</label>
+                    <input type="checkbox" id="setting-rt-budget" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-dither">Dither and surface grain</label>
+                    <input type="checkbox" id="setting-rt-dither" checked>
+                </div>
+            </div>
+        </div>
+
+        <!-- World Tab -->
+        <div id="tab-world" class="tab-content" style="display: none;">
+            <div class="setting-row">
+                <label for="setting-seed">Seed (text or number)</label>
+                <input type="text" id="setting-seed" placeholder="42">
+            </div>
+            <div class="setting-row">
+                <label for="setting-pillars">Pillars &times; <span class="value" id="pillars-value">1.0</span></label>
+                <input type="range" id="setting-pillars" min="0.0" max="4.0" step="0.1" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-walls">Walls &times; <span class="value" id="walls-value">1.0</span></label>
+                <input type="range" id="setting-walls" min="0.0" max="4.0" step="0.1" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-atria">Atria &times; <span class="value" id="atria-value">1.0</span></label>
+                <input type="range" id="setting-atria" min="0.0" max="4.0" step="0.1" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-lights">Lights &times; <span class="value" id="lights-value">1.0</span></label>
+                <input type="range" id="setting-lights" min="0.0" max="4.0" step="0.1" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-redrooms">Red Rooms &times; <span class="value" id="redrooms-value">1.0</span></label>
+                <input type="range" id="setting-redrooms" min="0.0" max="4.0" step="0.1" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-anomalies">Anomalies &times; <span class="value" id="anomalies-value">1.0</span></label>
+                <input type="range" id="setting-anomalies" min="0.0" max="4.0" step="0.1" value="1.0">
+            </div>
+            <div class="settings-group">
+                <h3>Provisions</h3>
+                <div class="setting-row">
+                    <label for="setting-almondwater">Almond water &times; <span class="value" id="almondwater-value">1.0</span></label>
+                    <input type="range" id="setting-almondwater" min="0.0" max="4.0" step="0.1" value="1.0">
+                </div>
+                <div class="setting-row">
+                    <label for="setting-rations">Rations &times; <span class="value" id="rations-value">1.0</span></label>
+                    <input type="range" id="setting-rations" min="0.0" max="4.0" step="0.1" value="1.0">
+                </div>
+                <div class="setting-row">
+                    <label for="setting-leveldoors">Level doors &times; <span class="value" id="leveldoors-value">1.0</span></label>
+                    <input type="range" id="setting-leveldoors" min="0.0" max="4.0" step="0.1" value="1.0">
+                </div>
+            </div>
+            <p class="hint">All World rows require Apply &amp; Reload. 0 removes that content class; the guaranteed Level 1 door only vanishes at Level doors = 0.</p>
+        </div>
+
+        <!-- CPU Renderer Tab -->
+        <div id="tab-cpu" class="tab-content" style="display: none;">
+            <p class="hint">The CPU-generated image always fills the page through WebGPU presentation. Resolution percentages control its backing pixels per axis; every traversal optimization and flashlight visibility ray remains independently switchable under Optimize.</p>
+            <div class="setting-row">
+                <label for="setting-cpu-preset">CPU quality preset</label>
+                <select id="setting-cpu-preset">
+                    <option value="performance">Performance — 12.5% backing</option>
+                    <option value="balanced">Balanced — 25% backing</option>
+                    <option value="quality">Quality — 37.5% backing</option>
+                    <option value="maximum">Maximum — 50% backing</option>
+                    <option value="custom">Custom</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-scale">CPU backing resolution <span class="value" id="cpu-scale-value">25%</span></label>
+                <input type="range" id="setting-cpu-scale" min="0.25" max="2.0" step="0.05" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-lod">Distant LOD cutoff (px) <span class="value" id="cpu-lod-value">1.00</span></label>
+                <input type="range" id="setting-cpu-lod" min="0.25" max="2.0" step="0.05" value="1.00">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-splat">Maximum splat radius (px) <span class="value" id="cpu-splat-value">8.0</span></label>
+                <input type="range" id="setting-cpu-splat" min="1.0" max="16.0" step="0.5" value="8.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-depth">Virtual split depth <span class="value" id="cpu-depth-value">5</span></label>
+                <input type="range" id="setting-cpu-depth" min="3" max="8" step="1" value="5">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-mip-occupancy">Sparse LOD threshold <span class="value" id="cpu-mip-occupancy-value">25%</span></label>
+                <input type="range" id="setting-cpu-mip-occupancy" min="0" max="0.5" step="0.01" value="0.25">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-dist">Draw distance (world units) <span class="value" id="cpu-dist-value">96</span></label>
+                <input type="range" id="setting-cpu-dist" min="16" max="256" step="8" value="96">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-shadows">Fixture shadow policy</label>
+                <select id="setting-cpu-shadows">
+                    <option value="off">Off — unshadowed direct light (fast)</option>
+                    <option value="hero">Hero fixture — one visibility ray</option>
+                    <option value="full">Full reference — every fixture sample (slow)</option>
+                </select>
+            </div>
+            <p class="hint">Lower LOD cutoff and splat radius preserve finer geometry but visit more nodes. “Hero fixture” is an explicit one-light approximation. “Full reference” traces every point endpoint and all four samples of every rectangular fixture.</p>
+        </div>
+
+        <!-- Debug Tab -->
+        <div id="tab-debug" class="tab-content" style="display: none;">
+            <div class="setting-row inline-switch">
+                <label for="setting-anomaly-debug">Diagnostic aperture (F3)</label>
+                <input type="checkbox" id="setting-anomaly-debug">
+            </div>
+            <div class="setting-row">
+                <label for="setting-force-anomaly">Spawn anomaly at spawn point <span class="value">reload</span></label>
+                <select id="setting-force-anomaly">
+                    <option value="">None (organic only)</option>
+                    <option value="pillars">Pillar expanse</option>
+                    <option value="blackout">Blackout expanse</option>
+                    <option value="pits">Pit lattice</option>
+                    <option value="archway">Archway anchor room</option>
+                    <option value="redroom">Red room</option>
+                </select>
+            </div>
+            <p class="hint">The forced anomaly is placed deterministically on the spawn's macro cell so every worker generates the same world. The aperture reports body telemetry, route state, reality epochs, traversal gates and pit hazards near you.</p>
+        </div>
+
+        <p class="hint">Controls and unmarked Graphics/CPU settings apply instantly. Rows marked “reload” require Apply &amp; Reload.</p>
+
+        <div class="settings-actions">
+            <button id="fullscreen-btn">Fullscreen</button>
+            <button id="close-settings-btn">Close</button>
+            <button id="apply-settings-btn">Apply &amp; Reload</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, {
+            set_doom_controls,
+            set_mouse_sensitivity,
+            set_invert_y,
+            set_render_scale,
+            set_fov,
+            set_cpu_quality_preset,
+            set_cpu_scale,
+            set_cpu_lod_cutoff,
+            set_cpu_max_splat_radius,
+            set_cpu_virtual_depth,
+            set_cpu_mip_occupancy,
+            set_cpu_max_draw_distance,
+            set_cpu_shadows,
+            set_anomaly_debug,
+            set_assisted_consumption,
+            set_render_toggle,
+        } from './pkg/wasm_frontend.js';
+
+        const $ = (id) => document.getElementById(id);
+        const overlay = $('overlay');
+        const settingsMenu = $('settings-menu');
+
+        // ---- Persistence -------------------------------------------------
+        // Live preferences (applied instantly, saved per device).
+        const PREFS_KEY = 'vackrooms_prefs';
+        // First-start switchboard: every load-reducing optimization on,
+        // every load-adding effect pass (deferred, AO, shadows) off. The
+        // default must run acceptably on weak hardware; enthusiasts opt up
+        // here and their choice persists per device.
+        const defaultRenderToggles = {
+            hiz: true,
+            f2b: true,
+            skip: true,
+            mips: true,
+            beam_occlusion: true,
+            deferred: false,
+            ao: false,
+            shadows: false,
+            cells: true,
+            budget: true,
+            cull: true,
+            dither: true,
+            bake: false,
+        };
+        const CPU_PRESETS = Object.freeze({
+            performance: Object.freeze({ id: 0, scale: 0.5, lod: 1.5, splatRadius: 14.0, virtualDepth: 4, mipOccupancy: 0.35, distance: 72, shadows: 'off' }),
+            balanced: Object.freeze({ id: 1, scale: 1.0, lod: 1.0, splatRadius: 8.0, virtualDepth: 5, mipOccupancy: 0.25, distance: 96, shadows: 'off' }),
+            quality: Object.freeze({ id: 2, scale: 1.5, lod: 0.65, splatRadius: 4.0, virtualDepth: 6, mipOccupancy: 0.12, distance: 128, shadows: 'hero' }),
+            maximum: Object.freeze({ id: 3, scale: 2.0, lod: 0.35, splatRadius: 2.0, virtualDepth: 8, mipOccupancy: 0.05, distance: 160, shadows: 'full' }),
+        });
+        // Mirrors the Rust-side safety ceiling (MAX_GENERATION_WORKERS in
+        // wasm_frontend/src/application/generation_worker_policy.rs) — not
+        // a target. The engine itself clamps further to whatever hardware
+        // actually reports, so this only guards malformed input.
+        const MAX_GENERATION_WORKERS = 32;
+        const normalizeGenerationWorkers = (value) => {
+            const text = String(value ?? 'auto');
+            if (text === 'auto' || text === '0') return text;
+            const requested = Number(text);
+            return Number.isInteger(requested) && requested > 0
+                ? String(Math.min(MAX_GENERATION_WORKERS, requested))
+                : 'auto';
+        };
+        const clampFinite = (value, min, max, fallback) => {
+            const number = Number(value);
+            return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+        };
+        const copyCpuPreset = (target, name) => {
+            const preset = CPU_PRESETS[name];
+            if (!preset) return false;
+            target.cpuPreset = name;
+            target.cpuScale = preset.scale;
+            target.cpuLod = preset.lod;
+            target.cpuSplat = preset.splatRadius;
+            target.cpuVirtualDepth = preset.virtualDepth;
+            target.cpuMipOccupancy = preset.mipOccupancy;
+            target.cpuDist = preset.distance;
+            target.cpuShadows = preset.shadows;
+            return true;
+        };
+        const sanitizeCpuPrefs = (target) => {
+            if (target.cpuPreset !== 'custom' && copyCpuPreset(target, target.cpuPreset)) return;
+            target.cpuPreset = 'custom';
+            target.cpuScale = clampFinite(target.cpuScale, 0.25, 2.0, 1.0);
+            target.cpuLod = clampFinite(target.cpuLod, 0.25, 2.0, 1.0);
+            target.cpuSplat = clampFinite(target.cpuSplat, 1.0, 16.0, 8.0);
+            target.cpuVirtualDepth = Math.round(clampFinite(target.cpuVirtualDepth, 3, 8, 5));
+            target.cpuMipOccupancy = clampFinite(target.cpuMipOccupancy, 0, 0.5, 0.25);
+            target.cpuDist = Math.round(clampFinite(target.cpuDist, 16, 256, 96) / 8) * 8;
+            target.cpuShadows = ['off', 'hero', 'full'].includes(target.cpuShadows)
+                ? target.cpuShadows
+                : 'off';
+        };
+        const defaults = {
+            scheme: 'modern',
+            sensitivity: 1.0,
+            invertY: false,
+            assistConsume: false,
+            scale: 0,
+            fov: 75,
+            generationWorkers: 'auto',
+            cpuPreset: 'balanced',
+            cpuScale: 1.0,
+            cpuLod: 1.0,
+            cpuSplat: 8.0,
+            cpuVirtualDepth: 5,
+            cpuMipOccupancy: 0.25,
+            cpuDist: 96.0,
+            cpuShadows: 'off',
+            anomalyDebug: false,
+            renderToggles: { ...defaultRenderToggles },
+        };
+        let savedPrefs = {};
+        try { savedPrefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {}; } catch (_) {}
+        let prefs = { ...defaults, ...savedPrefs };
+        prefs.generationWorkers = normalizeGenerationWorkers(prefs.generationWorkers);
+        const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+        // Preferences written by the former UI had scalar CPU controls but
+        // no preset name. Preserve those values as a custom profile.
+        if (!owns(savedPrefs, 'cpuPreset') && [
+            'cpuScale', 'cpuLod', 'cpuSplat', 'cpuDist', 'cpuShadows',
+        ].some((key) => owns(savedPrefs, key))) {
+            prefs.cpuPreset = 'custom';
+        }
+        sanitizeCpuPrefs(prefs);
+        // Preferences are shallow-merged above. Rebuild the nested catalog
+        // from the known names so new switches default on and stale/corrupt
+        // keys can never point at a non-existent settings control.
+        const savedRenderToggles = prefs.renderToggles || {};
+        prefs.renderToggles = Object.fromEntries(
+            Object.entries(defaultRenderToggles).map(([name, fallback]) => [
+                name,
+                typeof savedRenderToggles[name] === 'boolean'
+                    ? savedRenderToggles[name]
+                    : fallback,
+            ]),
+        );
+        // Migrate the old single-key scheme store.
+        const legacyScheme = localStorage.getItem('vackrooms_controls');
+        if (legacyScheme) { prefs.scheme = legacyScheme; localStorage.removeItem('vackrooms_controls'); }
+
+        const savePrefs = () => localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+
+        // World/graphics-profile settings travel in the URL so worlds stay
+        // shareable by link.
+        const urlParams = new URLSearchParams(window.location.search);
+        const activeGenerationWorkers = urlParams.has('workers')
+            ? normalizeGenerationWorkers(urlParams.get('workers'))
+            : prefs.generationWorkers;
+        if (!urlParams.has('workers') && activeGenerationWorkers !== 'auto') {
+            // Saved reload-required preferences must reach the Rust
+            // composition root before `init()` reads location.search.
+            urlParams.set('workers', activeGenerationWorkers);
+            const query = urlParams.toString();
+            history.replaceState(
+                null,
+                '',
+                `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`,
+            );
+        }
+        // Every start explores a fresh world — including plain reloads. The
+        // rolled seed must still be stamped into the URL before `init()` so
+        // the Rust composition root and every generation worker agree on one
+        // world; `auto_seed=1` marks it as rolled, so the next load rerolls
+        // instead of revisiting. An explicit ?seed= (typed or from a copied
+        // link, which never includes auto_seed) stays an exact reproduction.
+        if (!urlParams.has('seed') || urlParams.get('auto_seed') === '1') {
+            const rolled = crypto.getRandomValues(new Uint32Array(1))[0];
+            urlParams.set('seed', String(rolled));
+            urlParams.set('auto_seed', '1');
+            history.replaceState(
+                null,
+                '',
+                `${window.location.pathname}?${urlParams.toString()}${window.location.hash}`,
+            );
+        }
+        const parseToggle = (value, fallback) => {
+            if (['0', 'false', 'off'].includes(value)) return false;
+            if (['1', 'true', 'on'].includes(value)) return true;
+            return fallback;
+        };
+        // Active state is deliberately separate from persisted device
+        // preferences: opening somebody else's diagnostic link must not make
+        // its overrides permanent after an unrelated settings change.
+        const activeRenderToggles = { ...prefs.renderToggles };
+        for (const name of Object.keys(defaultRenderToggles)) {
+            const key = `rt_${name}`;
+            if (urlParams.has(key)) {
+                activeRenderToggles[name] = parseToggle(
+                    urlParams.get(key),
+                    activeRenderToggles[name],
+                );
+            }
+        }
+        // URL CPU settings are active-session overrides, just like renderer
+        // toggles. They must not leak into device preferences when an
+        // unrelated live setting is saved later.
+        const activeCpu = { ...prefs };
+        const CPU_PREF_FIELDS = [
+            'cpuPreset', 'cpuScale', 'cpuLod', 'cpuSplat',
+            'cpuVirtualDepth', 'cpuMipOccupancy', 'cpuDist', 'cpuShadows',
+        ];
+        const persistActiveCpu = () => {
+            for (const field of CPU_PREF_FIELDS) prefs[field] = activeCpu[field];
+            savePrefs();
+        };
+        const cpuShadowId = (mode) => ({ off: 0, hero: 1, full: 2 })[mode] ?? 0;
+
+        // ---- Populate the menu from current state -------------------------
+        $('control-scheme').value = prefs.scheme;
+        $('setting-sensitivity').value = prefs.sensitivity;
+        $('sensitivity-value').textContent = Number(prefs.sensitivity).toFixed(1);
+        $('setting-invert-y').checked = !!prefs.invertY;
+        $('setting-assist-consume').checked = !!prefs.assistConsume;
+        $('setting-scale').value = String(prefs.scale);
+        $('setting-fov').value = prefs.fov;
+        $('fov-value').textContent = `${prefs.fov}°`;
+        $('setting-generation-workers').value = activeGenerationWorkers;
+        for (const [name, enabled] of Object.entries(activeRenderToggles)) {
+            $(`setting-rt-${name}`).checked = !!enabled;
+        }
+
+        const refreshCpuControls = () => {
+            $('setting-cpu-preset').value = activeCpu.cpuPreset;
+            $('setting-cpu-scale').value = activeCpu.cpuScale;
+            $('cpu-scale-value').textContent = `${Math.round(activeCpu.cpuScale * 25)}%`;
+            $('setting-cpu-lod').value = activeCpu.cpuLod;
+            $('cpu-lod-value').textContent = Number(activeCpu.cpuLod).toFixed(2);
+            $('setting-cpu-splat').value = activeCpu.cpuSplat;
+            $('cpu-splat-value').textContent = Number(activeCpu.cpuSplat).toFixed(1);
+            $('setting-cpu-depth').value = activeCpu.cpuVirtualDepth;
+            $('cpu-depth-value').textContent = String(activeCpu.cpuVirtualDepth);
+            $('setting-cpu-mip-occupancy').value = activeCpu.cpuMipOccupancy;
+            $('cpu-mip-occupancy-value').textContent = `${Math.round(activeCpu.cpuMipOccupancy * 100)}%`;
+            $('setting-cpu-dist').value = activeCpu.cpuDist;
+            $('cpu-dist-value').textContent = activeCpu.cpuDist;
+            $('setting-cpu-shadows').value = activeCpu.cpuShadows;
+        };
+        refreshCpuControls();
+
+        // URL parameters overrides (link sharing)
+        $('setting-quality').value = (urlParams.get('spec') || '').toLowerCase() === 'high'
+            ? 'high'
+            : 'low';
+        const supportedVoxelSizes = ['0.4', '0.2', '0.1', '0.05'];
+        const requestedVoxelSize = Number(urlParams.get('voxel_size'));
+        const selectedVoxelSize = supportedVoxelSizes.find(
+            (value) => Math.abs(Number(value) - requestedVoxelSize) < 1e-6,
+        );
+        $('setting-voxel-size').value = selectedVoxelSize || '';
+        const syncVoxelSizeAvailability = () => {
+            const coarse = $('setting-voxel-size').querySelector('option[value="0.4"]');
+            const ultra = $('setting-voxel-size').querySelector('option[value="0.05"]');
+            const highProfile = $('setting-quality').value === 'high';
+            coarse.disabled = !highProfile;
+            ultra.disabled = highProfile;
+            const invalidForProfile = highProfile
+                ? $('setting-voxel-size').value === '0.05'
+                : $('setting-voxel-size').value === '0.4';
+            if (invalidForProfile) {
+                // Keep the menu aligned with the central validator: high +
+                // 0.05 needs depth nine, while standard + 0.4 has an odd 25
+                // fine cells and cannot produce the required half-res proxy.
+                $('setting-voxel-size').value = '';
+            }
+        };
+        syncVoxelSizeAvailability();
+        $('setting-quality').addEventListener('change', syncVoxelSizeAvailability);
+        const RENDERERS = ['surface', 'splat', 'raymarch', 'cpu'];
+        // World tuning sliders: element id fragment -> URL query key. One
+        // source of truth for restore, live display, and Apply & Reload.
+        const WORLD_KNOBS = Object.freeze({
+            pillars: 'pillars',
+            walls: 'walls',
+            atria: 'atria',
+            lights: 'lights',
+            redrooms: 'red_rooms',
+            anomalies: 'anomalies',
+            almondwater: 'almond_water',
+            rations: 'rations',
+            leveldoors: 'level_doors',
+        });
+        const urlRenderer = (urlParams.get('renderer') || '').toLowerCase();
+        $('setting-renderer').value = RENDERERS.includes(urlRenderer) ? urlRenderer : 'surface';
+        // Backend is a device preference, not a world parameter: it lives in
+        // localStorage (the wasm boot reads the same key), with the query
+        // param winning so shared links reproduce exactly.
+        const BACKEND_KEY = 'vackrooms_backend';
+        const urlBackend = (urlParams.get('backend') || '').toLowerCase();
+        const savedBackend = localStorage.getItem(BACKEND_KEY);
+        const selectedBackend = urlBackend || savedBackend || 'auto';
+        $('setting-backend').value = ['auto', 'webgl', 'webgpu'].includes(selectedBackend)
+            ? selectedBackend
+            : 'auto';
+        $('setting-backend').addEventListener('change', (e) => {
+            localStorage.setItem(BACKEND_KEY, e.target.value);
+            location.reload();
+        });
+        const FORCED_ANOMALIES = ['pillars', 'blackout', 'pits', 'archway', 'redroom'];
+        const urlForced = urlParams.get('force_anomaly');
+        $('setting-force-anomaly').value = FORCED_ANOMALIES.includes(urlForced) ? urlForced : '';
+        $('setting-anomaly-debug').checked = !!prefs.anomalyDebug;
+        if (urlParams.has('seed')) $('setting-seed').value = urlParams.get('seed');
+        for (const [knob, urlKey] of Object.entries(WORLD_KNOBS)) {
+            if (urlParams.has(urlKey)) {
+                const val = urlParams.get(urlKey);
+                $(`setting-${knob}`).value = val;
+                $(`${knob}-value`).textContent = Number(val).toFixed(1);
+            }
+        }
+        const requestedCpuPreset = urlParams.get('cpu_preset');
+        if (CPU_PRESETS[requestedCpuPreset]) copyCpuPreset(activeCpu, requestedCpuPreset);
+        else if (requestedCpuPreset === 'custom') activeCpu.cpuPreset = 'custom';
+        const firstParam = (...names) => {
+            const name = names.find((candidate) => urlParams.has(candidate));
+            return name ? urlParams.get(name) : null;
+        };
+        const overrideCpuNumber = (field, ...names) => {
+            const value = firstParam(...names);
+            if (value === null) return;
+            activeCpu[field] = Number(value);
+            activeCpu.cpuPreset = 'custom';
+        };
+        overrideCpuNumber('cpuScale', 'cpu_scale', 'cpuScale');
+        overrideCpuNumber('cpuLod', 'cpu_lod_px', 'cpuLod');
+        // `cpuSplatPx` historically meant half extent despite its ambiguous
+        // name. Preserve it as the radius alias.
+        overrideCpuNumber('cpuSplat', 'cpu_splat_radius_px', 'cpuSplatPx');
+        overrideCpuNumber('cpuVirtualDepth', 'cpu_virtual_depth');
+        overrideCpuNumber('cpuMipOccupancy', 'cpu_mip_occupancy');
+        overrideCpuNumber('cpuDist', 'cpu_range', 'cpuRange');
+        const requestedCpuShadows = firstParam('cpu_shadows', 'cpuShadows');
+        if (requestedCpuShadows !== null) {
+            activeCpu.cpuShadows = requestedCpuShadows;
+            activeCpu.cpuPreset = 'custom';
+        }
+        sanitizeCpuPrefs(activeCpu);
+        refreshCpuControls();
+
+        // ---- Apply live preferences to the engine --------------------------
+        const applyLivePrefs = () => {
+            set_doom_controls(prefs.scheme === 'doom');
+            set_mouse_sensitivity(Number(prefs.sensitivity));
+            set_invert_y(!!prefs.invertY);
+            set_assisted_consumption(!!prefs.assistConsume);
+            set_render_scale(Number(prefs.scale));
+            set_fov(Number(prefs.fov));
+
+            // CPU quality presets and custom controls feed the same validated
+            // Rust settings snapshot. Optimization toggles stay independent.
+            if (CPU_PRESETS[activeCpu.cpuPreset]) {
+                set_cpu_quality_preset(CPU_PRESETS[activeCpu.cpuPreset].id);
+            } else {
+                set_cpu_scale(Number(activeCpu.cpuScale));
+                set_cpu_lod_cutoff(Number(activeCpu.cpuLod));
+                set_cpu_max_splat_radius(Number(activeCpu.cpuSplat));
+                set_cpu_virtual_depth(Number(activeCpu.cpuVirtualDepth));
+                set_cpu_mip_occupancy(Number(activeCpu.cpuMipOccupancy));
+                set_cpu_max_draw_distance(Number(activeCpu.cpuDist));
+                set_cpu_shadows(cpuShadowId(activeCpu.cpuShadows));
+            }
+            set_anomaly_debug(!!prefs.anomalyDebug);
+            for (const [name, enabled] of Object.entries(activeRenderToggles)) {
+                set_render_toggle(name, !!enabled);
+            }
+        };
+
+        // Live preferences event listeners
+        $('control-scheme').addEventListener('change', (e) => {
+            prefs.scheme = e.target.value; savePrefs();
+            set_doom_controls(prefs.scheme === 'doom');
+        });
+        $('setting-sensitivity').addEventListener('input', (e) => {
+            prefs.sensitivity = Number(e.target.value); savePrefs();
+            $('sensitivity-value').textContent = prefs.sensitivity.toFixed(1);
+            set_mouse_sensitivity(prefs.sensitivity);
+        });
+        $('setting-invert-y').addEventListener('change', (e) => {
+            prefs.invertY = e.target.checked; savePrefs();
+            set_invert_y(prefs.invertY);
+        });
+        $('setting-assist-consume').addEventListener('change', (e) => {
+            prefs.assistConsume = e.target.checked; savePrefs();
+            set_assisted_consumption(prefs.assistConsume);
+        });
+        $('setting-scale').addEventListener('change', (e) => {
+            prefs.scale = Number(e.target.value); savePrefs();
+            set_render_scale(prefs.scale);
+        });
+        $('setting-fov').addEventListener('input', (e) => {
+            prefs.fov = Number(e.target.value); savePrefs();
+            $('fov-value').textContent = `${prefs.fov}°`;
+            set_fov(prefs.fov);
+        });
+        $('setting-generation-workers').addEventListener('change', (e) => {
+            prefs.generationWorkers = normalizeGenerationWorkers(e.target.value);
+            e.target.value = prefs.generationWorkers;
+            savePrefs();
+        });
+
+        // CPU settings event listeners
+        const markCpuCustom = () => {
+            activeCpu.cpuPreset = 'custom';
+            $('setting-cpu-preset').value = 'custom';
+        };
+        $('setting-cpu-preset').addEventListener('change', (e) => {
+            if (!copyCpuPreset(activeCpu, e.target.value)) {
+                markCpuCustom();
+                persistActiveCpu();
+                return;
+            }
+            persistActiveCpu();
+            refreshCpuControls();
+            set_cpu_quality_preset(CPU_PRESETS[activeCpu.cpuPreset].id);
+        });
+        $('setting-cpu-scale').addEventListener('input', (e) => {
+            markCpuCustom(); activeCpu.cpuScale = Number(e.target.value); persistActiveCpu();
+            $('cpu-scale-value').textContent = `${Math.round(activeCpu.cpuScale * 25)}%`;
+            set_cpu_scale(activeCpu.cpuScale);
+        });
+        $('setting-cpu-lod').addEventListener('input', (e) => {
+            markCpuCustom(); activeCpu.cpuLod = Number(e.target.value); persistActiveCpu();
+            $('cpu-lod-value').textContent = Number(activeCpu.cpuLod).toFixed(2);
+            set_cpu_lod_cutoff(activeCpu.cpuLod);
+        });
+        $('setting-cpu-splat').addEventListener('input', (e) => {
+            markCpuCustom(); activeCpu.cpuSplat = Number(e.target.value); persistActiveCpu();
+            $('cpu-splat-value').textContent = Number(activeCpu.cpuSplat).toFixed(1);
+            set_cpu_max_splat_radius(activeCpu.cpuSplat);
+        });
+        $('setting-cpu-depth').addEventListener('input', (e) => {
+            markCpuCustom(); activeCpu.cpuVirtualDepth = Number(e.target.value); persistActiveCpu();
+            $('cpu-depth-value').textContent = String(activeCpu.cpuVirtualDepth);
+            set_cpu_virtual_depth(activeCpu.cpuVirtualDepth);
+        });
+        $('setting-cpu-mip-occupancy').addEventListener('input', (e) => {
+            markCpuCustom(); activeCpu.cpuMipOccupancy = Number(e.target.value); persistActiveCpu();
+            $('cpu-mip-occupancy-value').textContent = `${Math.round(activeCpu.cpuMipOccupancy * 100)}%`;
+            set_cpu_mip_occupancy(activeCpu.cpuMipOccupancy);
+        });
+        $('setting-cpu-dist').addEventListener('input', (e) => {
+            markCpuCustom(); activeCpu.cpuDist = Number(e.target.value); persistActiveCpu();
+            $('cpu-dist-value').textContent = activeCpu.cpuDist;
+            set_cpu_max_draw_distance(activeCpu.cpuDist);
+        });
+        $('setting-cpu-shadows').addEventListener('change', (e) => {
+            markCpuCustom(); activeCpu.cpuShadows = e.target.value; persistActiveCpu();
+            set_cpu_shadows(cpuShadowId(activeCpu.cpuShadows));
+        });
+        $('setting-anomaly-debug').addEventListener('change', (e) => {
+            prefs.anomalyDebug = e.target.checked; savePrefs();
+            set_anomaly_debug(prefs.anomalyDebug);
+        });
+        for (const name of Object.keys(defaultRenderToggles)) {
+            $(`setting-rt-${name}`).addEventListener('change', (e) => {
+                activeRenderToggles[name] = e.target.checked;
+                prefs.renderToggles[name] = e.target.checked;
+                savePrefs();
+                set_render_toggle(name, e.target.checked);
+            });
+        }
+
+        // World tuning sliders live display
+        for (const knob of Object.keys(WORLD_KNOBS)) {
+            $(`setting-${knob}`).addEventListener('input', (e) => {
+                $(`${knob}-value`).textContent = Number(e.target.value).toFixed(1);
+            });
+        }
+
+        // Tab Switching Logic
+        const tabButtons = document.querySelectorAll('.tab-btn');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        tabButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                tabButtons.forEach(b => b.classList.remove('active'));
+                tabContents.forEach(c => c.style.display = 'none');
+
+                btn.classList.add('active');
+                const activeTabId = btn.getAttribute('data-tab');
+                $(activeTabId).style.display = 'block';
+            });
+        });
+
+        // ---- Menu open/close/apply ----------------------------------------
+        $('settings-btn').addEventListener('click', (e) => {
+            e.stopPropagation(); // don't trigger pointer lock
+            settingsMenu.style.display = 'block';
+            overlay.style.pointerEvents = 'none';
+        });
+        // A tap on the button must not bubble to the overlay's tap-to-play.
+        $('settings-btn').addEventListener('touchend', (e) => e.stopPropagation());
+        $('close-settings-btn').addEventListener('click', () => {
+            settingsMenu.style.display = 'none';
+            overlay.style.pointerEvents = 'auto';
+        });
+        // Clicks/taps inside the menu never reach the play overlay.
+        for (const ev of ['click', 'touchend']) {
+            settingsMenu.addEventListener(ev, (e) => e.stopPropagation());
+        }
+
+        $('fullscreen-btn').addEventListener('click', () => {
+            if (document.fullscreenElement) document.exitFullscreen();
+            else document.documentElement.requestFullscreen?.();
+        });
+
+        $('apply-settings-btn').addEventListener('click', () => {
+            const params = new URLSearchParams();
+            const seed = $('setting-seed').value.trim();
+            if (seed) params.set('seed', seed);
+            for (const [knob, urlKey] of Object.entries(WORLD_KNOBS)) {
+                const v = $(`setting-${knob}`).value;
+                if (v !== '' && Number(v) !== 1.0) params.set(urlKey, v);
+            }
+            if ($('setting-quality').value === 'high') params.set('spec', 'high');
+            const voxelSize = $('setting-voxel-size').value;
+            if (voxelSize) params.set('voxel_size', voxelSize);
+            const renderer = $('setting-renderer').value;
+            if (renderer !== 'surface') params.set('renderer', renderer);
+            const backend = $('setting-backend').value;
+            if (backend !== 'auto') params.set('backend', backend);
+            params.set(
+                'workers',
+                normalizeGenerationWorkers($('setting-generation-workers').value),
+            );
+            const forcedAnomaly = $('setting-force-anomaly').value;
+            if (forcedAnomaly) params.set('force_anomaly', forcedAnomaly);
+
+            // A named preset is a complete typed contract. Custom profiles
+            // serialize every scalar with unambiguous canonical names.
+            params.set('cpu_preset', activeCpu.cpuPreset);
+            if (activeCpu.cpuPreset === 'custom') {
+                params.set('cpu_scale', activeCpu.cpuScale);
+                params.set('cpu_lod_px', activeCpu.cpuLod);
+                params.set('cpu_splat_radius_px', activeCpu.cpuSplat);
+                params.set('cpu_virtual_depth', activeCpu.cpuVirtualDepth);
+                params.set('cpu_mip_occupancy', activeCpu.cpuMipOccupancy);
+                params.set('cpu_range', activeCpu.cpuDist);
+                params.set('cpu_shadows', activeCpu.cpuShadows);
+            }
+            for (const [name, enabled] of Object.entries(activeRenderToggles)) {
+                // Serialize the complete effective switchboard. An explicit
+                // `1` must survive reload when this device's saved default is
+                // `false`, otherwise the link is not an exact reproduction.
+                params.set(`rt_${name}`, enabled ? '1' : '0');
+            }
+
+            window.location.search = params.toString();
+        });
+
+        // ---- Boot -----------------------------------------------------------
+        init().then(() => {
+            $('settings-btn').style.display = 'block';
+            applyLivePrefs();
+        }).catch((err) => {
+            $('status-msg').textContent = 'Failed to start engine: ' + err;
+        });
+    </script>
+</body>
+</html>

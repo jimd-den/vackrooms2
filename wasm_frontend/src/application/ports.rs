@@ -1,0 +1,661 @@
+//! Ports (Dependency Inversion boundaries) owned by the application layer.
+//!
+//! The application layer *defines* these interfaces; the outer layers
+//! (adapters / drivers) *implement* them. This keeps the frame loop and
+//! streaming logic testable without a GPU or a browser.
+
+use crate::application::collision::Aabb;
+use vackrooms::domain::entities::anomaly::{LevelExit, PitHazard, RealitySnapshot, TraversalGate};
+use vackrooms::domain::entities::supplies::SupplyItem;
+
+/// Chunk-local fixed-point scale used by [`PackedVertex::position`]. A 20 u
+/// high-spec chunk occupies only 20,480 units, comfortably inside `u16`.
+pub const POSITION_FIXED_SCALE: f32 = 1024.0;
+
+/// Compact vertex consumed by the default surface renderer. Position stays
+/// chunk-local so it has stable precision even far from the origin; normal,
+/// material, baked light, and AO remain compact integer attributes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedVertex {
+    pub position: [u16; 3],
+    pub normal_axis: u8,
+    pub material: u8,
+    pub static_indirect: u8,
+    pub ao: u8,
+}
+
+/// Geometric emission model used by every renderer.
+///
+/// Keeping this in the application contract prevents a driver from silently
+/// turning a downward fluorescent panel into an omnidirectional point light.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LightKind {
+    /// Runtime flares and other lights that radiate in every direction.
+    #[default]
+    Point = 0,
+    /// A rectangular ceiling emitter whose front face points down.
+    CeilingPanel = 1,
+    /// A long rectangular ceiling emitter whose front face points down.
+    Strip = 2,
+    /// A small low-output emergency emitter.
+    Emergency = 3,
+}
+
+impl LightKind {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => Self::Point,
+            1 => Self::CeilingPanel,
+            2 => Self::Strip,
+            3 => Self::Emergency,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LightSource {
+    pub id: u64,
+    pub position: [f32; 3],
+    pub half_size: [f32; 2],
+    pub color: [f32; 3],
+    pub radius: f32,
+    /// Authored luminous strength. Kept independent from radius so a large
+    /// atrium light can be brighter without relying on a driver heuristic.
+    pub intensity: f32,
+    pub kind: LightKind,
+    pub flicker_mode: u8,
+    pub enabled: bool,
+}
+
+impl Default for LightSource {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            position: [0.0; 3],
+            half_size: [0.0; 2],
+            color: [0.0; 3],
+            radius: 0.0,
+            intensity: 0.0,
+            kind: LightKind::Point,
+            flicker_mode: 0,
+            enabled: false,
+        }
+    }
+}
+
+/// One error-selected, axis-aligned visible surface rectangle for the splat
+/// renderer: a greedy-merged face at the chunk's current LOD, extent-capped
+/// so one flat light/shadow sample never smears across a whole wall. 16
+/// bytes, uploaded verbatim as per-instance vertex attributes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedFaceInstance {
+    /// Face-center, chunk-local fixed point ([`POSITION_FIXED_SCALE`]).
+    pub position: [u16; 3],
+    /// Extents in voxel cells along the face's U axis (X for Y/Z faces,
+    /// Y for X faces) and V axis (Z for Y/X faces, Y for Z faces).
+    pub extent_u: u8,
+    pub extent_v: u8,
+    /// Same encoding as [`PackedVertex::normal_axis`].
+    pub normal_axis: u8,
+    pub material: u8,
+    /// Scalar baked voxel light, 0–15.
+    pub baked_light: u8,
+    /// Directional face occlusion bit (0 or 1).
+    pub ao: u8,
+    /// Bit 0: emissive material.
+    pub flags: u8,
+    pub reserved: [u8; 3],
+}
+
+pub const FACE_INSTANCE_FLAG_EMISSIVE: u8 = 1;
+
+/// Contiguous run of face instances inside one culling cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaceCellRange {
+    /// Cell coordinate, chunk-local, in units of [`FaceInstanceSet::cell_size`].
+    pub cell: [u8; 3],
+    pub offset: u32,
+    pub count: u32,
+}
+
+/// Per-chunk face-instance page: instances sorted by culling cell so the
+/// renderer can draw or skip contiguous ranges without per-frame rebuilds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceInstanceSet {
+    pub instances: Vec<PackedFaceInstance>,
+    pub cells: Vec<FaceCellRange>,
+    /// World size of one culling cell in units.
+    pub cell_size: f32,
+}
+
+impl FaceInstanceSet {
+    pub fn empty() -> Self {
+        Self {
+            instances: Vec::new(),
+            cells: Vec::new(),
+            cell_size: 1.0,
+        }
+    }
+}
+
+/// Renderer-selected raster payload for one chunk. Indexed vertices and face
+/// splats are independently optional views over the same greedy-quad source;
+/// collision remains authoritative even when serialized SVO nodes are absent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceMeshPayload {
+    pub vertices: Vec<PackedVertex>,
+    pub indices: Vec<u32>,
+    pub bounds: Aabb,
+    pub lod: u8,
+    /// Face-instance page for the splat renderer. When both representations
+    /// are requested, it is derived from the same quads as `vertices`.
+    pub faces: FaceInstanceSet,
+    /// World size of one voxel cell at this payload's LOD.
+    pub voxel_scale: f32,
+    /// Packed RGB8 3D light-volume probe data.
+    pub light_volume_bytes: Vec<u8>,
+    /// Dimensions of the 3D probe volume (width, height, depth).
+    pub light_volume_dims: [u32; 3],
+}
+
+impl SurfaceMeshPayload {
+    pub fn empty(lod: u8) -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            bounds: Aabb::new([0.0; 3], [0.0; 3]),
+            lod,
+            faces: FaceInstanceSet::empty(),
+            voxel_scale: 1.0,
+            light_volume_bytes: vec![0, 0, 0],
+            light_volume_dims: [1, 1, 1],
+        }
+    }
+}
+
+/// Stable mesh identity, quantized from a chunk origin like the streaming
+/// store's key. The renderer uses it to replace only refined/changed meshes.
+pub type SurfaceChunkKey = (i64, i64);
+
+/// Borrowed incremental surface update. Mesh bytes are uploaded immediately;
+/// no extra clone of a chunk's geometry is needed in the frame loop.
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceChunk<'a> {
+    pub key: SurfaceChunkKey,
+    pub origin: [f32; 3],
+    pub mesh: &'a SurfaceMeshPayload,
+}
+
+/// Per-chunk data the renderer needs to raymarch one chunk of the SVO atlas.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChunkDraw {
+    /// World-space origin (min corner) of the chunk's SVO cube.
+    pub origin: [f32; 3],
+    /// Root node index within the merged SVO atlas.
+    pub root_index: i32,
+    /// Side length of the chunk's SVO cube in world units.
+    pub world_size: f32,
+    /// Exact world-space edge length of a leaf voxel at this chunk's LOD.
+    /// Never infer this from `world_size`: the SVO cube is power-of-two
+    /// padded and deliberately larger than the logical chunk.
+    pub voxel_size: f32,
+    /// Exact SVO depth. Kept beside the voxel size so traversal has no
+    /// profile-specific constants or hidden maximum-depth guesses.
+    pub svo_depth: u8,
+}
+
+/// Upper bound on per-frame dynamic lights handed to renderers (flares).
+pub const MAX_DYNAMIC_LIGHTS: usize = 4;
+
+/// Compatibility budget for callers that still expose fixed light arrays.
+/// Production WebGPU strategies use dynamically sized frame storage.
+pub const MAX_SCENE_LIGHTS: usize = 16;
+
+/// A short-lived runtime light (dropped flare). World-space state owned by
+/// the engine — never part of chunk payloads, baked light volumes, or the
+/// reality snapshot. Renderers treat it as one more point light; intensity
+/// already includes CPU-side flicker and fade so no shader needs a clock.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DynamicLight {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+/// Per-level atmosphere handed to every renderer with the frame, so a level
+/// switch (noclip) changes the sky/fog/ambient identically in the surface,
+/// splat, raymarch, and CPU paths. `outdoor == false` means "keep your
+/// interior Backrooms look" — the colors below are only consulted outdoors,
+/// which keeps the four hand-tuned indoor palettes byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Environment {
+    /// True on open-sky levels (the grassland). Renderers clear to
+    /// `sky_color`, fog toward `fog_color`, and scale ambient response.
+    pub outdoor: bool,
+    /// Clear color behind all geometry.
+    pub sky_color: [f32; 3],
+    /// Distance-fog blend target (slightly hazier than the sky).
+    pub fog_color: [f32; 3],
+    /// Multiplier on the ambient/indirect lighting response (>1 = daylight).
+    pub ambient_scale: f32,
+    /// Beer-Lambert extinction coefficient in inverse world units.
+    pub fog_density: f32,
+    /// Clear near-field distance before extinction begins.
+    pub fog_start: f32,
+}
+
+impl Environment {
+    /// Level 0 and every other interior: renderers use their own palettes.
+    pub fn interior() -> Self {
+        Self {
+            outdoor: false,
+            sky_color: [0.0, 0.0, 0.0],
+            // Linear RGB; display encoding happens exactly once after fog.
+            fog_color: [0.020, 0.014, 0.0045],
+            ambient_scale: 1.0,
+            fog_density: 0.018,
+            fog_start: 12.0,
+        }
+    }
+
+    /// Level 1, the Habitable Zone: dim concrete under a low-hanging fog
+    /// with no discernible source, colder and murkier than Level 0.
+    pub fn habitable() -> Self {
+        Self {
+            outdoor: false,
+            sky_color: [0.0, 0.0, 0.0],
+            // Linear RGB; a cold grey haze rather than Level 0's amber.
+            fog_color: [0.016, 0.018, 0.021],
+            ambient_scale: 0.85,
+            fog_density: 0.045,
+            fog_start: 5.0,
+        }
+    }
+
+    /// Level 34 grassland: a bright daylight sky.
+    pub fn daylight() -> Self {
+        Self {
+            outdoor: true,
+            // Linear equivalents of the authored sRGB sky/haze palette.
+            sky_color: [0.243, 0.477, 0.827],
+            fog_color: [0.393, 0.570, 0.827],
+            ambient_scale: 2.2,
+            fog_density: 0.012,
+            fog_start: 18.0,
+        }
+    }
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self::interior()
+    }
+}
+
+/// A camera-facing label floating over a supply pickup. The atlas row
+/// selects which product logo the quad shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SupplySprite {
+    /// World-space center of the label quad.
+    pub position: [f32; 3],
+    /// Atlas row: 0 = almond water, 1 = rations.
+    pub atlas_row: u8,
+}
+
+/// Most label sprites a single frame will draw.
+pub const MAX_SUPPLY_SPRITES: usize = 16;
+
+/// Camera state for one frame, in world space.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameParams {
+    pub camera_pos: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub flashlight: bool,
+    /// Nearest active flares, distance-culled; only the first
+    /// `dynamic_light_count` entries are meaningful.
+    pub dynamic_lights: [DynamicLight; MAX_DYNAMIC_LIGHTS],
+    pub dynamic_light_count: u8,
+    /// Every finite, enabled, deduplicated world fixture. Correctness-first
+    /// renderers must not discard a light merely because it is far from the
+    /// camera: it can still be local to a visible distant receiver.
+    pub scene_lights: Vec<LightSource>,
+    /// Level atmosphere (sky, fog, ambient scale).
+    pub environment: Environment,
+    /// Nearby supply labels, nearest first, at most [`MAX_SUPPLY_SPRITES`].
+    pub supply_sprites: Vec<SupplySprite>,
+}
+
+impl FrameParams {
+    pub fn active_dynamic_lights(&self) -> &[DynamicLight] {
+        let count = (self.dynamic_light_count as usize).min(self.dynamic_lights.len());
+        &self.dynamic_lights[..count]
+    }
+
+    pub fn active_scene_lights(&self) -> &[LightSource] {
+        &self.scene_lights
+    }
+}
+
+impl Default for FrameParams {
+    fn default() -> Self {
+        Self {
+            camera_pos: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            flashlight: false,
+            dynamic_lights: [DynamicLight::default(); MAX_DYNAMIC_LIGHTS],
+            dynamic_light_count: 0,
+            scene_lights: Vec::new(),
+            environment: Environment::default(),
+            supply_sprites: Vec::new(),
+        }
+    }
+}
+
+/// Renderer-selected chunk artifacts, encoded as a stable compact bitfield.
+///
+/// Collision and semantic data are application requirements and are always
+/// generated. These bits describe only optional presentation products, so a
+/// raymarcher never pays to build greedy faces and a rasterizer never pays to
+/// serialize GPU SVO nodes.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RenderArtifactNeeds(u8);
+
+impl RenderArtifactNeeds {
+    const INDEXED_SURFACE_MESH_BIT: u8 = 1 << 0;
+    const FACE_SPLATS_BIT: u8 = 1 << 1;
+    const SVO_NODES_BIT: u8 = 1 << 2;
+    const KNOWN_BITS: u8 =
+        Self::INDEXED_SURFACE_MESH_BIT | Self::FACE_SPLATS_BIT | Self::SVO_NODES_BIT;
+
+    pub const NONE: Self = Self(0);
+    pub const SURFACE: Self = Self(Self::INDEXED_SURFACE_MESH_BIT);
+    pub const SPLAT: Self = Self(Self::FACE_SPLATS_BIT);
+    pub const RAYMARCH: Self = Self(Self::SVO_NODES_BIT);
+    pub const CPU: Self = Self(Self::SVO_NODES_BIT);
+    pub const ALL: Self = Self(Self::KNOWN_BITS);
+
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !Self::KNOWN_BITS == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn indexed_surface_mesh(self) -> bool {
+        self.0 & Self::INDEXED_SURFACE_MESH_BIT != 0
+    }
+
+    pub const fn face_splats(self) -> bool {
+        self.0 & Self::FACE_SPLATS_BIT != 0
+    }
+
+    pub const fn svo_nodes(self) -> bool {
+        self.0 & Self::SVO_NODES_BIT != 0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn needs_surface_extraction(self) -> bool {
+        self.indexed_surface_mesh() || self.face_splats()
+    }
+}
+
+/// Abstraction over the actual renderer back end.
+/// Implemented by `drivers::webgpu::renderer::WebGpuRenderer` in the browser
+/// and by recording test doubles in native unit tests.
+pub trait RendererPort {
+    /// Optional presentation products consumed by this renderer. The default
+    /// preserves older test doubles while concrete renderers report the exact
+    /// representation they own.
+    fn artifact_needs(&self) -> RenderArtifactNeeds {
+        if self.uses_surface_meshes() {
+            RenderArtifactNeeds::SURFACE
+        } else {
+            RenderArtifactNeeds::RAYMARCH
+        }
+    }
+
+    /// Compatibility query for older callers and test doubles. New code uses
+    /// [`Self::artifact_needs`]; true means some surface-derived representation
+    /// is required, not necessarily an indexed mesh.
+    fn uses_surface_meshes(&self) -> bool {
+        false
+    }
+
+    /// Incrementally uploads newly loaded or refined chunk meshes.
+    fn upload_surfaces(&mut self, _chunks: &[SurfaceChunk<'_>]) {}
+
+    /// Releases meshes for chunks that left the streaming footprint.
+    fn remove_surfaces(&mut self, _keys: &[SurfaceChunkKey]) {}
+
+    /// Drops all resident meshes (used when noclipping to another level).
+    fn clear_surfaces(&mut self) {}
+
+    /// Telemetry data from the CPU reference strategy, if applicable.
+    fn cpu_telemetry_string(&self) -> Option<String> {
+        None
+    }
+
+    /// Uploads the merged SVO node atlas (four `u32` words per node, padded
+    /// in 1024-node rows; see `OctreeGpuSerializer` in the core).
+    fn upload_atlas(&mut self, texels: &[u32]);
+
+    /// Overwrites whole atlas rows starting at `first_row` (1024 nodes per
+    /// row) without reallocating or re-uploading the rest of the atlas.
+    /// Returns `false` if the back end can't do partial updates (or has no
+    /// atlas yet), in which case the caller must fall back to `upload_atlas`.
+    fn upload_atlas_rows(&mut self, _first_row: u32, _texels: &[u32]) -> bool {
+        false
+    }
+
+    /// Receives the decoded RGBA label atlas (stacked product logos). Ships
+    /// once at boot; renderers without a sprite path simply ignore it.
+    fn upload_label_atlas(&mut self, _rgba: &[u8], _width: u32, _height: u32) {}
+
+    /// Draws one frame: fullscreen raymarch of every chunk in `chunks`.
+    fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]);
+}
+
+/// A fully prepared chunk as the application consumes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkPayload {
+    /// Root node index local to this chunk's `nodes` array.
+    pub root: u32,
+    /// GPU-serialized SVO nodes (row-padded, 4 u32 per node).
+    pub nodes: Vec<u32>,
+    /// Side length of the SVO cube in world units.
+    pub world_size: f32,
+    /// Exact leaf size/depth used to build `nodes`.
+    pub voxel_size: f32,
+    pub svo_depth: u8,
+    /// Renderer-selected raster artifacts. Unrequested representations are
+    /// empty while bounds/LOD metadata stays valid for the selected path.
+    pub surface: SurfaceMeshPayload,
+    /// Renderer-neutral analytic emitters used by rendering and thermal
+    /// simulation even when no surface artifact was requested.
+    pub lights: Vec<LightSource>,
+    /// Solid-voxel bounding boxes in world space, for player collision.
+    pub collision: Vec<Aabb>,
+    /// Semantic threshold planes derived by the same generation snapshot as
+    /// the voxel grid. The engine folds crossings into the next reality.
+    pub traversal_gates: Vec<TraversalGate>,
+    /// Authored floor openings with deterministic recovery destinations.
+    pub pit_hazards: Vec<PitHazard>,
+    /// Consumable pickups exported beside the geometry.
+    pub supply_items: Vec<SupplyItem>,
+    /// Physical doorways to other Backrooms levels.
+    pub level_exits: Vec<LevelExit>,
+}
+
+/// One background chunk-load order, echoed back verbatim with its result so
+/// the engine can reject stale work (wrong level, chunk no longer desired,
+/// or already refined past this LOD).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkRequest {
+    /// Monotonic identity assigned by the engine. A completion may only
+    /// clear the pending entry carrying this exact id; this prevents a late
+    /// result from an evicted/re-requested chunk from cancelling newer work.
+    pub request_id: u32,
+    pub origin_x: f32,
+    pub origin_z: f32,
+    pub level: u32,
+    pub lod: u8,
+    /// Compact renderer-owned presentation request, echoed by workers as part
+    /// of exact asynchronous request identity.
+    pub artifacts: RenderArtifactNeeds,
+    /// Immutable encounter state used to generate this chunk. It is part of
+    /// request identity, not ambient worker state.
+    pub reality: RealitySnapshot,
+}
+
+impl ChunkRequest {
+    /// Exact identity check for asynchronous completion validation. Origins
+    /// compare by bits so this remains an identity operation rather than an
+    /// approximate spatial comparison.
+    pub fn is_same_request(&self, other: &Self) -> bool {
+        self.request_id == other.request_id
+            && self.origin_x.to_bits() == other.origin_x.to_bits()
+            && self.origin_z.to_bits() == other.origin_z.to_bits()
+            && self.level == other.level
+            && self.lod == other.lod
+            && self.artifacts == other.artifacts
+            && self.reality == other.reality
+    }
+}
+
+/// A finished background load.
+#[derive(Debug)]
+pub struct CompletedChunk {
+    pub request: ChunkRequest,
+    pub payload: ChunkPayload,
+}
+
+/// Abstraction over where chunks come from. The browser build implements
+/// this with in-wasm procedural generation (`adapters::local_chunk_source`)
+/// or a Web Worker pool (`drivers::worker_source`); a networked build could
+/// implement it with HTTP fetches instead.
+pub trait ChunkSourcePort {
+    /// Loads the chunk at `origin` for the given Backrooms level
+    /// (0 = backrooms, 34 = grassland; see the core's `level_generator`).
+    ///
+    /// `lod` selects the level of detail: 0 is full resolution and each
+    /// step doubles the voxel size, costing ~1/8 as much to produce. Any
+    /// LOD of a chunk covers the same world cube (`world_size` invariant),
+    /// so payloads are interchangeable to the renderer.
+    fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload;
+
+    /// Loads against an explicit immutable reality snapshot. Stateless
+    /// sources retain source compatibility through the default implementation;
+    /// procedural sources override this and route the snapshot into generation.
+    fn load_with_reality(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+    ) -> ChunkPayload {
+        let _ = reality;
+        self.load(origin_x, origin_z, level, lod)
+    }
+
+    /// Loads against an explicit reality while requesting only the optional
+    /// presentation products consumed by the active renderer. Sources that
+    /// do not specialize artifact production remain compatible by generating
+    /// their ordinary complete payload.
+    fn load_with_artifacts(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+        artifacts: RenderArtifactNeeds,
+    ) -> ChunkPayload {
+        let _ = artifacts;
+        self.load_with_reality(origin_x, origin_z, level, lod, reality)
+    }
+
+    /// True when the source generates in the background. The engine then
+    /// drives it with [`Self::request`]/[`Self::poll_completed`] instead of
+    /// the blocking [`Self::load`], keeping the frame loop responsive.
+    fn is_async(&self) -> bool {
+        false
+    }
+
+    /// Maximum useful number of simultaneous background requests. Async
+    /// transports override this so streaming can saturate their worker pool
+    /// without coupling the application layer to browser worker types.
+    fn max_concurrent_requests(&self) -> usize {
+        1
+    }
+
+    /// Queues a background load. Deduplication is the caller's concern.
+    fn request(&mut self, _request: ChunkRequest) {}
+
+    /// Takes every finished background load. Results may arrive in any
+    /// order and may be stale; the caller validates against its own state.
+    fn poll_completed(&mut self) -> Vec<CompletedChunk> {
+        Vec::new()
+    }
+
+    /// Takes requests which the asynchronous transport definitively could
+    /// not complete. The engine validates the full request identity before
+    /// clearing pending state, then issues a fresh request on the same tick.
+    /// Synchronous sources and infallible test doubles need not override it.
+    fn poll_failed_requests(&mut self) -> Vec<ChunkRequest> {
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::RenderArtifactNeeds;
+
+    #[test]
+    fn artifact_bitfield_round_trips_every_valid_combination() {
+        for bits in 0..=RenderArtifactNeeds::ALL.bits() {
+            let needs = RenderArtifactNeeds::from_bits(bits).expect("known bit combination");
+            assert_eq!(needs.bits(), bits);
+            assert_eq!(needs.indexed_surface_mesh(), bits & 1 != 0);
+            assert_eq!(needs.face_splats(), bits & 2 != 0);
+            assert_eq!(needs.svo_nodes(), bits & 4 != 0);
+        }
+        assert_eq!(RenderArtifactNeeds::from_bits(1 << 7), None);
+    }
+
+    #[test]
+    fn renderer_artifact_sets_are_minimal_and_composable() {
+        assert!(RenderArtifactNeeds::SURFACE.indexed_surface_mesh());
+        assert!(!RenderArtifactNeeds::SURFACE.face_splats());
+        assert!(!RenderArtifactNeeds::SURFACE.svo_nodes());
+
+        assert!(!RenderArtifactNeeds::SPLAT.indexed_surface_mesh());
+        assert!(RenderArtifactNeeds::SPLAT.face_splats());
+        assert!(!RenderArtifactNeeds::SPLAT.svo_nodes());
+
+        assert_eq!(RenderArtifactNeeds::RAYMARCH, RenderArtifactNeeds::CPU);
+        assert!(RenderArtifactNeeds::CPU.svo_nodes());
+        assert_eq!(
+            RenderArtifactNeeds::SURFACE
+                .union(RenderArtifactNeeds::SPLAT)
+                .union(RenderArtifactNeeds::RAYMARCH),
+            RenderArtifactNeeds::ALL,
+        );
+    }
+}

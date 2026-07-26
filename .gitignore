@@ -1,0 +1,8 @@
+/target
+/dist
+/node_modules
+repomix-output.xml
+repomix-output.json
+repomix-output.md
+*.py
+ARCHITECTURE.md
