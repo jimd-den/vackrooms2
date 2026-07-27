@@ -15,6 +15,7 @@ use crate::domain::entities::voxel_grid::{
 };
 use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::level_generator::LevelGenerator;
 use crate::use_cases::ports::NoiseProvider;
 
@@ -48,7 +49,7 @@ impl LevelGenerator for GrasslandLevel {
         config: GeneratorConfig,
         noise: &dyn NoiseProvider,
         _reality: &crate::domain::entities::anomaly::RealitySnapshot,
-    ) -> VoxelGrid {
+    ) -> GeneratedChunk {
         let s = config.voxel_scale;
         let width = (config.chunk_size / s).round() as usize;
         let depth = (config.chunk_size / s).round() as usize;
@@ -112,7 +113,7 @@ impl LevelGenerator for GrasslandLevel {
             }
         }
 
-        grid
+        GeneratedChunk::new(grid)
     }
 }
 
@@ -121,7 +122,7 @@ mod tests {
     use super::*;
     use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
-    fn generate(ox: f32, oz: f32) -> VoxelGrid {
+    fn generate(ox: f32, oz: f32) -> GeneratedChunk {
         GrasslandLevel.generate(
             Position::new(ox, oz),
             42,

@@ -10,6 +10,7 @@ use crate::domain::entities::architecture::{LightKind, RegionPlan, RuntimeLight}
 use crate::domain::entities::position::Position;
 use crate::domain::entities::voxel_grid::VoxelGrid;
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::infinite_level::InfiniteRegionWindow;
 use crate::use_cases::level_generator::LevelGenerator;
 use crate::use_cases::ports::NoiseProvider;
@@ -285,12 +286,12 @@ impl LevelGenerator for BackroomsLevel {
         config: GeneratorConfig,
         noise: &dyn NoiseProvider,
         reality: &RealitySnapshot,
-    ) -> VoxelGrid {
+    ) -> GeneratedChunk {
         let s = config.voxel_scale;
         let width = (config.chunk_size / s).round() as usize;
         let depth = (config.chunk_size / s).round() as usize;
         let height = (GRID_HEIGHT_UNITS / s) as usize;
-        let mut grid = VoxelGrid::new(width, height, depth);
+        let mut chunk = GeneratedChunk::new(VoxelGrid::new(width, height, depth));
 
         // Base plans remain available for the authored threshold and for
         // ordinary reality. A committed Red Room adds a second, explicitly
@@ -326,9 +327,9 @@ impl LevelGenerator for BackroomsLevel {
         );
         let (gates, hazards) =
             decide_traversal_gates_and_hazards(&plans, recursive_level.as_ref(), chunk_bounds);
-        grid.traversal_gates.extend(gates);
-        grid.pit_hazards.extend(hazards);
-        grid.runtime_lights.extend(decide_runtime_lights(
+        chunk.entities.traversal_gates.extend(gates);
+        chunk.entities.pit_hazards.extend(hazards);
+        chunk.entities.runtime_lights.extend(decide_runtime_lights(
             &plans,
             recursive_level.as_ref(),
             chunk_pos,
@@ -373,13 +374,13 @@ impl LevelGenerator for BackroomsLevel {
         };
 
         let columns = ColumnField::sample(width, depth, plan_at);
-        voxelize_columns(&mut grid, &columns, s);
+        voxelize_columns(&mut chunk, &columns, s);
 
         // Provisions live only in ordinary Level 0 space: a committed Red
         // Room's recursive address stays barren by design.
         if recursive_level.is_none() {
             super::provisions::stamp_level_zero_provisions(
-                &mut grid,
+                &mut chunk,
                 chunk_pos,
                 &super::provisions::ProvisionContext {
                     seed,
@@ -391,7 +392,7 @@ impl LevelGenerator for BackroomsLevel {
             );
         }
 
-        grid
+        chunk
     }
 }
 

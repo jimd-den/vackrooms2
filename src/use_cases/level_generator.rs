@@ -15,8 +15,8 @@
 
 use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::position::Position;
-use crate::domain::entities::voxel_grid::VoxelGrid;
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::ports::NoiseProvider;
 
 /// Well-known level ids (the `GeneratorConfig::level` / noclip targets).
@@ -39,7 +39,7 @@ pub trait LevelGenerator {
         config: GeneratorConfig,
         noise: &dyn NoiseProvider,
         reality: &RealitySnapshot,
-    ) -> VoxelGrid;
+    ) -> GeneratedChunk;
 
     /// Convenience entry point for tools that deliberately request epoch zero.
     /// `chunk_pos` is the chunk origin in world units.
@@ -49,7 +49,7 @@ pub trait LevelGenerator {
         seed: u32,
         config: GeneratorConfig,
         noise: &dyn NoiseProvider,
-    ) -> VoxelGrid {
+    ) -> GeneratedChunk {
         self.generate_with_reality(chunk_pos, seed, config, noise, &RealitySnapshot::empty())
     }
 }

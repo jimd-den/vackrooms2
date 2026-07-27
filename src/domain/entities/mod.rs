@@ -1,8 +1,11 @@
 pub mod anomaly;
 pub mod architecture;
+pub mod cad;
 pub mod cell;
+pub mod chunk_entities;
 pub mod environment;
 pub mod grid;
+pub mod morton;
 pub mod player_vitals;
 pub mod position;
 pub mod probe_grid;

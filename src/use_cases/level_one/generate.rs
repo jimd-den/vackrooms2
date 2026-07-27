@@ -10,6 +10,7 @@ use crate::domain::entities::voxel_grid::{
 use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::level_generator::{LEVEL_BACKROOMS, LevelGenerator};
 use crate::use_cases::level_zero::{ColumnField, ColumnPlan, voxelize_columns};
 use crate::use_cases::ports::NoiseProvider;
@@ -499,12 +500,12 @@ impl LevelGenerator for HabitableLevel {
         config: GeneratorConfig,
         _noise: &dyn NoiseProvider,
         reality: &RealitySnapshot,
-    ) -> VoxelGrid {
+    ) -> GeneratedChunk {
         let s = config.voxel_scale;
         let width = (config.chunk_size / s).round() as usize;
         let depth = (config.chunk_size / s).round() as usize;
         let height = (GRID_HEIGHT_UNITS / s) as usize;
-        let mut grid = VoxelGrid::new(width, height, depth);
+        let mut chunk = GeneratedChunk::new(VoxelGrid::new(width, height, depth));
 
         let plan_at = |lx: i64, lz: i64| -> ColumnPlan {
             let wx = chunk_pos.x + (lx as f32 + 0.5) * s;
@@ -512,7 +513,7 @@ impl LevelGenerator for HabitableLevel {
             HabitableLevel::plan_column(seed, wx, wz)
         };
         let columns = ColumnField::sample(width, depth, plan_at);
-        voxelize_columns(&mut grid, &columns, s);
+        voxelize_columns(&mut chunk, &columns, s);
 
         // Supplies: exported beside the geometry, markers stamped after
         // voxelization so a crate top can hold a bottle. Enumeration runs
@@ -531,13 +532,13 @@ impl LevelGenerator for HabitableLevel {
             config.tuning.rations,
             reality,
         ) {
-            stamp_supply_marker(&mut grid, chunk_pos, s, &item);
+            stamp_supply_marker(&mut chunk, chunk_pos, s, &item);
             if item.position.x >= chunk_pos.x
                 && item.position.x < max_x
                 && item.position.z >= chunk_pos.z
                 && item.position.z < max_z
             {
-                grid.supply_items.push(item);
+                chunk.entities.supply_items.push(item);
             }
         }
 
@@ -548,7 +549,7 @@ impl LevelGenerator for HabitableLevel {
             && RETURN_DOOR.1 < max_z + 2.0;
         if door_bounds_this_chunk {
             stamp_level_door(
-                &mut grid,
+                &mut chunk,
                 chunk_pos,
                 s,
                 RETURN_DOOR.0,
@@ -561,7 +562,7 @@ impl LevelGenerator for HabitableLevel {
             && RETURN_DOOR.1 >= chunk_pos.z
             && RETURN_DOOR.1 < max_z
         {
-            grid.level_exits.push(LevelExit {
+            chunk.entities.level_exits.push(LevelExit {
                 id: hash(seed, 0xD00E_0000_0000_0001, 1, 0),
                 target_level: LEVEL_BACKROOMS,
                 center: Position::new(RETURN_DOOR.0, RETURN_DOOR.1),
@@ -570,6 +571,6 @@ impl LevelGenerator for HabitableLevel {
             });
         }
 
-        grid
+        chunk
     }
 }

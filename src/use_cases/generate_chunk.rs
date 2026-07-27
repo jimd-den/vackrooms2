@@ -1,6 +1,6 @@
 use crate::domain::entities::anomaly::RealitySnapshot;
-use crate::domain::entities::voxel_grid::VoxelGrid;
 use crate::domain::entities::position::Position;
+use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::legacy_blueprint;
 use crate::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
@@ -322,7 +322,12 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         }
     }
 
-    pub fn execute(&self, chunk_pos: Position, seed: u32, config: GeneratorConfig) -> VoxelGrid {
+    pub fn execute(
+        &self,
+        chunk_pos: Position,
+        seed: u32,
+        config: GeneratorConfig,
+    ) -> GeneratedChunk {
         self.execute_with_reality(chunk_pos, seed, config, &RealitySnapshot::default())
     }
 
@@ -335,7 +340,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         seed: u32,
         config: GeneratorConfig,
         reality: &RealitySnapshot,
-    ) -> VoxelGrid {
+    ) -> GeneratedChunk {
         // Pluggable levels: everything except the legacy office blueprint
         // (level 90, kept inline below) goes through the LevelGenerator port.
         // Level 0 is the architecturally *planned* Backrooms: region plans
@@ -378,13 +383,13 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
             return grid;
         }
 
-        legacy_blueprint::generate_legacy_blueprint(
+        GeneratedChunk::new(legacy_blueprint::generate_legacy_blueprint(
             self.noise_provider,
             self.telemetry,
             chunk_pos,
             seed,
             config,
-        )
+        ))
     }
 }
 
