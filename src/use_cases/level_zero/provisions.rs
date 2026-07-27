@@ -14,6 +14,7 @@ use crate::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_WALL, VoxelGrid};
 use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::infinite_level::InfiniteRegionWindow;
 use crate::use_cases::level_generator::LEVEL_HABITABLE;
 use crate::use_cases::level_one::generate::{
@@ -158,7 +159,7 @@ fn decide_supply_items(chunk_pos: Position, ctx: &ProvisionContext<'_>) -> Vec<S
 /// Stamps supplies and doors into one Level 0 chunk and exports their
 /// semantic records. Never called for recursive (red-room-interior) chunks.
 pub(crate) fn stamp_level_zero_provisions(
-    grid: &mut VoxelGrid,
+    chunk: &mut GeneratedChunk,
     chunk_pos: Position,
     ctx: &ProvisionContext<'_>,
 ) {
@@ -183,9 +184,9 @@ pub(crate) fn stamp_level_zero_provisions(
     };
 
     for item in decide_supply_items(chunk_pos, ctx) {
-        stamp_supply_marker(grid, chunk_pos, s, &item);
+        stamp_supply_marker(chunk, chunk_pos, s, &item);
         if in_chunk(item.position.x, item.position.z) {
-            grid.supply_items.push(item);
+            chunk.entities.supply_items.push(item);
         }
     }
 
@@ -227,10 +228,10 @@ pub(crate) fn stamp_level_zero_provisions(
                 continue;
             }
 
-            carve_door_clearing(grid, chunk_pos, s, dx, dz);
-            stamp_level_door(grid, chunk_pos, s, dx, dz, VOXEL_WALL);
+            carve_door_clearing(chunk, chunk_pos, s, dx, dz);
+            stamp_level_door(chunk, chunk_pos, s, dx, dz, VOXEL_WALL);
             if in_chunk(dx, dz) {
-                grid.level_exits.push(LevelExit {
+                chunk.entities.level_exits.push(LevelExit {
                     id: hash(ctx.seed, 0xD00E_0000_0000_1D00, rx, rz),
                     target_level: LEVEL_HABITABLE,
                     center: Position::new(dx, dz),

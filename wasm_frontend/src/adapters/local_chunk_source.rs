@@ -22,6 +22,7 @@ use vackrooms::domain::entities::voxel_grid::{
 use vackrooms::domain::entities::position::Position;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
+use vackrooms::use_cases::compress_svdag::compress_svdag;
 use vackrooms::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
 use crate::adapters::collect_emissive_lights::collect_emissive_lights;
@@ -115,9 +116,14 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             .execute(&grid, svo_depth, config.svo_world_size());
 
         let (root, nodes) = if artifacts.svo_nodes() {
+            // SVDAG upload: identical subtrees collapse to one shared block.
+            // Traversal-only consumers (the raymarch shader) are agnostic;
+            // the collision walk below deliberately keeps the tree because
+            // it visits arena nodes positionally.
+            let (dag, _stats) = compress_svdag(&svo);
             (
-                svo.root as u32,
-                OctreeGpuSerializer::serialize_to_gpu_data(&svo).texel_data,
+                dag.root as u32,
+                OctreeGpuSerializer::serialize_to_gpu_data(&dag).texel_data,
             )
         } else {
             (0, Vec::new())
@@ -133,10 +139,10 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             surface,
             lights,
             collision,
-            traversal_gates: halo_grid.traversal_gates.clone(),
-            pit_hazards: halo_grid.pit_hazards.clone(),
-            supply_items: halo_grid.supply_items.clone(),
-            level_exits: halo_grid.level_exits.clone(),
+            traversal_gates: halo_grid.entities.traversal_gates.clone(),
+            pit_hazards: halo_grid.entities.pit_hazards.clone(),
+            supply_items: halo_grid.entities.supply_items.clone(),
+            level_exits: halo_grid.entities.level_exits.clone(),
         }
     }
 }

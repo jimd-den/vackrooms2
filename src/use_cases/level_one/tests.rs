@@ -12,6 +12,7 @@ use crate::domain::entities::voxel_grid::{
 use crate::domain::entities::supplies::SupplyItem;
 use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::level_generator::{LEVEL_BACKROOMS, LevelGenerator};
 use crate::use_cases::ports::NoiseProvider;
 
@@ -26,7 +27,7 @@ fn config() -> GeneratorConfig {
     GeneratorConfig::low_spec().with_level(1)
 }
 
-fn generate(chunk_x: f32, chunk_z: f32) -> VoxelGrid {
+fn generate(chunk_x: f32, chunk_z: f32) -> GeneratedChunk {
     HabitableLevel.generate(Position::new(chunk_x, chunk_z), 42, config(), &FlatNoise)
 }
 
@@ -45,7 +46,7 @@ fn generation_is_deterministic() {
             }
         }
     }
-    assert_eq!(a.supply_items, b.supply_items);
+    assert_eq!(a.entities.supply_items, b.entities.supply_items);
 }
 
 #[test]
@@ -110,8 +111,8 @@ fn sectors_are_deterministic_and_all_four_exist_nearby() {
 #[test]
 fn arrival_chunk_exports_the_return_door_and_marker_geometry() {
     let grid = generate(0.0, -10.0);
-    assert_eq!(grid.level_exits.len(), 1);
-    let exit = grid.level_exits[0];
+    assert_eq!(grid.entities.level_exits.len(), 1);
+    let exit = grid.entities.level_exits[0];
     assert_eq!(exit.target_level, LEVEL_BACKROOMS);
     assert!(exit.contains(2.0, -2.0));
     assert!(
@@ -144,7 +145,7 @@ fn supplies_export_and_respect_consumed_reality() {
         for cx in 0..12 {
             let (ox, oz) = (cx as f32 * 10.0 + 40.0, cz as f32 * 10.0 + 40.0);
             let grid = generate(ox, oz);
-            if let Some(item) = grid.supply_items.first().copied() {
+            if let Some(item) = grid.entities.supply_items.first().copied() {
                 found = Some((ox, oz, item));
                 break 'outer;
             }
@@ -170,7 +171,7 @@ fn supplies_export_and_respect_consumed_reality() {
         &FlatNoise,
         &consumed_reality,
     );
-    assert!(after.supply_items.iter().all(|s| s.id != item.id));
+    assert!(after.entities.supply_items.iter().all(|s| s.id != item.id));
     let count_markers = |grid: &VoxelGrid| {
         let mut markers = 0;
         for z in 0..grid.depth() {

@@ -10,19 +10,6 @@ pub struct VoxelGrid {
     light_data: Vec<u8>,
     /// Colored flood-fill light, 0-15 per channel.
     light_rgb: Vec<[u8; 3]>,
-    pub runtime_lights: Vec<crate::domain::entities::architecture::RuntimeLight>,
-    /// Semantic threshold planes emitted by the same architectural pass as
-    /// geometry. The application consumes them to advance deterministic
-    /// anomaly epochs; render/collision never invent a separate reality.
-    pub traversal_gates: Vec<crate::domain::entities::anomaly::TraversalGate>,
-    /// Real floor openings that relocate the player when entered.
-    pub pit_hazards: Vec<crate::domain::entities::anomaly::PitHazard>,
-    /// Consumable pickups placed by the same generation pass as their
-    /// marker voxels. Consumption is reality state, not grid state.
-    pub supply_items: Vec<crate::domain::entities::supplies::SupplyItem>,
-    /// Physical doorways between Backrooms levels. The application flushes
-    /// and re-streams the world when the player steps through one.
-    pub level_exits: Vec<crate::domain::entities::anomaly::LevelExit>,
     /// Six neighbor-occupancy bits prepared by the geometry source. A set bit
     /// means that face touches solid matter; clearing it means the face is
     /// exposed to air. Streaming generation computes this from its halo, so
@@ -141,11 +128,6 @@ impl VoxelGrid {
             data: vec![VOXEL_AIR; size],
             light_data: vec![0; size],
             light_rgb: vec![[0; 3]; size],
-            runtime_lights: Vec::new(),
-            traversal_gates: Vec::new(),
-            pit_hazards: Vec::new(),
-            supply_items: Vec::new(),
-            level_exits: Vec::new(),
             face_occlusion: vec![0; size],
         }
     }

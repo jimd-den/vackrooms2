@@ -11,6 +11,7 @@ use crate::domain::entities::voxel_grid::{
 };
 use crate::use_cases::anomalies::geometry::sample_anomaly;
 use crate::use_cases::generate_chunk::{GeneratorConfig, LevelTuning};
+use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::level_generator::LevelGenerator;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::red_rooms::geometry::sample_red_room;
@@ -63,7 +64,7 @@ impl NoiseProvider for TestNoise {
     }
 }
 
-fn generate(ox: f32, oz: f32) -> VoxelGrid {
+fn generate(ox: f32, oz: f32) -> GeneratedChunk {
     BackroomsLevel.generate(
         Position::new(ox, oz),
         42,
@@ -829,22 +830,25 @@ fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
     // Chunk (170, -120)..(180, -110) contains the authored door (172, -116).
     let chunk = Position::new(170.0, -120.0);
     let grid = BackroomsLevel.generate(chunk, 42, config, &noise);
-    assert_eq!(grid.level_exits.len(), 1, "authored door must export");
-    let exit = grid.level_exits[0];
+    assert_eq!(grid.entities.level_exits.len(), 1, "authored door must export");
+    let exit = grid.entities.level_exits[0];
     assert_eq!(exit.target_level, 1);
     assert!(exit.contains(172.0, -116.0));
 
     let mut doorless = config;
     doorless.tuning.level_doors = 0.0;
     let grid = BackroomsLevel.generate(chunk, 42, doorless, &noise);
-    assert!(grid.level_exits.is_empty(), "level_doors=0 removes doors");
+    assert!(
+        grid.entities.level_exits.is_empty(),
+        "level_doors=0 removes doors"
+    );
 
     let mut dry = config;
     dry.tuning.almond_water = 0.0;
     dry.tuning.rations = 0.0;
     let grid = BackroomsLevel.generate(chunk, 42, dry, &noise);
     assert!(
-        grid.supply_items.is_empty(),
+        grid.entities.supply_items.is_empty(),
         "provision knobs at 0 strip supplies"
     );
 }
@@ -1238,7 +1242,7 @@ fn pit_lattice_omits_real_floor_and_exports_relocation_hazards() {
         &TestNoise,
         &RealitySnapshot::empty(),
     );
-    assert!(grid.pit_hazards.iter().any(|x| x.id == h.id));
+    assert!(grid.entities.pit_hazards.iter().any(|x| x.id == h.id));
 }
 
 #[test]
@@ -1988,6 +1992,7 @@ fn deep_strain_withholds_supply_cells_the_calm_world_offered() {
             let id = roll | 1;
             let offered = BackroomsLevel
                 .generate_with_reality(chunk, 42, config, &noise, &calm)
+                .entities
                 .supply_items
                 .iter()
                 .any(|item| item.id == id);
@@ -1998,6 +2003,7 @@ fn deep_strain_withholds_supply_cells_the_calm_world_offered() {
             }
             let strained = BackroomsLevel
                 .generate_with_reality(chunk, 42, config, &noise, &parched)
+                .entities
                 .supply_items
                 .iter()
                 .any(|item| item.id == id);
