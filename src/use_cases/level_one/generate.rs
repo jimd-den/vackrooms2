@@ -462,10 +462,16 @@ pub(crate) fn stamp_level_door(
     wall_material: u8,
 ) {
     let to_local = |w: f32, origin: f32| ((w - origin) / voxel_size).floor() as i64;
-    let door_half = 0.6;
+    // The walk-through leaf is a CAD rough opening (same allowance as the
+    // Level 0 fabric doorways) under a CAD-height lintel, with a 0.3 u
+    // structural header over the frame. The whole footprint must stay
+    // within the 1.0 u region-window margin (see provisions), which is why
+    // the frame is a rough single door and not a paired egress leaf.
+    let door_half = crate::use_cases::level_zero::DOOR_WIDTH / 2.0;
     let jamb_half = 0.15;
-    let height_v = (2.4 / voxel_size).round() as i64;
-    let lintel_v = (2.2 / voxel_size).round() as i64;
+    let lintel_units = crate::domain::entities::cad::CAD_DOOR_HEIGHT;
+    let height_v = ((lintel_units + 0.3) / voxel_size).round() as i64;
+    let lintel_v = (lintel_units / voxel_size).round() as i64;
     let panel_t = ((0.12 / voxel_size).round() as i64).max(1);
 
     let x0 = to_local(center_x - door_half - jamb_half * 2.0, chunk_pos.x);

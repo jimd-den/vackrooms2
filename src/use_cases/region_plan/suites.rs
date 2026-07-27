@@ -311,9 +311,9 @@ fn hosts_and_openings_for(
                 host: host_id,
                 role: OpeningRole::Interior,
                 center,
-                width: 1.2,
+                width: super::DOOR_WIDTH,
                 through_x_wall: horizontal,
-                lintel_units: Some(2.2),
+                lintel_units: Some(super::DOOR_HEIGHT),
             });
         }
     }
@@ -453,7 +453,7 @@ pub(super) fn place_suite(
     };
     let front_z = if side > 0.0 { b.1 } else { b.3 };
     let (width, lintel) = match threshold {
-        ThresholdLanguage::DoorWithLintel => (1.2, Some(2.2)),
+        ThresholdLanguage::DoorWithLintel => (super::DOOR_WIDTH, Some(super::DOOR_HEIGHT)),
         ThresholdLanguage::OpenPortal => (4.8, None),
         ThresholdLanguage::WidePortal => (3.6, Some(3.0)),
     };
