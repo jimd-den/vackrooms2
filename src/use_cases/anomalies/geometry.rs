@@ -9,13 +9,11 @@ use crate::domain::entities::anomaly::{
     AnomalyInstance, AnomalyKind, ArchBehavior, ArchLayout, RealitySnapshot,
 };
 use crate::domain::entities::environment::{EnvironmentProfile, FloorState};
-use crate::domain::entities::voxel_grid::{VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_LIGHT};
-use crate::use_cases::level_zero::{BackroomsLevel, ColumnPlan};
-use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::domain::entities::voxel_grid::{VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_RED_LIGHT, VOXEL_LIGHT};
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::region_plan::PLAN_WALL_T;
-
-const LIGHT_PERIOD: f32 = 2.8;
+use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::level_zero::{BackroomsLevel, ColumnPlan, FixtureKind, FixtureSample, FixtureState};
 
 /// Mutable anomaly infill uses a stable content tile for its seam guard. The
 /// tile is a world-generation constant, never the size of an output request.
@@ -187,8 +185,19 @@ fn sample_pillar_expanse(context: &SampleContext<'_>) -> ColumnPlan {
     } else {
         4.2
     };
+    let fixture = (!solid && (lane_light || field_light)).then_some(FixtureSample {
+        id: (instance.id as u64) << 32 ^ ((cell_x as u64) << 16) ^ (cell_z as u64 & 0xFFFF),
+        kind: FixtureKind::FluorescentPanel,
+        state: FixtureState::Lit,
+        center_x: context.world_x,
+        center_z: context.world_z,
+        half_x: 0.3,
+        half_z: 0.3,
+        ceiling_units,
+        red_room: false,
+    });
     ColumnPlan {
-        light: !solid && (lane_light || field_light),
+        fixture,
         solid,
         ceiling_units,
         floor_material: EnvironmentProfile::pillar_expanse().floor_voxel(),
@@ -216,20 +225,31 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
     let depth = instance.normalized_depth(context.world_x, context.world_z);
     let profile = EnvironmentProfile::blackout(depth);
     plan.wall_material = profile.wall_voxel();
-    plan.light_material = profile.light_voxel();
 
     // Ordinary fixtures thin through the approach instead of cutting directly
     // to black, so the darkness is spatially earned.
     if depth <= 0.22 {
-        let cell_x = (context.world_x / LIGHT_PERIOD).floor() as i64;
-        let cell_z = (context.world_z / LIGHT_PERIOD).floor() as i64;
+        let cell_x = (context.world_x / 2.8).floor() as i64;
+        let cell_z = (context.world_z / 2.8).floor() as i64;
         let keep = 1.0 - depth / 0.22;
-        plan.light = plan.light && anomaly_hash(instance, 0, 0xFADE, cell_x, cell_z) < keep;
-        plan.light_material = VOXEL_LIGHT;
+        let has_fixture = anomaly_hash(instance, 0, 0xFADE, cell_x, cell_z) < keep;
+        plan.fixture = has_fixture.then_some(FixtureSample {
+            id: ((instance.id as u64) << 32)
+                ^ ((cell_x as u64) << 16)
+                ^ (cell_z as u64)
+                ^ 0xFADE_C0DE_0000_0000,
+            kind: FixtureKind::FluorescentPanel,
+            state: FixtureState::Lit,
+            center_x: context.world_x,
+            center_z: context.world_z,
+            half_x: 0.3,
+            half_z: 0.3,
+            ceiling_units: plan.ceiling_units,
+            red_room: false,
+        });
     } else {
-        plan.light = false;
+        plan.fixture = None;
     }
-    plan.red_light = false;
     plan.ceiling_units = if depth > 0.68 {
         2.6
     } else if depth > 0.35 {
@@ -253,7 +273,19 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
     plan.solid |= context.perimeter;
     if context.skeleton {
         plan.solid = false;
-        plan.light = local_x.rem_euclid(28.0) < 0.45 && tuning.lights > 0.0;
+        plan.fixture = (local_x.rem_euclid(28.0) < 0.45 && tuning.lights > 0.0).then_some(
+            FixtureSample {
+                id: (instance.id as u64) << 16 ^ 0xCA71_C001,
+                kind: FixtureKind::FluorescentStrip,
+                state: FixtureState::Lit,
+                center_x: context.world_x,
+                center_z: context.world_z,
+                half_x: 0.3,
+                half_z: 0.3,
+                ceiling_units: plan.ceiling_units,
+                red_room: false,
+            },
+        );
         plan.light_material = VOXEL_GLIMMER;
         return plan;
     }
@@ -278,7 +310,17 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
             local_z.is_sign_negative() as i64,
         ) < decoys
     {
-        plan.light = true;
+        plan.fixture = Some(FixtureSample {
+            id: (instance.id as u64) << 16 ^ 0xDEC0_0001,
+            kind: FixtureKind::FluorescentPanel,
+            state: FixtureState::Lit,
+            center_x: context.world_x,
+            center_z: context.world_z,
+            half_x: 0.3,
+            half_z: 0.3,
+            ceiling_units: plan.ceiling_units,
+            red_room: false,
+        });
         plan.light_material = VOXEL_GLIMMER;
     }
 
@@ -297,7 +339,7 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
         .clamp(0.0, 0.65);
         if edge && anomaly_hash(instance, epoch, 0xB1AC, cell_x, cell_z) < threshold {
             plan.solid = true;
-            plan.light = false;
+            plan.fixture = None;
         }
     }
 
@@ -331,7 +373,7 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
                 let gap_pos = 0.8 + (PARTITION_CELL - 3.2) * gap;
                 if along < gap_pos || along >= gap_pos + 1.6 {
                     plan.solid = true;
-                    plan.light = false;
+                    plan.fixture = None;
                 }
             }
         }
@@ -349,13 +391,24 @@ fn sample_pit_lattice(context: &SampleContext<'_>) -> ColumnPlan {
         && context.boundary > lattice.side
         && dx < lattice.side * 0.5
         && dz < lattice.side * 0.5;
+    let has_light = !context.perimeter
+        && context.local_x.rem_euclid(3.2) < 0.45
+        && context.local_z.rem_euclid(3.2) < 0.45
+        && context.config.tuning.lights > 0.0;
     ColumnPlan {
         floor: !pit,
         solid: context.perimeter,
-        light: !context.perimeter
-            && context.local_x.rem_euclid(3.2) < 0.45
-            && context.local_z.rem_euclid(3.2) < 0.45
-            && context.config.tuning.lights > 0.0,
+        fixture: has_light.then_some(FixtureSample {
+            id: (context.instance.id as u64) ^ 0x0107_0000_0000,
+            kind: FixtureKind::FluorescentPanel,
+            state: FixtureState::Lit,
+            center_x: context.world_x,
+            center_z: context.world_z,
+            half_x: 0.3,
+            half_z: 0.3,
+            ceiling_units: 3.8,
+            red_room: false,
+        }),
         ..ColumnPlan::open(3.8)
     }
 }
@@ -453,9 +506,20 @@ fn sample_archway_anchor(context: &SampleContext<'_>) -> ColumnPlan {
         }
     }
 
-    plan.light = local_z.abs() < 0.45
+    let has_light = local_z.abs() < 0.45
         && (local_x + half_x - arch.bay * 0.5).rem_euclid(arch.bay * 2.0) < 0.45
         && tuning.lights > 0.0;
+    plan.fixture = has_light.then_some(FixtureSample {
+        id: (instance.id as u64) ^ 0xA0C1_0000_0000,
+        kind: FixtureKind::FluorescentPanel,
+        state: FixtureState::Lit,
+        center_x: context.world_x,
+        center_z: context.world_z,
+        half_x: 0.3,
+        half_z: 0.3,
+        ceiling_units,
+        red_room: false,
+    });
     let _ = context.boundary;
     plan
 }

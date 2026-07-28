@@ -31,6 +31,8 @@ mod column_field;
 mod column_plan;
 mod compose_column;
 mod fabric;
+mod fixture_maintenance;
+mod fixture_plan;
 mod generate;
 mod menger_expanse;
 mod provisions;
@@ -39,7 +41,7 @@ mod tests;
 mod voxelize;
 
 pub(crate) use column_field::ColumnField;
-pub(crate) use column_plan::ColumnPlan;
+pub(crate) use column_plan::{ColumnPlan, FixtureKind, FixtureSample, FixtureState};
 pub(crate) use voxelize::voxelize_columns;
 
 /// Ceiling height of the tallest (atrium) vaults, world units.

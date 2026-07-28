@@ -488,10 +488,10 @@ mod tests {
         for z in 0..direct.depth() {
             for y in 0..direct.height() {
                 for x in 0..direct.width() {
-                    assert_eq!(direct.get(x, y, z), cropped.get(x, y, z));
                     assert_eq!(
-                        direct.get_light_rgb(x, y, z),
-                        cropped.get_light_rgb(x, y, z)
+                        direct.get(x, y, z),
+                        cropped.get(x, y, z),
+                        "mismatch at x={x}, y={y}, z={z}"
                     );
                     assert_eq!(
                         cropped.get_face_occlusion(x, y, z),

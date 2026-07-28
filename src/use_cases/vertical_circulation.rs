@@ -223,7 +223,7 @@ pub(crate) fn apply_stair_profile(
     // The climb leaves the light: no fixture survives above the first riser,
     // and an endless flight rises into an unlit shaft.
     if plan.floor_units > 0.0 {
-        plan.light = false;
+        plan.fixture = None;
     }
 }
 
@@ -307,6 +307,6 @@ mod tests {
             deep.floor_units > LANDING_UNITS,
             "endless ascent stops at an ordinary landing"
         );
-        assert!(!deep.light, "the top of an endless flight must be unlit");
+        assert!(!deep.has_lit_fixture(), "the top of an endless flight must be unlit");
     }
 }

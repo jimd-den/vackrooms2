@@ -12,15 +12,12 @@ use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::region_plan::PLAN_WALL_T;
 
 use super::{BackroomsLevel, ColumnPlan, DOOR_HEIGHT, DOOR_WIDTH};
+use super::fixture_plan::{FixtureOwner, fixture_at};
 
 /// The default fabric room lattice. Rooms are chained through hashed
 /// doorways and merged by wall dropout, so the cell size never reads as a
 /// grid from inside — it is the scale of the labyrinth, not its shape.
 pub(super) const FABRIC_CELL: f32 = 7.2;
-
-/// Ceiling light panel spacing. The coffer beam grid shares this period,
-/// but beams are a renderer shading pattern, never stepped ceiling geometry.
-pub(super) const LIGHT_PERIOD: f32 = 2.8;
 
 /// The broad ceiling hierarchy that gives Level 0 scale without turning the
 /// whole map into a warehouse. It is local implementation detail rather than
@@ -383,34 +380,23 @@ impl BackroomsLevel {
         }
 
         // ---- lights ------------------------------------------------------
-        let light = if !solid {
-            // Open regions keep a longer, sparser fluorescent rhythm; the
-            // regular dropped ceiling retains the denser office grid.
-            let panel_period = if expanse { 4.8 } else { LIGHT_PERIOD };
-            let lx = (wx - panel_period * 0.5).rem_euclid(panel_period);
-            let lz = (wz - panel_period * 0.5).rem_euclid(panel_period);
-            let cell_x = (wx / panel_period).floor() as i64;
-            let cell_z = (wz / panel_period).floor() as i64;
-            let anchor_x = (cell_x as f32 + 0.5) * panel_period;
-            let anchor_z = (cell_z as f32 + 0.5) * panel_period;
-            // Old territory keeps fewer of its tubes alive: institution age
-            // scales the survival ratio from ~1.15x (new wings feel almost
-            // maintained) down to ~0.6x (ancient wings run on remnants).
-            // Sampled at the panel's own anchor so one fixture never splits
-            // into half-lit columns.
-            let age = crate::use_cases::world_topology::institution_age_at(
-                noise, seed, anchor_x, anchor_z,
-            );
-            let keep = if expanse { 0.66 } else { 0.78 } * tuning.lights * (1.15 - 0.55 * age);
-            // Which panels burned out is cosmetic memory, so the Peripheral
-            // Shift re-deals it: the light that guided you out may be dead
-            // when you walk back in.
-            let epoch = reality.fabric_drift_epoch(anchor_x, anchor_z);
-            let salt = 0xE900 ^ epoch.wrapping_mul(0x9E37_79B9);
-            let alive = Self::cell_hash(noise, seed, salt, cell_x, cell_z) < keep;
-            lx < 0.45 && lz < 0.45 && alive
+        let fixture = if !solid {
+            let cx = (wx / FABRIC_CELL).floor() as i64;
+            let cz = (wz / FABRIC_CELL).floor() as i64;
+            let cell_age = crate::use_cases::world_topology::institution_age_at(noise, seed, wx, wz);
+            fixture_at(
+                seed,
+                FixtureOwner::FabricCell {
+                    cell_x: cx,
+                    cell_z: cz,
+                    ceiling_units,
+                    age: cell_age,
+                },
+                wx,
+                wz,
+            )
         } else {
-            false
+            None
         };
 
         ColumnPlan {
@@ -418,8 +404,7 @@ impl BackroomsLevel {
             floor_units: 0.0,
             solid,
             ceiling_units,
-            light,
-            red_light: false,
+            fixture,
             lintel_from_units,
             door_leaf: false,
             wall_material: env.wall_voxel(),

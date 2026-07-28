@@ -4,6 +4,7 @@ pub mod cad;
 pub mod cell;
 pub mod chunk_entities;
 pub mod environment;
+pub mod fixture;
 pub mod grid;
 pub mod morton;
 pub mod player_vitals;

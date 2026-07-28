@@ -12,7 +12,9 @@ use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::level_generator::{LEVEL_BACKROOMS, LevelGenerator};
-use crate::use_cases::level_zero::{ColumnField, ColumnPlan, voxelize_columns};
+use crate::use_cases::level_zero::{
+    ColumnField, ColumnPlan, FixtureKind, FixtureSample, FixtureState, voxelize_columns,
+};
 use crate::use_cases::ports::NoiseProvider;
 
 use super::{GRID_HEIGHT_UNITS, HabitableLevel, Sector};
@@ -117,7 +119,19 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - BAY * 0.5, BAY);
         let lz = pillar_axis_dist(wz - BAY * 0.5, BAY);
         if lit && lx < 0.65 && lz < 0.65 {
-            column.light = true;
+            let center_x = ((wx - BAY * 0.5) / BAY).round() * BAY + BAY * 0.5;
+            let center_z = ((wz - BAY * 0.5) / BAY).round() * BAY + BAY * 0.5;
+            column.fixture = Some(FixtureSample {
+                id: hash(seed, 0xA10A_11A5_0000_0002, bx, bz),
+                kind: FixtureKind::FluorescentPanel,
+                state: FixtureState::Lit,
+                center_x,
+                center_z,
+                half_x: 0.45,
+                half_z: 0.45,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
@@ -179,13 +193,25 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - ROOM * 0.5, ROOM);
         let lz = pillar_axis_dist(wz - ROOM * 0.5, ROOM);
         if lx < 0.55 && lz < 0.55 && unit(hash(seed, 0x91D0_11A5, cell_x, cell_z)) > 0.42 {
-            column.light = true;
+            let center_x = (cell_x as f32 + 0.5) * ROOM;
+            let center_z = (cell_z as f32 + 0.5) * ROOM;
+            column.fixture = Some(FixtureSample {
+                id: hash(seed, 0x91D0_11A5, cell_x, cell_z),
+                kind: FixtureKind::FluorescentPanel,
+                state: FixtureState::Lit,
+                center_x,
+                center_z,
+                half_x: 0.45,
+                half_z: 0.45,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
     /// Curved masonry: circular pillars joined by parabolic arches under a
     /// vaulted ceiling.
-    fn plan_gothic(_seed: u32, wx: f32, wz: f32, column: &mut ColumnPlan) {
+    fn plan_gothic(seed: u32, wx: f32, wz: f32, column: &mut ColumnPlan) {
         column.ceiling_units = 4.8;
 
         if node_dist(wx, wz, ROOM) < GOTHIC_R {
@@ -222,7 +248,19 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - ROOM * 0.5, ROOM);
         let lz = pillar_axis_dist(wz - ROOM * 0.5, ROOM);
         if lx < 0.5 && lz < 0.5 && (cx + cz).rem_euclid(2) == 0 {
-            column.light = true;
+            let center_x = (cx as f32 + 0.5) * ROOM;
+            let center_z = (cz as f32 + 0.5) * ROOM;
+            column.fixture = Some(FixtureSample {
+                id: hash(seed, 0x607F_1C00_0000_0000, cx, cz),
+                kind: FixtureKind::FluorescentPanel,
+                state: FixtureState::Lit,
+                center_x,
+                center_z,
+                half_x: 0.45,
+                half_z: 0.45,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
@@ -269,7 +307,19 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - SCAFFOLD, SCAFFOLD * 2.0);
         let lz = pillar_axis_dist(wz - SCAFFOLD, SCAFFOLD * 2.0);
         if lx < 0.5 && lz < 0.5 && unit(cell.rotate_left(11)) < 0.4 {
-            column.light = true;
+            let center_x = ((wx - SCAFFOLD) / (SCAFFOLD * 2.0)).round() * (SCAFFOLD * 2.0) + SCAFFOLD;
+            let center_z = ((wz - SCAFFOLD) / (SCAFFOLD * 2.0)).round() * (SCAFFOLD * 2.0) + SCAFFOLD;
+            column.fixture = Some(FixtureSample {
+                id: cell ^ 0xCAFF_0001,
+                kind: FixtureKind::FluorescentStrip,
+                state: FixtureState::Lit,
+                center_x,
+                center_z,
+                half_x: 0.3,
+                half_z: 0.3,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
@@ -310,7 +360,17 @@ impl HabitableLevel {
         column.wall_material = VOXEL_CONCRETE_WALL;
         // One dependable fixture above the arrival point.
         if (wx - ARRIVAL_POINT.0).abs() < 0.6 && (wz - ARRIVAL_POINT.1).abs() < 0.6 {
-            column.light = true;
+            column.fixture = Some(FixtureSample {
+                id: 0x91A2_A0A0_0000_0001,
+                kind: FixtureKind::FluorescentPanel,
+                state: FixtureState::Lit,
+                center_x: ARRIVAL_POINT.0,
+                center_z: ARRIVAL_POINT.1,
+                half_x: 0.45,
+                half_z: 0.45,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 

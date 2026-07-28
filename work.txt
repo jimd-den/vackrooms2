@@ -1,0 +1,326 @@
+You are working in the Rust workspace for the Vackrooms procedural Backrooms engine.
+
+Your job is to FINISH the geometry-driven lighting/fixture architecture cleanly, preserving determinism, streamed chunk seam correctness, existing gameplay behavior, and clean-architecture dependency direction.
+
+Do not make a superficial patch. First inspect the repository, current diff, module structure, tests, build commands, and all fixture/light-related call sites before editing.
+
+PROJECT CONTEXT
+
+The engine has:
+- Domain entities under src/domain/entities
+- Procedural use cases under src/usecases
+- Level Zero generation under src/usecases/levelzero
+- Renderer/application code in wasmfrontend and renderer adapters
+- Deterministic infinite world generation with chunk streaming, halos, recursive levels, anomalies, and LOD
+- A semantic planning pipeline roughly shaped like:
+  RegionPlan -> ColumnPlan / ColumnField -> VoxelGrid -> baked lighting -> runtime lights
+
+The code already has a partial fixture refactor:
+- ColumnPlan now contains fixture: Option<FixtureSample>
+- FixtureKind, FixtureState, and FixtureSample exist
+- fixtureplan.rs and fixturemaintenance.rs exist
+- assemblysampler.rs invokes fixture planning
+- fabric.rs invokes fixture planning
+- composecolumn.rs invokes a corridor fixture helper
+- voxelize.rs handles fixture emission
+- Existing tests currently pass, but implementation quality is not complete
+
+CURRENT PROBLEMS TO FIX
+
+1. fixtureplan.rs still uses global periodic placement:
+   - wx.rem_euclid(period)
+   - wz.rem_euclid(period)
+   - fixed 4-unit corridor behavior
+   These are not acceptable as primary placement logic.
+
+2. FixtureSample.centerx/centerz are often set to the current query position, not one stable logical panel center.
+   This means one panel is not modeled as one entity/rectangle.
+
+3. Corridor fixture placement is not spine-local:
+   - It does not derive tangent/normal coordinates from CirculationSpine.
+   - It does not derive spacing from corridor width or ceiling height.
+   - It does not respond to turns, junctions, thresholds, or corridor direction.
+   - composecolumn.rs reconstructs another fixture after calling corridorfixtureat, causing duplicated ownership.
+
+4. Assembly fixture placement does not properly use:
+   - CeilingZone polygon containment
+   - Structural grid phase and bay dimensions
+   - Host walls
+   - Openings and thresholds
+   - Service voids
+   - Structural columns
+   - Ceiling language
+   It currently behaves mostly like a global repeated grid plus hash filtering.
+
+5. Fabric fixture placement must be derived from fabric-cell geometry:
+   - implied walkable area
+   - wall/opening topology
+   - ceiling band and ceiling height
+   - circulation mouth / threshold relation when applicable
+   - age and anomaly conditions
+   Randomness may select state or bounded variation only AFTER valid candidate geometry exists.
+
+6. Runtime lights have duplicate authority:
+   - decideruntimelights currently reads AssemblyInstance.fixtures
+   - procedural fixture planning / voxelization is a separate authority
+   Create one canonical source of truth.
+   Prefer semantic generated fixture layouts or exposed-emissive component extraction, depending on current renderer pipeline constraints.
+   Do not create runtime lights independently from legacy authored fixture arrays if equivalent generated fixture semantics exist.
+
+7. Fixture maintenance is underdeveloped:
+   - FixtureState exists, but placement and maintenance should be distinct.
+   - Dead/failing behavior must cluster spatially by electrical district, room, or corridor segment.
+   - Do not use independent per-panel random failures as the primary model.
+   - Blackout anomalies override normal conditions.
+   - Emergency fixtures should survive selectively where justified.
+
+8. Clean architecture needs enforcement:
+   - No renderer/WebGPU/WASM imports in domain or procedural use-case modules.
+   - No random mutable RNG consumption whose sequence depends on chunk generation order.
+   - No use-case placement logic inside voxelize.rs or renderer adapters.
+   - No duplicate fixture-ID algorithms across modules.
+   - No duplicated fixture construction in composecolumn.rs after planner output exists.
+   - Keep modules cohesive and use private helpers where possible.
+   - Prefer immutable data and pure functions.
+
+NON-NEGOTIABLE DESIGN RULE
+
+Randomness may answer:
+  “Which valid geometry-derived fixture is degraded, flickering, missing, or dead?”
+
+Randomness must not primarily answer:
+  “Where does a fixture exist?”
+
+A fixture must be generated from a valid architectural surface and circulation relationship.
+
+TARGET MODEL
+
+Implement or refine a model like:
+
+Architecture / region / corridor / fabric cell
+  -> FixtureLayoutPlan with stable FixtureLayout objects
+  -> point query returns Option<FixtureSample>
+  -> ColumnPlan stores the sampled fixture reference/data
+  -> voxelize turns fixture state into lit/dead/emergency panel materials
+  -> baked lighting sees exposed emissive material
+  -> runtime-light export derives lights from the same canonical fixture semantics or exposed emissive components
+  -> frame preparation only culls/packs/animates lights
+
+Use stable IDs:
+- One logical fixture must have one stable ID
+- Its ID must not depend on queried voxel position
+- Its ID must be independent of chunk partitioning, worker count, call order, renderer, and LOD where semantic identity is preserved
+- Use one central stable-ID helper, not separate ad hoc hash code
+
+IMPLEMENTATION PLAN
+
+Phase 0: Inspect and map
+- Identify all definitions and uses of:
+  FixtureKind
+  FixtureState
+  FixtureSample
+  fixtureat
+  corridorfixtureat
+  fixtureidforcorridor
+  ColumnPlan.fixture
+  voxelization fixture handling
+  AssemblyInstance.fixtures
+  RuntimeLight
+  decideruntimelights
+  exposed emissive light collectors
+  dynamic light preparation and flicker
+- Identify which current mechanism is canonical and which is legacy.
+- Before editing, write a concise implementation plan in your response/log.
+
+Phase 1: Normalize fixture domain model
+- Move fixture semantic types to a domain-appropriate module if they are currently trapped in levelzero/columnplan.rs and are needed across planning/export boundaries.
+- Keep voxel material IDs outside the semantic fixture model.
+- Define, if useful:
+  FixtureId
+  FixtureKind
+  FixtureState
+  FixtureLayout
+  FixtureSample
+  FixtureOwnerId or equivalent
+- FixtureLayout should describe one real rectangle/strip:
+  id
+  kind
+  state
+  world center
+  dimensions
+  ceiling height
+  optional orientation/tangent basis if needed
+  source/owner identity
+  color mode or environmental override only if justified
+- FixtureSample may be a copyable point-query result or fixture reference suitable for ColumnPlan.
+
+Phase 2: Split planning from querying
+- fixture_plan.rs should produce or deterministically reconstruct candidate FixtureLayouts for one owner:
+  Assembly ceiling zone
+  Corridor segment/spine
+  Fabric cell
+  Anomaly override where necessary
+- fixture_query.rs should test whether world point (wx, wz) lies inside a particular fixture layout footprint.
+- Do not set fixture center to the queried point.
+- Do not use wx.rem_euclid or wz.rem_euclid as the main placement language.
+- It is acceptable to use local coordinates relative to a geometry owner or a stable structural phase.
+
+Phase 3: Geometry-derived assembly layouts
+For each AssemblyInstance + CeilingZone:
+- Generate candidate positions from structural bayx, bayz, and phase.
+- Use ceiling-zone-local/grid-local coordinates, not arbitrary world origin periodicity.
+- Reject a candidate unless its full fixture footprint lies inside the CeilingZone polygon.
+- Keep an edge inset from hosts/walls.
+- Reject candidates overlapping service voids.
+- Reject candidates at or too near opening/doorway threshold centerlines.
+- Reject candidates covered by structural columns or soffit constraints.
+- Adapt kind/size/spacing to:
+  ceiling height
+  ceiling language
+  structural system
+  room/zone aspect ratio
+  space program where available
+- Use deterministic hash only for maintenance state or bounded selection from already valid candidates.
+
+Phase 4: Geometry-derived corridor layouts
+- Use CirculationSpine nearest-point information and derive a local coordinate:
+  along = longitudinal coordinate
+  lateral = distance/signed normal coordinate if possible
+- Derive pitch from ceiling height and corridor width, clamped to practical values.
+- Derive phase solely from stable spine identity and world seed.
+- Place panel centers at stable along values, not every queried point.
+- Center strips/panels around corridor centerline or use valid symmetric rows in wider corridors.
+- Do not place fixtures exactly on turns, junction apexes, entry thresholds, or ceiling transitions.
+- Add special anchor/light behavior around junctions where geometry allows.
+- Divide maintenance into stable longitudinal electrical segments, e.g. 8–16 m.
+- Return the actual FixtureSample/layout from corridor fixture planner directly; remove duplicate construction from composecolumn.rs.
+
+Phase 5: Fabric-cell layouts
+- Make fixtures derive from a FabricFixtureContext that includes:
+  cell coordinate
+  ceiling band
+  ceiling height
+  walls/openings/doorways implied by fabric logic
+  expanse state
+  institution age
+  relevant anomaly/reality state
+- Normal compact room:
+  - one or two geometry-centered fixtures
+  - offset away from doorway
+  - align rows with through-path when openings oppose
+- Compression:
+  - sparse/smaller fixture language
+- Expanse/vault:
+  - larger structural bands, sparse intentional dark gaps
+  - not a denser global periodic pattern
+- Keep seam behavior deterministic across cells/chunks.
+- If necessary, compute a local room topology descriptor before fixture layout.
+
+Phase 6: Maintenance and anomaly policy
+- Make maintenance a separate pure layer:
+  electrical_condition_for(owner, district/segment, age, anomaly, seed) -> ElectricalCondition
+  fixture_state_for(condition, fixture kind) -> FixtureState
+- Failures should be spatially coherent:
+  - assembly zones share a district condition with bounded variation
+  - corridor segments share condition
+  - fabric neighborhoods share condition
+- Blackout overrides ordinary fixtures.
+- Emergency strips may survive in specific transition/threshold/service contexts.
+- Red Room behavior should preserve semantic fixture placement where possible, then apply its color/state policy through a dedicated anomaly policy rather than creating arbitrary lights at every query coordinate.
+
+Phase 7: Voxel and runtime-light authority
+- voxelize.rs may only:
+  - translate fixture sample/state into voxel materials
+  - maintain physical constraints such as no buried emitter
+- Add distinct visible non-emissive dead panel material if needed.
+- Make runtime light export consume the same canonical fixture layouts/samples OR exposed emissive fixture components.
+- Remove or strictly isolate legacy AssemblyInstance.fixtures runtime-light paths.
+- Prevent duplicate runtime light emission where chunks overlap/halo.
+- Runtime-light identity must use stable FixtureId, not position-only deduplication.
+- Flicker phase must derive from FixtureId and world seed, not light-array index or frame random state.
+
+Phase 8: Tests
+Add focused tests. Do not weaken existing tests to make implementation pass.
+
+At minimum add or strengthen:
+
+Fixture identity:
+- same fixture queried at multiple contained points has identical ID, center, size, kind, and state
+- same world sampled in different chunk partitions produces identical fixtures
+- repeated planning is deterministic
+- LOD does not alter semantic fixture identity where applicable
+
+Assembly geometry:
+- fixture footprint stays inside CeilingZone polygon
+- fixture does not overlap service void
+- fixture respects doorway/threshold exclusion
+- fixture respects structural columns
+- bay phase affects fixture center predictably
+- narrow zones use a valid central row
+- wide zones produce symmetric valid rows where appropriate
+
+Corridor geometry:
+- fixture centers follow spine-local along coordinate
+- horizontal and vertical corridors work equally
+- corridor fixture placement is continuous across chunk boundaries
+- turns/junctions do not produce arbitrary overlapping fixtures
+- no duplicate fixture construction occurs in composecolumn
+- fixture spacing responds to width and ceiling height
+
+Fabric geometry:
+- layout derives from wall/opening conditions
+- fixture shifts away from a doorway
+- opposing openings generate through-path alignment
+- compressed and expanse bands differ intentionally
+- no global-origin periodic fixture pattern remains
+
+Maintenance:
+- nearby fixtures in a district/segment show coherent states
+- independent distant districts can differ
+- blackout overrides ordinary fixture output
+- dead fixtures become visible non-emissive panels and emit no runtime light
+- emergency fixtures behave as specified
+
+Pipeline:
+- solid columns cannot create emitters
+- one contiguous lit fixture yields one semantic/runtime light
+- separate fixtures remain separate
+- monolithic and tiled generation agree on fixture voxels
+- monolithic and tiled generation agree on exported runtime lights
+- no duplicate runtime fixture IDs in one chunk or across overlap handling
+- existing baking tests still pass
+
+Phase 9: Clean architecture verification
+After implementation:
+- Run cargo fmt --check
+- Run cargo clippy --workspace --all-targets -- -D warnings if feasible
+- If existing unrelated warnings prevent -D warnings, do not hide them; report them separately and eliminate warnings introduced by this work.
+- Run cargo test --workspace
+- Run targeted fixture/levelzero/baking/runtime-light tests
+- Search to prove:
+  - no duplicate fixture ID helper remains
+  - no fixed global-period placement remains in fixture planning except explicitly justified owner-local structural snapping
+  - no runtime-light path remains based on legacy assembly fixtures if superseded
+  - no renderer dependencies leaked into domain/usecases
+
+DELIVERABLES
+
+1. Implement the changes.
+2. Provide a concise architecture map naming modified/new modules and their responsibilities.
+3. State the canonical fixture source of truth.
+4. List every changed file with a short reason.
+5. Report test/lint/build commands and exact results.
+6. Report any remaining unrelated warnings separately.
+7. Clearly state any intentionally deferred follow-up work.
+
+QUALITY BAR
+
+- Prefer small cohesive modules over one giant fixtureplan.rs.
+- Do not use a repository-wide rewrite.
+- Do not add broad abstractions unless current duplication requires them.
+- Do not generate fixtures from screen/render coordinates.
+- Do not add mutable RNG streams.
+- Do not alter unrelated gameplay systems unless required for correctness.
+- Do not leave TODO placeholders in core fixture behavior.
+- Preserve existing public behavior where not intentionally changed.
+- Keep comments focused on invariants and non-obvious architectural decisions.
