@@ -212,8 +212,25 @@ pub struct ChunkDraw {
 pub const MAX_DYNAMIC_LIGHTS: usize = 4;
 
 /// Compatibility budget for callers that still expose fixed light arrays.
-/// Production WebGPU strategies use dynamically sized frame storage.
+/// Production WebGPU strategies use dynamically sized frame storage, but see
+/// [`MAX_ANALYTIC_SCENE_LIGHTS_PER_FRAME`] for the budget that actually
+/// bounds their per-fragment cost.
 pub const MAX_SCENE_LIGHTS: usize = 16;
+
+/// Upper bound on how many fixtures the engine hands a production renderer
+/// for full per-fragment analytic evaluation in one frame.
+///
+/// `select_scene_lights` deliberately never discards (a distant light can
+/// still be local to a visible receiver through a doorway), so the resident
+/// streaming neighborhood can easily hold 100+ enabled fixtures at once —
+/// every one of them gets a full rectangle-light quadrature per fragment in
+/// the raster shaders, uncapped, every frame. This budget is generous
+/// enough that ordinary rooms never notice it (nearest/most-important first,
+/// same ranking `select_scene_lights` already produces), while bounding the
+/// pathological case of a fixture-dense layout spanning a wide visual
+/// radius. Applied only to the copy handed to the renderer — thermal
+/// simulation and any other consumer of the full ranked list are unaffected.
+pub const MAX_ANALYTIC_SCENE_LIGHTS_PER_FRAME: usize = 48;
 
 /// A short-lived runtime light (dropped flare). World-space state owned by
 /// the engine — never part of chunk payloads, baked light volumes, or the

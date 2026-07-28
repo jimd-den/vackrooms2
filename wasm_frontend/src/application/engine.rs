@@ -23,7 +23,7 @@ use crate::application::navigation::RouteTarget;
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
     ChunkDraw, ChunkRequest, ChunkSourcePort, CompletedChunk, Environment, FrameParams,
-    RenderArtifactNeeds, RendererPort, SurfaceChunk,
+    MAX_ANALYTIC_SCENE_LIGHTS_PER_FRAME, RenderArtifactNeeds, RendererPort, SurfaceChunk,
 };
 use crate::application::prepare_frame_lighting::select_scene_lights;
 use crate::application::streaming::{
@@ -492,6 +492,15 @@ impl Engine {
                 .count_centers_within_xz(self.player.position, thermal::ENCLOSURE_RADIUS),
         );
         self.survival.advance_vitals(dt, instantaneous_c);
+
+        // OPTIMIZATION: bound the fixtures a production renderer evaluates
+        // per fragment. Thermal already consumed the full ranked list above;
+        // `select_scene_lights` sorts nearest/most-important first, so this
+        // keeps ordinary rooms visually identical while capping the
+        // pathological case of a fixture-dense layout across the whole
+        // streaming neighborhood. See `MAX_ANALYTIC_SCENE_LIGHTS_PER_FRAME`.
+        scene_lights.truncate(MAX_ANALYTIC_SCENE_LIGHTS_PER_FRAME);
+
         // Consumption is deliberate; the survival aggregate also owns the
         // optional accessibility policy that acts after explicit choices.
         self.survival.consume(ConsumptionIntent {
@@ -1474,6 +1483,7 @@ mod tests {
         uploads: Rc<RefCell<Vec<usize>>>,
         row_uploads: Rc<RefCell<Vec<u32>>>,
         draws: Rc<RefCell<Vec<usize>>>,
+        light_counts: Rc<RefCell<Vec<usize>>>,
         /// When true the renderer accepts partial row updates like the GPU
         /// driver; when false it forces the full-upload fallback.
         supports_rows: bool,
@@ -1489,8 +1499,11 @@ mod tests {
             }
             self.supports_rows
         }
-        fn draw(&mut self, _frame: &FrameParams, chunks: &[ChunkDraw]) {
+        fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
             self.draws.borrow_mut().push(chunks.len());
+            self.light_counts
+                .borrow_mut()
+                .push(frame.scene_lights.len());
         }
     }
 
@@ -1515,6 +1528,81 @@ mod tests {
             *self.atlas_uploads.borrow_mut() += 1;
         }
         fn draw(&mut self, _frame: &FrameParams, _chunks: &[ChunkDraw]) {}
+    }
+
+    /// Chunk source that emits several enabled, valid fixtures per chunk
+    /// with globally unique ids, so a wide resident footprint can hold far
+    /// more scene lights than any single frame should analytically evaluate.
+    struct ManyLightsChunkSource {
+        lights_per_chunk: u32,
+    }
+
+    impl ChunkSourcePort for ManyLightsChunkSource {
+        fn load(&self, origin_x: f32, origin_z: f32, _level: u32, _lod: u8) -> ChunkPayload {
+            let lights = (0..self.lights_per_chunk)
+                .map(|i| {
+                    let id = (origin_x.to_bits() as u64) << 32
+                        ^ (origin_z.to_bits() as u64)
+                        ^ i as u64;
+                    crate::application::ports::LightSource {
+                        id,
+                        position: [origin_x, 3.0, origin_z + i as f32],
+                        half_size: [0.5, 0.5],
+                        color: [1.0, 0.9, 0.8],
+                        radius: 8.0,
+                        intensity: 2.0,
+                        kind: crate::application::ports::LightKind::CeilingPanel,
+                        flicker_mode: 0,
+                        enabled: true,
+                    }
+                })
+                .collect();
+            ChunkPayload {
+                root: 0,
+                nodes: [1u32, 0, 0, 0].repeat(1024),
+                world_size: 12.8,
+                voxel_size: 0.2,
+                svo_depth: 6,
+                surface: crate::application::ports::SurfaceMeshPayload::empty(0),
+                lights,
+                collision: vec![],
+                traversal_gates: vec![],
+                pit_hazards: vec![],
+                supply_items: vec![],
+                level_exits: vec![],
+            }
+        }
+    }
+
+    #[test]
+    fn analytic_scene_lights_are_capped_even_with_a_dense_streaming_neighborhood() {
+        let renderer = RecordingRenderer::default();
+        let light_counts = renderer.light_counts.clone();
+        let mut config = EngineConfig::default();
+        // radius=2 with a non-surface renderer keeps visual_radius == 2 ->
+        // a 5x5 = 25 chunk neighborhood; 4 lights/chunk = 100 total fixtures.
+        config.chunk_radius = 2;
+        let mut engine = Engine::new(
+            config,
+            Box::new(renderer),
+            Box::new(ManyLightsChunkSource { lights_per_chunk: 4 }),
+        );
+        let input = InputFrame::default();
+        for _ in 0..10 {
+            engine.tick(1.0 / 60.0, &input);
+        }
+        let counts = light_counts.borrow();
+        assert!(!counts.is_empty());
+        assert!(
+            counts.iter().any(|&n| n > 0),
+            "the dense fixture layout produced no scene lights at all"
+        );
+        assert!(
+            counts
+                .iter()
+                .all(|&n| n <= MAX_ANALYTIC_SCENE_LIGHTS_PER_FRAME),
+            "a frame exceeded the analytic scene light budget: {counts:?}"
+        );
     }
 
     struct FlatChunkSource;

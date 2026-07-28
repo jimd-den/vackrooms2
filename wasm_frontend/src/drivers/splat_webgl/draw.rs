@@ -24,7 +24,9 @@ use crate::drivers::gl::lights::{
 use crate::drivers::gl::math::{
     camera_matrices, look_at_matrix_down, multiply_matrices, ortho_matrix,
 };
-use crate::drivers::gl::visibility::{MAX_DRAW_DISTANCE, chunk_bounding_sphere, sphere_visible};
+use crate::drivers::gl::visibility::{
+    MAX_DRAW_DISTANCE, chunk_bounding_sphere, frustum_side_planes_visible, sphere_visible,
+};
 
 use super::resources::SplatChunk;
 use super::{FrameStats, SplatRenderer};
@@ -112,7 +114,9 @@ fn render_frame(
     begin_main_frame(renderer, frame);
 
     let resident: Vec<&SplatChunk> = renderer.chunks.values().collect();
-    let visible = collect_visible_chunks(&resident, frame, toggles.distance_cull);
+    let aspect = renderer.width as f32 / (renderer.height.max(1)) as f32;
+    let fov_tan = crate::drivers::webgl::fov_tan();
+    let visible = collect_visible_chunks(&resident, frame, toggles.distance_cull, fov_tan, aspect);
     let lights = select_frame_lights(frame);
     let shadow = render_shadow_pass(renderer, &resident, &lights, toggles.shadow_pass);
 
@@ -160,6 +164,8 @@ fn collect_visible_chunks<'a>(
     resident: &[&'a SplatChunk],
     frame: &FrameParams,
     culling_enabled: bool,
+    fov_tan: f32,
+    aspect: f32,
 ) -> Vec<&'a SplatChunk> {
     let mut ranked: Vec<(&SplatChunk, f32)> = resident
         .iter()
@@ -167,7 +173,11 @@ fn collect_visible_chunks<'a>(
         .filter_map(|chunk| {
             let (center, radius) = chunk_bounding_sphere(chunk.origin, chunk.bounds_max);
             let distance2 = if culling_enabled {
-                sphere_visible(center, radius, frame, MAX_DRAW_DISTANCE)?
+                let distance2 = sphere_visible(center, radius, frame, MAX_DRAW_DISTANCE)?;
+                if !frustum_side_planes_visible(center, radius, frame, fov_tan, aspect) {
+                    return None;
+                }
+                distance2
             } else {
                 squared_distance(center, frame.camera_pos)
             };

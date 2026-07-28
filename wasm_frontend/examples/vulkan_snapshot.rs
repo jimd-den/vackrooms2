@@ -108,6 +108,8 @@ fn main() {
             &world.frame,
             toggles,
             world.frame.scene_lights.len() as u32,
+            FOV_TAN,
+            width as f32 / (height.max(1)) as f32,
         );
     });
     write_png(&out_dir, "surface", width, height, &pixels);
@@ -131,6 +133,8 @@ fn main() {
             &world.frame,
             toggles,
             world.frame.scene_lights.len() as u32,
+            FOV_TAN,
+            width as f32 / (height.max(1)) as f32,
         );
     });
     write_png(&out_dir, "splat", width, height, &pixels);

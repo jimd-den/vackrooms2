@@ -657,6 +657,8 @@ impl NativeRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("vackrooms.native.frame"),
             });
+        let aspect = self.config.width as f32 / (self.config.height.max(1)) as f32;
+        let fov_tan = camera_state::fov_tan();
         match &mut self.strategy {
             Strategy::Surface(pipeline) => pipeline.draw(
                 &self.queue,
@@ -667,6 +669,8 @@ impl NativeRenderer {
                 frame,
                 toggles,
                 lights.len().min(u32::MAX as usize) as u32,
+                fov_tan,
+                aspect,
             ),
             Strategy::Splat(pipeline) => pipeline.draw(
                 &self.queue,
@@ -677,6 +681,8 @@ impl NativeRenderer {
                 frame,
                 toggles,
                 lights.len().min(u32::MAX as usize) as u32,
+                fov_tan,
+                aspect,
             ),
             Strategy::Raymarch(pipeline) => pipeline.draw(
                 &self.queue,
