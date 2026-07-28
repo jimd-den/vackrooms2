@@ -32,6 +32,7 @@ mod column_plan;
 mod compose_column;
 mod fabric;
 mod generate;
+mod menger_expanse;
 mod provisions;
 #[cfg(test)]
 mod tests;

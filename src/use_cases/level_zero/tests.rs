@@ -157,7 +157,10 @@ fn chunks_tile_seamlessly() {
                 .unwrap();
             let expect =
                 BackroomsLevel::plan_column(plan, &noise, 42, &LevelTuning::default(), wx, wz);
-            let got_solid = grid.get(lx, 1, z) == VOXEL_WALL;
+            // Any solid material counts: fabric decay can voxelize a wall
+            // or gallery post as aged wallpaper instead of VOXEL_WALL.
+            let got_solid = crate::domain::entities::voxel_grid::SOLID_MATERIALS
+                .contains(&grid.get(lx, 1, z));
             // Raised floor (stair treads) also writes wall material at
             // the walkable layer, so it counts as expected solid here.
             let expect_solid =
@@ -2311,3 +2314,5 @@ fn structural_systems_place_columns_differently() {
          structure_for, not by on_column)"
     );
 }
+
+

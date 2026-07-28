@@ -18,9 +18,6 @@ use super::{BackroomsLevel, ColumnPlan, DOOR_HEIGHT, DOOR_WIDTH};
 /// grid from inside — it is the scale of the labyrinth, not its shape.
 pub(super) const FABRIC_CELL: f32 = 7.2;
 
-/// Column grid spacing inside expanses.
-const EXPANSE_COLUMN_PERIOD: f32 = 7.2;
-
 /// Ceiling light panel spacing. The coffer beam grid shares this period,
 /// but beams are a renderer shading pattern, never stepped ceiling geometry.
 pub(super) const LIGHT_PERIOD: f32 = 2.8;
@@ -236,14 +233,12 @@ impl BackroomsLevel {
         let mut lintel_from_units: Option<f32> = None;
 
         if expanse {
-            // Sparse structural columns hold the expanse ceiling up.
-            let cx = (wx / EXPANSE_COLUMN_PERIOD).floor() as i64;
-            let cz = (wz / EXPANSE_COLUMN_PERIOD).floor() as i64;
-            let on_site = wx.rem_euclid(EXPANSE_COLUMN_PERIOD) < 0.45
-                && wz.rem_euclid(EXPANSE_COLUMN_PERIOD) < 0.45;
-            if on_site && Self::cell_hash(noise, seed, 0xF200, cx, cz) < 0.7 * tuning.pillars {
-                solid = true;
-            }
+            // Menger galleries: recursive corridor crosses with WFC-chosen
+            // colonnades and arcade courts (see menger_expanse). Structure
+            // is epoch-free — expanses never drift.
+            let structure = super::menger_expanse::expanse_structure(seed, tuning, wx, wz);
+            solid = structure.solid;
+            lintel_from_units = structure.lintel_from_units;
         } else {
             // The default fabric *is* the Backrooms labyrinth: an irregular
             // warren of yellow rooms chained through hashed doorways.
