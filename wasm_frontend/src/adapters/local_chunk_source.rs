@@ -7,8 +7,18 @@
 //!   GenerateChunkArchitectureUseCase  (haloed VoxelGrid + lighting)
 //!     -> BuildOctreeUseCase           (always: collision authority)
 //!        -> collision walk            (solid leaves -> world-space AABBs)
-//!        -> OctreeGpuSerializer       (only when SVO upload words are requested)
+//!        -> compress_svdag + OctreeGpuSerializer
+//!                                     (only when SVO upload words are requested)
 //!     -> surface/face extraction      (only when the renderer requests it)
+//!
+//! `build_octree_direct` (see `benches/generation.rs`,
+//! `octree_direct_vs_dense`) is NOT used here: its `dyn VoxelSampler`
+//! dispatch costs ~2x `BuildOctreeUseCase` when the sampler is just a
+//! `GridSampler` wrapping an already-materialized grid, since its
+//! `uniform_hint` only proves out-of-grid cubes uniform and gets no pruning
+//! benefit for interior geometry. It only pays off with a sampler that can
+//! prove large uniform regions cheaply without touching a dense array —
+//! this pipeline's grid is already dense by the time it reaches here.
 
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
