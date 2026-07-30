@@ -195,7 +195,14 @@ fn space_layout_for(
     };
     let mut leaves = Vec::new();
     let mut partitions = Vec::new();
-    subdivide_space(footprint.bounds(), 0, 1, &rule, &mut leaves, &mut partitions);
+    subdivide_space(
+        footprint.bounds(),
+        0,
+        1,
+        &rule,
+        &mut leaves,
+        &mut partitions,
+    );
     if leaves.len() <= 1 {
         return SpaceLayout::default();
     }

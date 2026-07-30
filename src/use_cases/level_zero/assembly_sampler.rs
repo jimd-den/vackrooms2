@@ -7,7 +7,7 @@ use crate::domain::entities::architecture::{
 };
 use crate::use_cases::generate_chunk::LevelTuning;
 
-use super::fixture_plan::{fixture_at, FixtureOwner};
+use super::fixture_plan::{FixtureOwner, fixture_at};
 use super::{BackroomsLevel, ColumnPlan};
 
 fn distance_to_zone(zone: &CeilingZone, wx: f32, wz: f32) -> f32 {
@@ -94,15 +94,14 @@ impl BackroomsLevel {
         for host in a.hosts.iter().filter(|host| host.contains_plan(wx, wz)) {
             covering_hosts += 1;
             ceiling_units = ceiling_units.max(host.top_units);
-            if let Some(opening) = a.openings.iter().find(|opening| {
-                opening.host == host.id && opening.contains_plan(host, wx, wz)
-            }) {
+            if let Some(opening) = a
+                .openings
+                .iter()
+                .find(|opening| opening.host == host.id && opening.contains_plan(host, wx, wz))
+            {
                 cut_hosts += 1;
                 lintel_units = lintel_units.max(opening.lintel_units.unwrap_or(0.0));
-                door_leaf |= a
-                    .door_leaves
-                    .iter()
-                    .any(|leaf| leaf.opening == opening.id);
+                door_leaf |= a.door_leaves.iter().any(|leaf| leaf.opening == opening.id);
             }
         }
         if covering_hosts > 0 {
@@ -138,15 +137,8 @@ impl BackroomsLevel {
         // Fixtures follow the assembly's ceiling zones and structural grid.
         if !plan.solid && tuning.lights > 0.0 {
             if let Some(zone) = ceiling_zone_at(a, wx, wz) {
-                plan.fixture = fixture_at(
-                    seed,
-                    FixtureOwner::Assembly {
-                        assembly: a,
-                        zone,
-                    },
-                    wx,
-                    wz,
-                );
+                plan.fixture =
+                    fixture_at(seed, FixtureOwner::Assembly { assembly: a, zone }, wx, wz);
             }
         }
         plan

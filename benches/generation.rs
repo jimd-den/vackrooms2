@@ -27,13 +27,13 @@
 //!   `place_suite`'s candidate search is quadratic in assemblies-per-region.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use vackrooms::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_WALL, VoxelGrid};
 use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
+use vackrooms::domain::entities::position::Position;
+use vackrooms::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_WALL, VoxelGrid};
+use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::use_cases::build_octree_direct::{GridSampler, build_octree_direct};
 use vackrooms::use_cases::compress_svdag::compress_svdag;
-use vackrooms::domain::entities::position::Position;
-use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 use vackrooms::use_cases::region_plan::{REGION_SIZE, generate_region_plan};
 
@@ -75,8 +75,7 @@ fn octree_build(c: &mut Criterion) {
         let room = hollow_room(edge);
         group.bench_with_input(BenchmarkId::new("hollow_room", edge), &room, |b, grid| {
             b.iter(|| {
-                BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE)
-                    .execute(grid, depth, world_size)
+                BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE).execute(grid, depth, world_size)
             });
         });
 
@@ -100,11 +99,7 @@ fn octree_build(c: &mut Criterion) {
 fn real_level_zero_chunk() -> VoxelGrid {
     let noise = SimpleNoiseProvider::new();
     GenerateChunkArchitectureUseCase::new(&noise)
-        .execute(
-            Position::new(20.0, 20.0),
-            42,
-            GeneratorConfig::low_spec(),
-        )
+        .execute(Position::new(20.0, 20.0), 42, GeneratorConfig::low_spec())
         .grid
 }
 
@@ -114,20 +109,31 @@ fn octree_direct_vs_dense(c: &mut Criterion) {
         let depth = (edge as u32).next_power_of_two().trailing_zeros();
         let world_size = (1u32 << depth) as f32 * VOXEL_SCALE;
 
-        for (label, grid) in [("hollow_room", hollow_room(edge)), ("checkerboard", checkerboard(edge))] {
-            group.bench_with_input(BenchmarkId::new(format!("{label}/dense"), edge), &grid, |b, grid| {
-                b.iter(|| {
-                    BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE)
-                        .execute(grid, depth, world_size)
-                });
-            });
-            group.bench_with_input(BenchmarkId::new(format!("{label}/direct"), edge), &grid, |b, grid| {
-                let sampler = GridSampler {
-                    grid,
-                    palette: &DEFAULT_MATERIAL_PALETTE,
-                };
-                b.iter(|| build_octree_direct(&sampler, depth, world_size));
-            });
+        for (label, grid) in [
+            ("hollow_room", hollow_room(edge)),
+            ("checkerboard", checkerboard(edge)),
+        ] {
+            group.bench_with_input(
+                BenchmarkId::new(format!("{label}/dense"), edge),
+                &grid,
+                |b, grid| {
+                    b.iter(|| {
+                        BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE)
+                            .execute(grid, depth, world_size)
+                    });
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new(format!("{label}/direct"), edge),
+                &grid,
+                |b, grid| {
+                    let sampler = GridSampler {
+                        grid,
+                        palette: &DEFAULT_MATERIAL_PALETTE,
+                    };
+                    b.iter(|| build_octree_direct(&sampler, depth, world_size));
+                },
+            );
         }
     }
     group.finish();
@@ -142,7 +148,8 @@ fn svdag_compress(c: &mut Criterion) {
     ] {
         let depth = (edge as u32).next_power_of_two().trailing_zeros();
         let world_size = (1u32 << depth) as f32 * VOXEL_SCALE;
-        let svo = BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE).execute(&grid, depth, world_size);
+        let svo =
+            BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE).execute(&grid, depth, world_size);
         group.bench_with_input(BenchmarkId::new("compress", label), &svo, |b, svo| {
             b.iter(|| compress_svdag(svo));
         });
@@ -181,13 +188,7 @@ fn region_plan_by_density(c: &mut Criterion) {
             &config,
             |b, config| {
                 b.iter(|| {
-                    generate_region_plan(
-                        42,
-                        Position::new(0.0, 0.0),
-                        REGION_SIZE,
-                        config,
-                        &noise,
-                    )
+                    generate_region_plan(42, Position::new(0.0, 0.0), REGION_SIZE, config, &noise)
                 });
             },
         );

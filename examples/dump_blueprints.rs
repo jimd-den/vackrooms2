@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::Path;
+use vackrooms::adapters::blueprint_renderer::{
+    BlueprintOptions, ChunkBounds, render_region_blueprint_svg,
+};
 use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::{REGION_SIZE, generate_region_plan};
-use vackrooms::adapters::blueprint_renderer::{
-    render_region_blueprint_svg, BlueprintOptions, ChunkBounds,
-};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -74,8 +74,9 @@ fn main() {
         let svg = render_region_blueprint_svg(&plan, &[cb.clone()], options);
         fs::write(filename, &svg).unwrap();
         println!("Wrote blueprint SVG: {}", filename);
-        
-        let art_dir = "/home/dbslim/.gemini/antigravity-cli/brain/631f1036-e351-406b-91f2-5e89e6a6e89f";
+
+        let art_dir =
+            "/home/dbslim/.gemini/antigravity-cli/brain/631f1036-e351-406b-91f2-5e89e6a6e89f";
         if Path::new(art_dir).exists() {
             let art_path = format!("{}/{}", art_dir, filename);
             fs::write(&art_path, &svg).unwrap();

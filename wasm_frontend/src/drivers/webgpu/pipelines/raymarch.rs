@@ -566,7 +566,11 @@ mod tests {
         let source = include_str!("../shaders/raymarch.wgsl");
         let fragment = &source[source.find("@fragment").expect("fragment entry")..];
         assert!(fragment.contains("min(interval.exit, nearest.distance)"));
-        assert!(fragment.contains("let hit = trace_chunk(local_origin, direction, chunk, clipped_interval)"));
+        assert!(
+            fragment.contains(
+                "let hit = trace_chunk(local_origin, direction, chunk, clipped_interval)"
+            )
+        );
     }
 
     #[test]

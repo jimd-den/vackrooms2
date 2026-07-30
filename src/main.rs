@@ -3,10 +3,10 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
+use vackrooms::adapters::web_renderer::WebRendererAdapter;
 use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::frameworks_drivers::std_telemetry::StdTelemetry;
-use vackrooms::adapters::web_renderer::WebRendererAdapter;
 use vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase;
 
 /// Presentation Layer & Driver:

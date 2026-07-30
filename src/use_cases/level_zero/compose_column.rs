@@ -68,18 +68,13 @@ impl BackroomsLevel {
                 corridor_ceiling =
                     corridor_ceiling.max(Self::corridor_ceiling(s, noise, seed, wx, wz));
                 if let Some(join_from) = Self::corridor_ceiling_join(s, noise, seed, wx, wz) {
-                    corridor_join_from = Some(
-                        corridor_join_from.map_or(join_from, |height| height.min(join_from)),
-                    );
+                    corridor_join_from =
+                        Some(corridor_join_from.map_or(join_from, |height| height.min(join_from)));
                 }
                 let ceiling_h = corridor_ceiling.max(3.0);
-                if let Some(fixture) = super::fixture_plan::corridor_fixture_at(
-                    seed,
-                    s,
-                    ceiling_h,
-                    wx,
-                    wz,
-                ) {
+                if let Some(fixture) =
+                    super::fixture_plan::corridor_fixture_at(seed, s, ceiling_h, wx, wz)
+                {
                     corridor_fixture_sample = Some(fixture);
                 }
             } else if d <= half + PLAN_WALL_T {

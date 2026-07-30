@@ -4,13 +4,13 @@
 use super::generate::{ARRIVAL_POINT, stamp_supply_marker};
 use super::*;
 use crate::domain::entities::anomaly::RealitySnapshot;
+use crate::domain::entities::position::Position;
+use crate::domain::entities::supplies::SupplyItem;
 use crate::domain::entities::supplies::SupplyKind;
 use crate::domain::entities::voxel_grid::{
     VOXEL_AIR, VOXEL_ALMOND_WATER, VOXEL_CONCRETE_WALL, VOXEL_METAL_DOOR, VOXEL_TILE_FLOOR,
     VoxelGrid,
 };
-use crate::domain::entities::supplies::SupplyItem;
-use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::level_generator::{LEVEL_BACKROOMS, LevelGenerator};

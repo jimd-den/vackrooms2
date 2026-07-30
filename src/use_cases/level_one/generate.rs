@@ -2,12 +2,12 @@
 //! arrival plaza with its door back to Level 0.
 
 use crate::domain::entities::anomaly::{LevelExit, RealitySnapshot};
+use crate::domain::entities::position::Position;
 use crate::domain::entities::supplies::{SupplyItem, SupplyKind};
 use crate::domain::entities::voxel_grid::{
     VOXEL_ALMOND_WATER, VOXEL_CONCRETE_FLOOR, VOXEL_CONCRETE_WALL, VOXEL_CRATE, VOXEL_METAL_DOOR,
     VOXEL_PIPE, VOXEL_TILE_FLOOR, VoxelGrid,
 };
-use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::generated_chunk::GeneratedChunk;
@@ -156,8 +156,9 @@ impl HabitableLevel {
                 (cell_x, (wz / ROOM).round() as i64, wx, 0x22)
             };
             let t = unit(hash(seed, 0x91D0_D008_0000_0000 | salt, edge_x, edge_z));
-            let gap_center =
-                (along / ROOM).floor() * ROOM + GAP_BAND_MARGIN + t * (ROOM - 2.0 * GAP_BAND_MARGIN);
+            let gap_center = (along / ROOM).floor() * ROOM
+                + GAP_BAND_MARGIN
+                + t * (ROOM - 2.0 * GAP_BAND_MARGIN);
             let in_gap = (along - gap_center).abs() < DOOR_W * 0.5;
             if in_gap {
                 column.lintel_from_units = Some(DOOR_H);
@@ -307,8 +308,10 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - SCAFFOLD, SCAFFOLD * 2.0);
         let lz = pillar_axis_dist(wz - SCAFFOLD, SCAFFOLD * 2.0);
         if lx < 0.5 && lz < 0.5 && unit(cell.rotate_left(11)) < 0.4 {
-            let center_x = ((wx - SCAFFOLD) / (SCAFFOLD * 2.0)).round() * (SCAFFOLD * 2.0) + SCAFFOLD;
-            let center_z = ((wz - SCAFFOLD) / (SCAFFOLD * 2.0)).round() * (SCAFFOLD * 2.0) + SCAFFOLD;
+            let center_x =
+                ((wx - SCAFFOLD) / (SCAFFOLD * 2.0)).round() * (SCAFFOLD * 2.0) + SCAFFOLD;
+            let center_z =
+                ((wz - SCAFFOLD) / (SCAFFOLD * 2.0)).round() * (SCAFFOLD * 2.0) + SCAFFOLD;
             column.fixture = Some(FixtureSample {
                 id: cell ^ 0xCAFF_0001,
                 kind: FixtureKind::FluorescentStrip,
@@ -377,13 +380,7 @@ impl HabitableLevel {
     /// Deterministic supply spot for one supply cell, or None. Supplies are
     /// canon-dense in Gild (crates), present in Aquila, rare elsewhere; the
     /// world tuning scales drink and food frequency independently.
-    fn supply_for_cell(
-        seed: u32,
-        cx: i64,
-        cz: i64,
-        water: f32,
-        food: f32,
-    ) -> Option<SupplyItem> {
+    fn supply_for_cell(seed: u32, cx: i64, cz: i64, water: f32, food: f32) -> Option<SupplyItem> {
         let water_weight = 0.72 * water.clamp(0.0, 4.0);
         let food_weight = 0.28 * food.clamp(0.0, 4.0);
         if water_weight + food_weight <= 0.0 {
@@ -412,8 +409,7 @@ impl HabitableLevel {
             if column.solid || !column.floor {
                 continue;
             }
-            let kind = if unit(roll.rotate_left(9)) * (water_weight + food_weight) < water_weight
-            {
+            let kind = if unit(roll.rotate_left(9)) * (water_weight + food_weight) < water_weight {
                 SupplyKind::AlmondWater
             } else {
                 SupplyKind::Ration

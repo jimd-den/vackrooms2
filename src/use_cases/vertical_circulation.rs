@@ -307,6 +307,9 @@ mod tests {
             deep.floor_units > LANDING_UNITS,
             "endless ascent stops at an ordinary landing"
         );
-        assert!(!deep.has_lit_fixture(), "the top of an endless flight must be unlit");
+        assert!(
+            !deep.has_lit_fixture(),
+            "the top of an endless flight must be unlit"
+        );
     }
 }

@@ -332,11 +332,10 @@ pub fn get_debug_region_json(seed: u32, region_x: i32, region_z: i32) -> String 
 
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
     let size = vackrooms::use_cases::region_plan::REGION_SIZE;
-    let origin =
-        vackrooms::domain::entities::position::Position::new(
-            region_x as f32 * size,
-            region_z as f32 * size,
-        );
+    let origin = vackrooms::domain::entities::position::Position::new(
+        region_x as f32 * size,
+        region_z as f32 * size,
+    );
     let config = vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec();
     let plan = vackrooms::use_cases::region_plan::generate_region_plan(
         seed, origin, size, &config, &noise,
@@ -1023,9 +1022,7 @@ mod entry {
                 web_sys::console::error_2(&"Failed to start WebGPU engine:".into(), &error);
                 if let Some(document) = web_sys::window().and_then(|window| window.document()) {
                     if let Some(status) = document.get_element_by_id("status-msg") {
-                        let detail = error
-                            .as_string()
-                            .unwrap_or_else(|| format!("{error:?}"));
+                        let detail = error.as_string().unwrap_or_else(|| format!("{error:?}"));
                         status.set_text_content(Some(&format!(
                             "Failed to start WebGPU engine: {detail}"
                         )));

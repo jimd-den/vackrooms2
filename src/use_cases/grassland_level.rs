@@ -10,10 +10,10 @@
 //! Like every [`LevelGenerator`], all placement is a pure function of
 //! world-space coordinates so chunks tile seamlessly.
 
+use crate::domain::entities::position::Position;
 use crate::domain::entities::voxel_grid::{
     VOXEL_GRASS, VOXEL_LIGHT, VOXEL_TREE, VOXEL_WATER, VoxelGrid,
 };
-use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::level_generator::LevelGenerator;

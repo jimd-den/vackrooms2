@@ -22,11 +22,11 @@
 //! consumes these obligations; nothing here writes a voxel or knows a chunk
 //! size. Determinism is testable: see the 5×5 snapshot test at the bottom.
 
+use crate::domain::entities::position::Position;
 use crate::domain::entities::world_topology::{
     MACRO_CELL_SIZE, MacroCell, MacroCellId, MacroFields, PlaceKind, Portal,
     REGIONS_PER_MACRO_CELL, RedRoomEvent, VerticalLink, VerticalLinkKind, WorldNode,
 };
-use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::ports::NoiseProvider;
 

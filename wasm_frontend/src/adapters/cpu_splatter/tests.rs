@@ -294,8 +294,8 @@ fn mip_aggregation_works_for_root_last_node_order() {
     // BuildOctreeUseCase (the production chunk pipeline) pushes children
     // BEFORE their parent, so the root is the LAST node — the opposite
     // order of SparseVoxelOctree::set. build_mips must handle both.
-    use vackrooms::domain::entities::voxel_grid::{VOXEL_WALL, VoxelGrid};
     use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
+    use vackrooms::domain::entities::voxel_grid::{VOXEL_WALL, VoxelGrid};
     use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 
     let mut grid = VoxelGrid::new(4, 4, 4);

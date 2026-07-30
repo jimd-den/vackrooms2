@@ -26,12 +26,10 @@ fn material_for_fixture(fixture: &crate::use_cases::level_zero::FixtureSample) -
                 }
             }
         }
-        FixtureKind::EmergencyStrip => {
-            match fixture.state {
-                FixtureState::Dead => VOXEL_CEILING,
-                _ => VOXEL_RED_LIGHT,
-            }
-        }
+        FixtureKind::EmergencyStrip => match fixture.state {
+            FixtureState::Dead => VOXEL_CEILING,
+            _ => VOXEL_RED_LIGHT,
+        },
         FixtureKind::DeadPanel => VOXEL_CEILING,
     }
 }

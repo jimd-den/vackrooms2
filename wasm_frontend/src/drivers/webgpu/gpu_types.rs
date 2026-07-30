@@ -6,9 +6,9 @@
 //! upon.
 
 use bytemuck::{Pod, Zeroable};
-use vackrooms::adapters::material_palette::material_visual;
 #[cfg(test)]
 use vackrooms::adapters::material_palette::MATERIAL_VISUALS;
+use vackrooms::adapters::material_palette::material_visual;
 
 use crate::application::ports::{
     DynamicLight, FrameParams, LightKind, LightSource, PackedFaceInstance, PackedVertex,

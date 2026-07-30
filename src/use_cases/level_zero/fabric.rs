@@ -11,8 +11,8 @@ use crate::use_cases::generate_chunk::LevelTuning;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::region_plan::PLAN_WALL_T;
 
-use super::{BackroomsLevel, ColumnPlan, DOOR_HEIGHT, DOOR_WIDTH};
 use super::fixture_plan::{FixtureOwner, fixture_at};
+use super::{BackroomsLevel, ColumnPlan, DOOR_HEIGHT, DOOR_WIDTH};
 
 /// The default fabric room lattice. Rooms are chained through hashed
 /// doorways and merged by wall dropout, so the cell size never reads as a
@@ -373,9 +373,8 @@ impl BackroomsLevel {
                 }
             }
             if let Some(join_from) = join_from {
-                lintel_from_units = Some(
-                    lintel_from_units.map_or(join_from, |height| height.min(join_from)),
-                );
+                lintel_from_units =
+                    Some(lintel_from_units.map_or(join_from, |height| height.min(join_from)));
             }
         }
 
@@ -383,7 +382,8 @@ impl BackroomsLevel {
         let fixture = if !solid {
             let cx = (wx / FABRIC_CELL).floor() as i64;
             let cz = (wz / FABRIC_CELL).floor() as i64;
-            let cell_age = crate::use_cases::world_topology::institution_age_at(noise, seed, wx, wz);
+            let cell_age =
+                crate::use_cases::world_topology::institution_age_at(noise, seed, wx, wz);
             fixture_at(
                 seed,
                 FixtureOwner::FabricCell {

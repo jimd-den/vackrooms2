@@ -1,11 +1,9 @@
 use std::fs;
+use vackrooms::adapters::blueprint_renderer::{BlueprintSlice, render_large_voxel_blueprint_svg};
 use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::generate_region_plan;
-use vackrooms::adapters::blueprint_renderer::{
-    render_large_voxel_blueprint_svg, BlueprintSlice,
-};
 
 fn main() {
     let out_dir = "/home/dbslim/vackrooms/static/samples";
@@ -26,15 +24,11 @@ fn main() {
 
     for seed in 1..=100 {
         // Generate plan
-        let _plan = generate_region_plan(
-            seed,
-            Position::new(0.0, 0.0),
-            size_world,
-            &config,
-            &noise,
-        );
+        let _plan =
+            generate_region_plan(seed, Position::new(0.0, 0.0), size_world, &config, &noise);
 
-        let generator = vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
+        let generator =
+            vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
 
         // Generate combined cells (1 for wall, 3 for light)
         let mut combined_cells = vec![0u8; total_w * total_d];

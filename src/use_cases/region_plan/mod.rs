@@ -88,7 +88,6 @@ pub fn spawn_point(seed: u32) -> Position {
     Position::new(6.0, v_edge_portal_z(seed, 0, 0))
 }
 
-
 // ---------------------------------------------------------------------------
 // The planning stages, one intent per module.
 // ---------------------------------------------------------------------------

@@ -9,11 +9,15 @@ use crate::domain::entities::anomaly::{
     AnomalyInstance, AnomalyKind, ArchBehavior, ArchLayout, RealitySnapshot,
 };
 use crate::domain::entities::environment::{EnvironmentProfile, FloorState};
-use crate::domain::entities::voxel_grid::{VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_RED_LIGHT, VOXEL_LIGHT};
+use crate::domain::entities::voxel_grid::{
+    VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT,
+};
+use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::level_zero::{
+    BackroomsLevel, ColumnPlan, FixtureKind, FixtureSample, FixtureState,
+};
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::region_plan::PLAN_WALL_T;
-use crate::use_cases::generate_chunk::GeneratorConfig;
-use crate::use_cases::level_zero::{BackroomsLevel, ColumnPlan, FixtureKind, FixtureSample, FixtureState};
 
 /// Mutable anomaly infill uses a stable content tile for its seam guard. The
 /// tile is a world-generation constant, never the size of an output request.
@@ -162,10 +166,9 @@ fn sample_pillar_expanse(context: &SampleContext<'_>) -> ColumnPlan {
     if !solid && let Some(epoch) = wake_epoch {
         let edge_x = within_x < PLAN_WALL_T || lattice.bay_x - within_x < PLAN_WALL_T;
         let edge_z = within_z < PLAN_WALL_T || lattice.bay_z - within_z < PLAN_WALL_T;
-        let threshold = (0.12
-            * context.config.anomalies.remap_intensity
-            * delirium_gain(context.reality))
-        .clamp(0.0, 0.48);
+        let threshold =
+            (0.12 * context.config.anomalies.remap_intensity * delirium_gain(context.reality))
+                .clamp(0.0, 0.48);
         solid = (edge_x && anomaly_hash(instance, epoch, 0x11F1, cell_x, cell_z) < threshold)
             || (edge_z && anomaly_hash(instance, epoch, 0x11F2, cell_x, cell_z) < threshold);
     }
@@ -273,8 +276,8 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
     plan.solid |= context.perimeter;
     if context.skeleton {
         plan.solid = false;
-        plan.fixture = (local_x.rem_euclid(28.0) < 0.45 && tuning.lights > 0.0).then_some(
-            FixtureSample {
+        plan.fixture =
+            (local_x.rem_euclid(28.0) < 0.45 && tuning.lights > 0.0).then_some(FixtureSample {
                 id: (instance.id as u64) << 16 ^ 0xCA71_C001,
                 kind: FixtureKind::FluorescentStrip,
                 state: FixtureState::Lit,
@@ -284,8 +287,7 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
                 half_z: 0.3,
                 ceiling_units: plan.ceiling_units,
                 red_room: false,
-            },
-        );
+            });
         plan.light_material = VOXEL_GLIMMER;
         return plan;
     }
@@ -333,10 +335,9 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
         let within_x = local_x.rem_euclid(cell);
         let within_z = local_z.rem_euclid(cell);
         let edge = within_x < PLAN_WALL_T || within_z < PLAN_WALL_T;
-        let threshold = (0.20
-            * context.config.anomalies.remap_intensity
-            * delirium_gain(context.reality))
-        .clamp(0.0, 0.65);
+        let threshold =
+            (0.20 * context.config.anomalies.remap_intensity * delirium_gain(context.reality))
+                .clamp(0.0, 0.65);
         if edge && anomaly_hash(instance, epoch, 0xB1AC, cell_x, cell_z) < threshold {
             plan.solid = true;
             plan.fixture = None;

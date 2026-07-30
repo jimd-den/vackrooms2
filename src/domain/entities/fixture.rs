@@ -142,7 +142,10 @@ impl FixtureLayout {
     pub fn is_emissive(&self) -> bool {
         matches!(
             self.state,
-            FixtureState::Lit | FixtureState::Flickering | FixtureState::Dim | FixtureState::Emergency
+            FixtureState::Lit
+                | FixtureState::Flickering
+                | FixtureState::Dim
+                | FixtureState::Emergency
         )
     }
 }
@@ -183,7 +186,10 @@ impl FixtureSample {
     pub fn is_emissive(&self) -> bool {
         matches!(
             self.state,
-            FixtureState::Lit | FixtureState::Flickering | FixtureState::Dim | FixtureState::Emergency
+            FixtureState::Lit
+                | FixtureState::Flickering
+                | FixtureState::Dim
+                | FixtureState::Emergency
         )
     }
 }

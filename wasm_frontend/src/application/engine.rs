@@ -355,7 +355,6 @@ impl Engine {
         }
     }
 
-
     /// Switches the active level: drop every resident chunk so the streamer
     /// rebuilds the world from the new level's generator, then optionally
     /// relocate the player to an arrival point in the new coordinate space.
@@ -1272,8 +1271,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use vackrooms::domain::entities::anomaly::LevelExit;
-    use vackrooms::domain::entities::supplies::SupplyItem;
     use vackrooms::domain::entities::position::Position;
+    use vackrooms::domain::entities::supplies::SupplyItem;
 
     /// Synchronous source whose every chunk carries one almond water beside
     /// the spawn and one door to Level 1 a few steps away.
@@ -1541,9 +1540,8 @@ mod tests {
         fn load(&self, origin_x: f32, origin_z: f32, _level: u32, _lod: u8) -> ChunkPayload {
             let lights = (0..self.lights_per_chunk)
                 .map(|i| {
-                    let id = (origin_x.to_bits() as u64) << 32
-                        ^ (origin_z.to_bits() as u64)
-                        ^ i as u64;
+                    let id =
+                        (origin_x.to_bits() as u64) << 32 ^ (origin_z.to_bits() as u64) ^ i as u64;
                     crate::application::ports::LightSource {
                         id,
                         position: [origin_x, 3.0, origin_z + i as f32],
@@ -1585,7 +1583,9 @@ mod tests {
         let mut engine = Engine::new(
             config,
             Box::new(renderer),
-            Box::new(ManyLightsChunkSource { lights_per_chunk: 4 }),
+            Box::new(ManyLightsChunkSource {
+                lights_per_chunk: 4,
+            }),
         );
         let input = InputFrame::default();
         for _ in 0..10 {

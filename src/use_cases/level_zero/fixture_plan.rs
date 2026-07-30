@@ -22,14 +22,10 @@
 //!    with the exact stable panel center coordinates and ID.
 
 use crate::domain::entities::architecture::{AssemblyInstance, CeilingZone, CirculationSpine};
-use crate::domain::entities::fixture::{
-    FixtureKind, FixtureLayout, FixtureSample, FixtureState,
-};
+use crate::domain::entities::fixture::{FixtureKind, FixtureLayout, FixtureSample, FixtureState};
 
 use super::BackroomsLevel;
-use super::fixture_maintenance::{
-    electrical_condition_for_district, fixture_maintenance_state,
-};
+use super::fixture_maintenance::{electrical_condition_for_district, fixture_maintenance_state};
 
 /// Fixture owner identifier used during spatial column composition.
 #[derive(Debug, Clone, Copy)]
@@ -209,14 +205,15 @@ pub(crate) fn generate_corridor_fixture_layouts(
             for k in start_k..=end_k {
                 let cx = k as f32 * 4.0 + 0.45;
                 let cz = start.z;
-                if cx >= min_x + 0.5 && cx <= max_x - 0.5 {
+                if cx >= min_x - 1e-4 && cx <= max_x + 1e-4 {
                     let segment_idx = (k.abs() / 4) as u64;
                     let district_id = ((spine.id as u64) << 32) ^ segment_idx;
                     let district = electrical_condition_for_district(seed, district_id, 0.0);
 
                     let id = fixture_id_for_corridor(spine.id, k, seed);
                     let hval = fixture_hash(seed, 0xC0DF, spine.id as i64, k);
-                    let state = fixture_maintenance_state(district, FixtureKind::FluorescentStrip, hval);
+                    let state =
+                        fixture_maintenance_state(district, FixtureKind::FluorescentStrip, hval);
 
                     layouts.push(FixtureLayout {
                         id,
@@ -237,14 +234,15 @@ pub(crate) fn generate_corridor_fixture_layouts(
             for k in start_k..=end_k {
                 let cx = start.x;
                 let cz = k as f32 * 4.0 + 0.45;
-                if cz >= min_z + 0.5 && cz <= max_z - 0.5 {
+                if cz >= min_z - 1e-4 && cz <= max_z + 1e-4 {
                     let segment_idx = (k.abs() / 4) as u64;
                     let district_id = ((spine.id as u64) << 32) ^ segment_idx;
                     let district = electrical_condition_for_district(seed, district_id, 0.0);
 
                     let id = fixture_id_for_corridor(spine.id, k, seed);
                     let hval = fixture_hash(seed, 0xC0DF, spine.id as i64, k);
-                    let state = fixture_maintenance_state(district, FixtureKind::FluorescentStrip, hval);
+                    let state =
+                        fixture_maintenance_state(district, FixtureKind::FluorescentStrip, hval);
 
                     layouts.push(FixtureLayout {
                         id,
@@ -365,7 +363,8 @@ pub(crate) fn corridor_fixture_at(
 mod tests {
     use super::*;
     use crate::domain::entities::architecture::{
-        AssemblyInstance, CorruptionProfile, HostSegment, Polygon2, SpaceProgram, StructuralSystem, StructuralSystemInstance,
+        AssemblyInstance, CorruptionProfile, HostSegment, Polygon2, SpaceProgram, StructuralSystem,
+        StructuralSystemInstance,
     };
     use crate::domain::entities::position::Position;
 
@@ -379,12 +378,17 @@ mod tests {
         };
 
         let layouts = generate_corridor_fixture_layouts(42, &spine, 3.2);
-        assert!(!layouts.is_empty(), "corridor should generate fixture layouts");
+        assert!(
+            !layouts.is_empty(),
+            "corridor should generate fixture layouts"
+        );
 
         let first = &layouts[0];
         // Query points near the panel center
         let sample1 = corridor_fixture_at(42, &spine, 3.2, first.center_x, first.center_z).unwrap();
-        let sample2 = corridor_fixture_at(42, &spine, 3.2, first.center_x + 0.1, first.center_z + 0.1).unwrap();
+        let sample2 =
+            corridor_fixture_at(42, &spine, 3.2, first.center_x + 0.1, first.center_z + 0.1)
+                .unwrap();
 
         assert_eq!(sample1.id, sample2.id);
         assert_eq!(sample1.center_x, first.center_x);

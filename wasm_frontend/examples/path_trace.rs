@@ -290,14 +290,16 @@ fn sample_direct_light(
         sample_point[1] - surface_point[1],
         sample_point[2] - surface_point[2],
     ];
-    let distance_sq = to_light[0] * to_light[0] + to_light[1] * to_light[1] + to_light[2] * to_light[2];
+    let distance_sq =
+        to_light[0] * to_light[0] + to_light[1] * to_light[1] + to_light[2] * to_light[2];
     let distance = distance_sq.sqrt().max(1e-4);
     let direction = [
         to_light[0] / distance,
         to_light[1] / distance,
         to_light[2] / distance,
     ];
-    let cos_surface = direction[0] * normal[0] + direction[1] * normal[1] + direction[2] * normal[2];
+    let cos_surface =
+        direction[0] * normal[0] + direction[1] * normal[1] + direction[2] * normal[2];
     // Panels radiate downward; the receiver must also face the panel.
     let cos_light = direction[1].max(0.0);
     if cos_surface <= 0.0 || cos_light <= 0.0 {

@@ -12,5 +12,6 @@ pub mod position;
 pub mod probe_grid;
 pub mod sparse_voxel_octree;
 pub mod supplies;
+pub mod surface_quality_profile;
 pub mod voxel_grid;
 pub mod world_topology;

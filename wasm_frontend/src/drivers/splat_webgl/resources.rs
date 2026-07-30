@@ -152,7 +152,6 @@ impl SplatRenderer {
                 origin: chunk.origin,
                 bounds_max: chunk.mesh.bounds.max,
                 light_texture,
-
             },
         );
     }

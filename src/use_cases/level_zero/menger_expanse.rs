@@ -69,7 +69,11 @@ pub(super) fn expanse_structure(
     wx: f32,
     wz: f32,
 ) -> ExpanseStructure {
-    let plate = plate_for(seed, (wx / PLATE).floor() as i64, (wz / PLATE).floor() as i64);
+    let plate = plate_for(
+        seed,
+        (wx / PLATE).floor() as i64,
+        (wz / PLATE).floor() as i64,
+    );
 
     let (local_x, local_z) = (wx.rem_euclid(PLATE), wz.rem_euclid(PLATE));
     let cell_x = ((local_x / FINE).floor() as usize).min(CELLS - 1);

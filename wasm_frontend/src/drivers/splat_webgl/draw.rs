@@ -361,7 +361,10 @@ fn draw_visible_chunks(
     for chunk in visible {
         let total_faces = chunk.instance_count.max(0) as u32;
         let available_budget = if face_budget_enabled {
-            renderer.profile.face_budget.saturating_sub(stats.faces_drawn)
+            renderer
+                .profile
+                .face_budget
+                .saturating_sub(stats.faces_drawn)
         } else {
             u32::MAX
         };

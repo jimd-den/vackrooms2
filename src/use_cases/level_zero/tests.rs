@@ -159,8 +159,8 @@ fn chunks_tile_seamlessly() {
                 BackroomsLevel::plan_column(plan, &noise, 42, &LevelTuning::default(), wx, wz);
             // Any solid material counts: fabric decay can voxelize a wall
             // or gallery post as aged wallpaper instead of VOXEL_WALL.
-            let got_solid = crate::domain::entities::voxel_grid::SOLID_MATERIALS
-                .contains(&grid.get(lx, 1, z));
+            let got_solid =
+                crate::domain::entities::voxel_grid::SOLID_MATERIALS.contains(&grid.get(lx, 1, z));
             // Raised floor (stair treads) also writes wall material at
             // the walkable layer, so it counts as expected solid here.
             let expect_solid =
@@ -420,9 +420,7 @@ fn hosted_entrances_cut_one_continuous_path_from_corridor_to_room() {
             assert!(
                 !column.solid,
                 "assembly {} entrance at ({:.1},{:.1}) is blocked {offset:.1} u from its host; corridor clearance {corridor_clearance:.2}",
-                assembly.id,
-                entrance.center.x,
-                entrance.center.z,
+                assembly.id, entrance.center.x, entrance.center.z,
             );
         }
     }
@@ -459,7 +457,11 @@ fn every_authored_interior_opening_survives_column_sampling() {
                     opening.center.x,
                     opening.center.z,
                 );
-                assert!(!column.solid, "interior opening {:?} is blocked", opening.id);
+                assert!(
+                    !column.solid,
+                    "interior opening {:?} is blocked",
+                    opening.id
+                );
                 checked += 1;
             }
         }
@@ -665,7 +667,10 @@ fn open_fabric_ceiling_steps_receive_supported_bulkheads() {
         }
     }
 
-    assert!(checked > 8, "sample did not cross enough ceiling territories");
+    assert!(
+        checked > 8,
+        "sample did not cross enough ceiling territories"
+    );
 }
 
 #[test]
@@ -833,7 +838,11 @@ fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
     // Chunk (170, -120)..(180, -110) contains the authored door (172, -116).
     let chunk = Position::new(170.0, -120.0);
     let grid = BackroomsLevel.generate(chunk, 42, config, &noise);
-    assert_eq!(grid.entities.level_exits.len(), 1, "authored door must export");
+    assert_eq!(
+        grid.entities.level_exits.len(),
+        1,
+        "authored door must export"
+    );
     let exit = grid.entities.level_exits[0];
     assert_eq!(exit.target_level, 1);
     assert!(exit.contains(172.0, -116.0));
@@ -1217,7 +1226,10 @@ fn blackout_has_a_recoverable_glimmer_lane_and_compressed_dark_core() {
         core.x,
         core.z,
     );
-    assert!(!core_plan.has_lit_fixture(), "blackout core has an ordinary fixture");
+    assert!(
+        !core_plan.has_lit_fixture(),
+        "blackout core has an ordinary fixture"
+    );
     assert_eq!(core_plan.ceiling_units, 2.6);
 }
 
@@ -2317,5 +2329,3 @@ fn structural_systems_place_columns_differently() {
          structure_for, not by on_column)"
     );
 }
-
-

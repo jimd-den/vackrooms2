@@ -436,8 +436,7 @@ fn build_pipeline(
         label: Some("native.terminal.shader"),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
     });
-    let layout_refs: Vec<Option<&wgpu::BindGroupLayout>> =
-        bind_layouts.iter().map(Some).collect();
+    let layout_refs: Vec<Option<&wgpu::BindGroupLayout>> = bind_layouts.iter().map(Some).collect();
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("native.terminal.pipeline-layout"),
         bind_group_layouts: &layout_refs,

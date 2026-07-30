@@ -36,9 +36,7 @@ pub(crate) enum ElectricalCondition {
 
 /// Pure hashing function computing deterministic unit float `[0.0, 1.0)` for maintenance decisions.
 fn maintenance_hash(seed: u32, salt: u64, id: u64) -> f32 {
-    let mut h = (seed as u64)
-        ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ id.rotate_left(23);
+    let mut h = (seed as u64) ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ id.rotate_left(23);
     h ^= h >> 30;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 27;
@@ -129,10 +127,15 @@ mod tests {
         assert_eq!(cond_normal, electrical_condition_for_district(42, 100, 0.0));
         assert_eq!(cond_aged, electrical_condition_for_district(42, 100, 1.0));
 
-        let state_lit = fixture_maintenance_state(ElectricalCondition::Normal, FixtureKind::FluorescentPanel, 0.5);
+        let state_lit = fixture_maintenance_state(
+            ElectricalCondition::Normal,
+            FixtureKind::FluorescentPanel,
+            0.5,
+        );
         assert_eq!(state_lit, FixtureState::Lit);
 
-        let state_emergency = fixture_maintenance_state(ElectricalCondition::Dead, FixtureKind::EmergencyStrip, 0.5);
+        let state_emergency =
+            fixture_maintenance_state(ElectricalCondition::Dead, FixtureKind::EmergencyStrip, 0.5);
         assert_eq!(state_emergency, FixtureState::Emergency);
     }
 }

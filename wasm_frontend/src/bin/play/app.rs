@@ -36,9 +36,7 @@ use wasm_frontend::application::ports::{
 };
 use wasm_frontend::application::render_settings::RenderToggles;
 use wasm_frontend::drivers::webgpu::camera_state;
-use wasm_frontend::drivers::webgpu::config::{
-    GpuQualityProfile, RendererKind, RendererProfile,
-};
+use wasm_frontend::drivers::webgpu::config::{GpuQualityProfile, RendererKind, RendererProfile};
 use wasm_frontend::drivers::webgpu::frame_resources::FrameResources;
 use wasm_frontend::drivers::webgpu::gpu_types::{GpuFrameUniforms, collect_frame_lights};
 use wasm_frontend::drivers::webgpu::pipelines::{
@@ -90,9 +88,9 @@ fn parse_options() -> Options {
     };
     for argument in std::env::args().skip(1) {
         if let Some(value) = argument.strip_prefix("--renderer=") {
-            options.renderer = value
-                .parse()
-                .unwrap_or_else(|_| panic!("unknown renderer {value:?}; use surface|splat|raymarch|cpu"));
+            options.renderer = value.parse().unwrap_or_else(|_| {
+                panic!("unknown renderer {value:?}; use surface|splat|raymarch|cpu")
+            });
         } else if let Some(value) = argument.strip_prefix("--preset=") {
             options.toggles = match value {
                 "compat" => compat_toggles(),
@@ -224,12 +222,9 @@ impl ApplicationHandler for App {
             spawn_yaw: -std::f32::consts::FRAC_PI_2,
             ..EngineConfig::default()
         };
-        let source = LocalChunkSource::new(SimpleNoiseProvider::new(), self.options.seed, generator);
-        let engine = Engine::new(
-            engine_config,
-            Box::new(renderer.clone()),
-            Box::new(source),
-        );
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), self.options.seed, generator);
+        let engine = Engine::new(engine_config, Box::new(renderer.clone()), Box::new(source));
 
         eprintln!(
             "renderer: {} | seed {} (reproduce with --seed={}) | click to capture the mouse; Esc releases",
@@ -724,7 +719,6 @@ impl NativeRenderer {
     }
 }
 
-
 fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
@@ -782,9 +776,7 @@ fn draw_field_terminal(
     width: u32,
     height: u32,
 ) {
-    use crate::terminal::{
-        CRITICAL, HAZARD, INK, LOADING_PLATE, PANEL, QUIET, ROUTE, SYSTEM,
-    };
+    use crate::terminal::{CRITICAL, HAZARD, INK, LOADING_PLATE, PANEL, QUIET, ROUTE, SYSTEM};
     terminal.begin(width, height);
     let w = width.max(1) as f32;
     let h = height.max(1) as f32;
@@ -903,11 +895,23 @@ fn draw_field_terminal(
     if snapshot.deaths > 0 {
         let text = format!("SUCCUMBED x{}", snapshot.deaths);
         let tw = terminal.measure(&text, px);
-        terminal.text(&text, w - margin - tw, right_y - terminal.line_height(px), px, HAZARD);
+        terminal.text(
+            &text,
+            w - margin - tw,
+            right_y - terminal.line_height(px),
+            px,
+            HAZARD,
+        );
     }
 
     // Center mark: single restrained fixation point (see #reticle).
-    terminal.rect(w * 0.5 - 2.0, h * 0.5 - 2.0, 4.0, 4.0, [0.9, 0.9, 0.85, 0.55]);
+    terminal.rect(
+        w * 0.5 - 2.0,
+        h * 0.5 - 2.0,
+        4.0,
+        4.0,
+        [0.9, 0.9, 0.85, 0.55],
+    );
 
     // F1: configuration panel — the native stand-in for the settings menu,
     // documenting the flags and live switches.
@@ -923,14 +927,53 @@ fn draw_field_terminal(
         ly += terminal.line_height(px) * 1.5;
         let on_off = |on: bool| if on { "ON" } else { "OFF" };
         let rows: Vec<(String, [f32; 4])> = vec![
-            (format!("RENDERER   {renderer_label}   (--renderer=surface|splat|raymarch|cpu)"), INK),
-            (format!("SEED       {}   (--seed=N reproduces this world)", snapshot.seed), INK),
-            (format!("F5 SHADOWS          {}", on_off(snapshot.toggles.shadow_pass)), SYSTEM),
-            (format!("F6 AMBIENT OCCL.    {}", on_off(snapshot.toggles.ambient_occlusion)), SYSTEM),
-            (format!("F7 DEFERRED SHADING {}", on_off(snapshot.toggles.deferred_shading)), SYSTEM),
-            (format!("F8 TORCH OCCLUSION  {}", on_off(snapshot.toggles.flashlight_occlusion)), SYSTEM),
-            ("WASD MOVE   MOUSE LOOK   F TORCH   G FLARE".to_owned(), QUIET),
-            ("R DRINK     T EAT        ESC RELEASE MOUSE".to_owned(), QUIET),
+            (
+                format!("RENDERER   {renderer_label}   (--renderer=surface|splat|raymarch|cpu)"),
+                INK,
+            ),
+            (
+                format!(
+                    "SEED       {}   (--seed=N reproduces this world)",
+                    snapshot.seed
+                ),
+                INK,
+            ),
+            (
+                format!(
+                    "F5 SHADOWS          {}",
+                    on_off(snapshot.toggles.shadow_pass)
+                ),
+                SYSTEM,
+            ),
+            (
+                format!(
+                    "F6 AMBIENT OCCL.    {}",
+                    on_off(snapshot.toggles.ambient_occlusion)
+                ),
+                SYSTEM,
+            ),
+            (
+                format!(
+                    "F7 DEFERRED SHADING {}",
+                    on_off(snapshot.toggles.deferred_shading)
+                ),
+                SYSTEM,
+            ),
+            (
+                format!(
+                    "F8 TORCH OCCLUSION  {}",
+                    on_off(snapshot.toggles.flashlight_occlusion)
+                ),
+                SYSTEM,
+            ),
+            (
+                "WASD MOVE   MOUSE LOOK   F TORCH   G FLARE".to_owned(),
+                QUIET,
+            ),
+            (
+                "R DRINK     T EAT        ESC RELEASE MOUSE".to_owned(),
+                QUIET,
+            ),
         ];
         for (row, color) in rows {
             terminal.text(&row, lx, ly, px, color);

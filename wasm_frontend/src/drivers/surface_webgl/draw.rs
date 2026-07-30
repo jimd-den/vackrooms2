@@ -189,10 +189,7 @@ fn draw_supply_labels(renderer: &SurfaceRenderer, frame: &FrameParams) {
     gl.uniform_matrix4fv_with_f32_array(uniforms.projection.as_ref(), false, &projection);
     gl.uniform_matrix4fv_with_f32_array(uniforms.view.as_ref(), false, &view);
 
-    let count = frame
-        .supply_sprites
-        .len()
-        .min(supply_labels::MAX_SPRITES);
+    let count = frame.supply_sprites.len().min(supply_labels::MAX_SPRITES);
     let mut sprites = [0.0f32; supply_labels::MAX_SPRITES * 4];
     for (i, sprite) in frame.supply_sprites.iter().take(count).enumerate() {
         sprites[i * 4] = sprite.position[0];

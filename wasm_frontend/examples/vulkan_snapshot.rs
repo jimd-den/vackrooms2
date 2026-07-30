@@ -98,20 +98,27 @@ fn main() {
         })
         .collect();
     surface.upload(&device, &surface_chunks);
-    let pixels = render_offscreen(&device, &queue, width, height, true, |encoder, color, depth| {
-        surface.draw(
-            &queue,
-            encoder,
-            color,
-            depth.expect("surface pass renders with depth"),
-            &frame_resources,
-            &world.frame,
-            toggles,
-            world.frame.scene_lights.len() as u32,
-            FOV_TAN,
-            width as f32 / (height.max(1)) as f32,
-        );
-    });
+    let pixels = render_offscreen(
+        &device,
+        &queue,
+        width,
+        height,
+        true,
+        |encoder, color, depth| {
+            surface.draw(
+                &queue,
+                encoder,
+                color,
+                depth.expect("surface pass renders with depth"),
+                &frame_resources,
+                &world.frame,
+                toggles,
+                world.frame.scene_lights.len() as u32,
+                FOV_TAN,
+                width as f32 / (height.max(1)) as f32,
+            );
+        },
+    );
     write_png(&out_dir, "surface", width, height, &pixels);
 
     // Splat: compact face pages expanded on the GPU.
@@ -123,20 +130,27 @@ fn main() {
         FACE_BUDGET,
     );
     splat.upload(&device, &surface_chunks);
-    let pixels = render_offscreen(&device, &queue, width, height, true, |encoder, color, depth| {
-        splat.draw(
-            &queue,
-            encoder,
-            color,
-            depth.expect("splat pass renders with depth"),
-            &frame_resources,
-            &world.frame,
-            toggles,
-            world.frame.scene_lights.len() as u32,
-            FOV_TAN,
-            width as f32 / (height.max(1)) as f32,
-        );
-    });
+    let pixels = render_offscreen(
+        &device,
+        &queue,
+        width,
+        height,
+        true,
+        |encoder, color, depth| {
+            splat.draw(
+                &queue,
+                encoder,
+                color,
+                depth.expect("splat pass renders with depth"),
+                &frame_resources,
+                &world.frame,
+                toggles,
+                world.frame.scene_lights.len() as u32,
+                FOV_TAN,
+                width as f32 / (height.max(1)) as f32,
+            );
+        },
+    );
     write_png(&out_dir, "splat", width, height, &pixels);
 
     // Raymarch: canonical SVO words traced in the fragment shader.
@@ -148,17 +162,24 @@ fn main() {
     );
     raymarch.configure(RaymarchRuntimeOptions::new(MAX_DRAW_DISTANCE, true, 4));
     raymarch.upload_atlas(&device, &world.atlas);
-    let pixels = render_offscreen(&device, &queue, width, height, false, |encoder, color, _| {
-        raymarch.draw(
-            &queue,
-            encoder,
-            color,
-            &frame_resources,
-            &world.frame,
-            &world.chunks,
-            toggles,
-        );
-    });
+    let pixels = render_offscreen(
+        &device,
+        &queue,
+        width,
+        height,
+        false,
+        |encoder, color, _| {
+            raymarch.draw(
+                &queue,
+                encoder,
+                color,
+                &frame_resources,
+                &world.frame,
+                &world.chunks,
+                toggles,
+            );
+        },
+    );
     write_png(&out_dir, "raymarch", width, height, &pixels);
 
     // CPU splatter, presented through the production WebGPU texture pass.
@@ -171,16 +192,23 @@ fn main() {
         toggles,
         ..CpuRenderSettings::default()
     };
-    let pixels = render_offscreen(&device, &queue, width, height, false, |encoder, color, _| {
-        cpu_present.draw(
-            &queue,
-            encoder,
-            color,
-            &world.frame,
-            &world.chunks,
-            cpu_settings,
-        );
-    });
+    let pixels = render_offscreen(
+        &device,
+        &queue,
+        width,
+        height,
+        false,
+        |encoder, color, _| {
+            cpu_present.draw(
+                &queue,
+                encoder,
+                color,
+                &world.frame,
+                &world.chunks,
+                cpu_settings,
+            );
+        },
+    );
     write_png(&out_dir, "cpu", width, height, &pixels);
 
     eprintln!("snapshots written to {}", out_dir.display());

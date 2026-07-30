@@ -17,7 +17,9 @@ use vackrooms::domain::entities::anomaly::{
     AnomalyKind, FABRIC_DRIFT_CELL, WorldBounds, fabric_drift_cell_of,
 };
 
-use super::{BLACKOUT_HIDE_DISTANCE, BLACKOUT_SHIFT_PERIOD_S, ChunkKey, Engine, LEVEL_BACKROOMS, chunk_key};
+use super::{
+    BLACKOUT_HIDE_DISTANCE, BLACKOUT_SHIFT_PERIOD_S, ChunkKey, Engine, LEVEL_BACKROOMS, chunk_key,
+};
 
 /// A level's "the space doesn't stay put when unobserved" mechanic. A level
 /// with no registered policy simply has none — the space stays put, which

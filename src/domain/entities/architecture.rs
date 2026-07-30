@@ -581,7 +581,11 @@ impl AssemblyInstance {
         }
         let mut door_openings = HashSet::new();
         for leaf in &self.door_leaves {
-            if !self.openings.iter().any(|opening| opening.id == leaf.opening) {
+            if !self
+                .openings
+                .iter()
+                .any(|opening| opening.id == leaf.opening)
+            {
                 violations.push(ArchitectureViolation::MissingDoorOpening(leaf.opening));
             }
             if !door_openings.insert(leaf.opening) {
@@ -766,10 +770,12 @@ mod tests {
         let violations = room.validate_architecture();
         assert!(violations.contains(&ArchitectureViolation::DuplicateHostId(HostId(0))));
         assert!(violations.contains(&ArchitectureViolation::DuplicateOpeningId(OpeningId(0))));
-        assert!(violations.contains(&ArchitectureViolation::OverlappingHosts(
-            HostId(0),
-            HostId(0)
-        )));
+        assert!(
+            violations.contains(&ArchitectureViolation::OverlappingHosts(
+                HostId(0),
+                HostId(0)
+            ))
+        );
     }
 
     #[test]

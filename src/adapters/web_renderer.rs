@@ -11,11 +11,98 @@ use crate::use_cases::build_octree::BuildOctreeUseCase;
 pub struct WebRendererAdapter;
 
 impl WebRendererAdapter {
-    /// Translates VoxelGrid into a JSON string representing greedy-meshed quads.
+    /// Translates VoxelGrid into a JSON string representing greedy-meshed quads using default Exact policy.
     pub fn to_json(grid: &VoxelGrid, voxel_scale: f32) -> String {
         let mapper = VoxelMapper::new(voxel_scale, &DEFAULT_MATERIAL_PALETTE);
         let quads = mapper.map_voxel_grid(grid);
         JsonPresenter::render_voxels(&quads)
+    }
+
+    /// Translates VoxelGrid into a JSON string using LowSpec greedy surface meshing policy.
+    pub fn to_low_spec_json(grid: &VoxelGrid, voxel_scale: f32) -> String {
+        let mapper = VoxelMapper::with_policy(
+            voxel_scale,
+            &DEFAULT_MATERIAL_PALETTE,
+            crate::adapters::voxel_mapper::SurfaceMeshingPolicy::LowSpec,
+        );
+        let quads = mapper.map_voxel_grid(grid);
+        JsonPresenter::render_voxels(&quads)
+    }
+
+    /// Converts VoxelGrid and its downsampled ProbeGrid into a high-performance binary surface payload.
+    ///
+    /// BINARY SCHEMATIC (Byte offset -> payload):
+    /// - `0..4`: `quad_count` (u32, little-endian)
+    /// - `4..8`: `probe_width` (u32, little-endian)
+    /// - `8..12`: `probe_height` (u32, little-endian)
+    /// - `12..16`: `probe_depth` (u32, little-endian)
+    /// - `16..20`: `voxel_scale` (f32, little-endian)
+    /// - `20..24`: `policy` (u32, little-endian; 0=Exact, 1=LowSpec)
+    /// - `24..24 + quad_count * 28`: packed quads (x, y, z, w, h [f32], dir, material, light, ao [u8], color [u32])
+    /// - `..end`: raw packed RGB8 probe grid bytes
+    pub fn to_low_spec_surface_binary(
+        grid: &VoxelGrid,
+        voxel_scale: f32,
+        probe_resolution: (usize, usize, usize),
+    ) -> Vec<u8> {
+        use crate::adapters::voxel_mapper::{FaceDirection, SurfaceMeshingPolicy};
+        use crate::domain::entities::probe_grid::ProbeGrid;
+
+        let mapper = VoxelMapper::with_policy(
+            voxel_scale,
+            &DEFAULT_MATERIAL_PALETTE,
+            SurfaceMeshingPolicy::LowSpec,
+        );
+        let quads = mapper.map_voxel_grid(grid);
+        let probe_grid = ProbeGrid::from_voxel_grid(
+            grid,
+            probe_resolution.0,
+            probe_resolution.1,
+            probe_resolution.2,
+        );
+
+        let header_size = 24;
+        let quad_size = 28;
+        let probe_size = probe_grid.as_bytes().len();
+        let total_size = header_size + quads.len() * quad_size + probe_size;
+
+        let mut binary = Vec::with_capacity(total_size);
+
+        // Header
+        binary.extend_from_slice(&(quads.len() as u32).to_le_bytes());
+        binary.extend_from_slice(&(probe_resolution.0 as u32).to_le_bytes());
+        binary.extend_from_slice(&(probe_resolution.1 as u32).to_le_bytes());
+        binary.extend_from_slice(&(probe_resolution.2 as u32).to_le_bytes());
+        binary.extend_from_slice(&voxel_scale.to_le_bytes());
+        binary.extend_from_slice(&1u32.to_le_bytes()); // 1 = LowSpec
+
+        // Packed quads
+        for q in &quads {
+            binary.extend_from_slice(&q.x.to_le_bytes());
+            binary.extend_from_slice(&q.y.to_le_bytes());
+            binary.extend_from_slice(&q.z.to_le_bytes());
+            binary.extend_from_slice(&q.w.to_le_bytes());
+            binary.extend_from_slice(&q.h.to_le_bytes());
+
+            let dir_u8 = match q.dir {
+                FaceDirection::Up => 0u8,
+                FaceDirection::Down => 1u8,
+                FaceDirection::North => 2u8,
+                FaceDirection::South => 3u8,
+                FaceDirection::East => 4u8,
+                FaceDirection::West => 5u8,
+            };
+            binary.push(dir_u8);
+            binary.push(q.material);
+            binary.push(q.light);
+            binary.push(q.ao);
+            binary.extend_from_slice(&q.color.to_le_bytes());
+        }
+
+        // Probe grid payload
+        binary.extend_from_slice(probe_grid.as_bytes());
+
+        binary
     }
 
     /// Converts VoxelGrid into a Sparse Voxel Octree (SVO) and serializes
@@ -113,5 +200,38 @@ mod tests {
         assert!(binary.len() >= 28);
         // Total bytes must be aligned to 4-byte boundaries
         assert_eq!(binary.len() % 4, 0);
+    }
+
+    #[test]
+    fn test_to_low_spec_json_merging() {
+        let mut grid = VoxelGrid::new(2, 1, 1);
+        grid.set(0, 0, 0, VOXEL_WALL);
+        grid.set(1, 0, 0, VOXEL_WALL);
+        grid.set_light(0, 0, 0, 3);
+        grid.set_light(1, 0, 0, 14);
+
+        let low_json = WebRendererAdapter::to_low_spec_json(&grid, 1.0);
+        // LowSpec mode merges the top face into 1 quad with width 2
+        assert!(low_json.contains("\"w\":2"));
+    }
+
+    #[test]
+    fn test_to_low_spec_surface_binary_payload() {
+        let mut grid = VoxelGrid::new(4, 2, 4);
+        grid.set(0, 0, 0, VOXEL_WALL);
+
+        let binary = WebRendererAdapter::to_low_spec_surface_binary(&grid, 1.0, (4, 2, 4));
+        let header_size = 24;
+        let probe_bytes = 4 * 2 * 4 * 3; // 96 bytes
+
+        assert!(binary.len() > header_size + probe_bytes);
+
+        // Check quad_count in header (bytes 0..4)
+        let quad_count = u32::from_le_bytes(binary[0..4].try_into().unwrap());
+        assert!(quad_count > 0);
+
+        // Check policy in header (bytes 20..24)
+        let policy = u32::from_le_bytes(binary[20..24].try_into().unwrap());
+        assert_eq!(policy, 1, "policy field must be 1 (LowSpec)");
     }
 }

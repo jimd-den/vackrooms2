@@ -9,8 +9,7 @@
 
 use vackrooms::adapters::material_palette::material_color_f32;
 use vackrooms::domain::entities::voxel_grid::{
-    VOXEL_AIR, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid,
-    material_emission_strength,
+    VOXEL_AIR, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid, material_emission_strength,
 };
 use vackrooms::use_cases::bake_voxel_lighting::DEFAULT_MAX_LIGHT_RANGE_WORLD_UNITS;
 
@@ -240,7 +239,7 @@ fn flicker_mode_for(material: u8, id: u64) -> u8 {
     let mut h = id ^ (id >> 33);
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     match (h >> 40) % 100 {
-        0..=11 => 1, // tired ballast shimmer
+        0..=11 => 1,  // tired ballast shimmer
         12..=15 => 2, // dying tube: hard dropouts
         _ => 0,
     }
@@ -477,5 +476,4 @@ mod tests {
             }
         }
     }
-
 }

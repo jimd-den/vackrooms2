@@ -16,7 +16,9 @@ use crate::use_cases::level_generator::LevelGenerator;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::red_rooms::recursive_level::RecursiveLevelWindow;
 
-use super::{BackroomsLevel, ColumnField, ColumnPlan, FixtureState, GRID_HEIGHT_UNITS, voxelize_columns};
+use super::{
+    BackroomsLevel, ColumnField, ColumnPlan, FixtureState, GRID_HEIGHT_UNITS, voxelize_columns,
+};
 
 /// Runtime direct lights sit below their visible ceiling panel. Tall atria
 /// need a longer pendant drop so the light reaches occupied space and casts
