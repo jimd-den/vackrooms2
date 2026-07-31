@@ -114,7 +114,11 @@ impl SurfaceRenderer {
 
     /// Updates only the chunk's 3D irradiance light volume texture without
     /// destroying or re-allocating vertex/index buffer object (VAO/VBO/IBO) state.
-    pub(crate) fn update_light_volume(&mut self, key: crate::application::ports::SurfaceChunkKey, mesh: &SurfaceMeshPayload) {
+    pub(crate) fn update_light_volume(
+        &mut self,
+        key: crate::application::ports::SurfaceChunkKey,
+        mesh: &SurfaceMeshPayload,
+    ) {
         if let Some(gpu_mesh) = self.meshes.get_mut(&key) {
             self.gl.delete_texture(Some(&gpu_mesh.light_texture));
             if let Ok(new_tex) = upload_light_volume(&self.gl, mesh) {

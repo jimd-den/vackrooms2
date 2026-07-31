@@ -2,17 +2,19 @@
 //! arrival plaza with its door back to Level 0.
 
 use crate::domain::entities::anomaly::{LevelExit, RealitySnapshot};
+use crate::domain::entities::position::Position;
 use crate::domain::entities::supplies::{SupplyItem, SupplyKind};
 use crate::domain::entities::voxel_grid::{
     VOXEL_ALMOND_WATER, VOXEL_CONCRETE_FLOOR, VOXEL_CONCRETE_WALL, VOXEL_CRATE, VOXEL_METAL_DOOR,
     VOXEL_PIPE, VOXEL_TILE_FLOOR, VoxelGrid,
 };
-use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::generated_chunk::GeneratedChunk;
 use crate::use_cases::level_generator::{LEVEL_BACKROOMS, LevelGenerator};
-use crate::use_cases::level_zero::{ColumnField, ColumnPlan, voxelize_columns};
+use crate::use_cases::level_zero::{
+    ColumnField, ColumnPlan, FixtureKind, FixtureSample, FixtureState, voxelize_columns,
+};
 use crate::use_cases::ports::NoiseProvider;
 
 use super::{GRID_HEIGHT_UNITS, HabitableLevel, Sector};
@@ -117,7 +119,19 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - BAY * 0.5, BAY);
         let lz = pillar_axis_dist(wz - BAY * 0.5, BAY);
         if lit && lx < 0.65 && lz < 0.65 {
-            column.light = true;
+            let center_x = ((wx - BAY * 0.5) / BAY).round() * BAY + BAY * 0.5;
+            let center_z = ((wz - BAY * 0.5) / BAY).round() * BAY + BAY * 0.5;
+            column.fixture = Some(FixtureSample {
+                id: hash(seed, 0xA10A_11A5_0000_0002, bx, bz),
+                kind: FixtureKind::FluorescentPanel,
+                state: FixtureState::Lit,
+                center_x,
+                center_z,
+                half_x: 0.45,
+                half_z: 0.45,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
@@ -142,8 +156,9 @@ impl HabitableLevel {
                 (cell_x, (wz / ROOM).round() as i64, wx, 0x22)
             };
             let t = unit(hash(seed, 0x91D0_D008_0000_0000 | salt, edge_x, edge_z));
-            let gap_center =
-                (along / ROOM).floor() * ROOM + GAP_BAND_MARGIN + t * (ROOM - 2.0 * GAP_BAND_MARGIN);
+            let gap_center = (along / ROOM).floor() * ROOM
+                + GAP_BAND_MARGIN
+                + t * (ROOM - 2.0 * GAP_BAND_MARGIN);
             let in_gap = (along - gap_center).abs() < DOOR_W * 0.5;
             if in_gap {
                 column.lintel_from_units = Some(DOOR_H);
@@ -179,13 +194,25 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - ROOM * 0.5, ROOM);
         let lz = pillar_axis_dist(wz - ROOM * 0.5, ROOM);
         if lx < 0.55 && lz < 0.55 && unit(hash(seed, 0x91D0_11A5, cell_x, cell_z)) > 0.42 {
-            column.light = true;
+            let center_x = (cell_x as f32 + 0.5) * ROOM;
+            let center_z = (cell_z as f32 + 0.5) * ROOM;
+            column.fixture = Some(FixtureSample {
+                id: hash(seed, 0x91D0_11A5, cell_x, cell_z),
+                kind: FixtureKind::FluorescentPanel,
+                state: FixtureState::Lit,
+                center_x,
+                center_z,
+                half_x: 0.45,
+                half_z: 0.45,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
     /// Curved masonry: circular pillars joined by parabolic arches under a
     /// vaulted ceiling.
-    fn plan_gothic(_seed: u32, wx: f32, wz: f32, column: &mut ColumnPlan) {
+    fn plan_gothic(seed: u32, wx: f32, wz: f32, column: &mut ColumnPlan) {
         column.ceiling_units = 4.8;
 
         if node_dist(wx, wz, ROOM) < GOTHIC_R {
@@ -222,7 +249,19 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - ROOM * 0.5, ROOM);
         let lz = pillar_axis_dist(wz - ROOM * 0.5, ROOM);
         if lx < 0.5 && lz < 0.5 && (cx + cz).rem_euclid(2) == 0 {
-            column.light = true;
+            let center_x = (cx as f32 + 0.5) * ROOM;
+            let center_z = (cz as f32 + 0.5) * ROOM;
+            column.fixture = Some(FixtureSample {
+                id: hash(seed, 0x607F_1C00_0000_0000, cx, cz),
+                kind: FixtureKind::FluorescentPanel,
+                state: FixtureState::Lit,
+                center_x,
+                center_z,
+                half_x: 0.45,
+                half_z: 0.45,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
@@ -269,7 +308,21 @@ impl HabitableLevel {
         let lx = pillar_axis_dist(wx - SCAFFOLD, SCAFFOLD * 2.0);
         let lz = pillar_axis_dist(wz - SCAFFOLD, SCAFFOLD * 2.0);
         if lx < 0.5 && lz < 0.5 && unit(cell.rotate_left(11)) < 0.4 {
-            column.light = true;
+            let center_x =
+                ((wx - SCAFFOLD) / (SCAFFOLD * 2.0)).round() * (SCAFFOLD * 2.0) + SCAFFOLD;
+            let center_z =
+                ((wz - SCAFFOLD) / (SCAFFOLD * 2.0)).round() * (SCAFFOLD * 2.0) + SCAFFOLD;
+            column.fixture = Some(FixtureSample {
+                id: cell ^ 0xCAFF_0001,
+                kind: FixtureKind::FluorescentStrip,
+                state: FixtureState::Lit,
+                center_x,
+                center_z,
+                half_x: 0.3,
+                half_z: 0.3,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
@@ -310,20 +363,24 @@ impl HabitableLevel {
         column.wall_material = VOXEL_CONCRETE_WALL;
         // One dependable fixture above the arrival point.
         if (wx - ARRIVAL_POINT.0).abs() < 0.6 && (wz - ARRIVAL_POINT.1).abs() < 0.6 {
-            column.light = true;
+            column.fixture = Some(FixtureSample {
+                id: 0x91A2_A0A0_0000_0001,
+                kind: FixtureKind::FluorescentPanel,
+                state: FixtureState::Lit,
+                center_x: ARRIVAL_POINT.0,
+                center_z: ARRIVAL_POINT.1,
+                half_x: 0.45,
+                half_z: 0.45,
+                ceiling_units: column.ceiling_units,
+                red_room: false,
+            });
         }
     }
 
     /// Deterministic supply spot for one supply cell, or None. Supplies are
     /// canon-dense in Gild (crates), present in Aquila, rare elsewhere; the
     /// world tuning scales drink and food frequency independently.
-    fn supply_for_cell(
-        seed: u32,
-        cx: i64,
-        cz: i64,
-        water: f32,
-        food: f32,
-    ) -> Option<SupplyItem> {
+    fn supply_for_cell(seed: u32, cx: i64, cz: i64, water: f32, food: f32) -> Option<SupplyItem> {
         let water_weight = 0.72 * water.clamp(0.0, 4.0);
         let food_weight = 0.28 * food.clamp(0.0, 4.0);
         if water_weight + food_weight <= 0.0 {
@@ -352,8 +409,7 @@ impl HabitableLevel {
             if column.solid || !column.floor {
                 continue;
             }
-            let kind = if unit(roll.rotate_left(9)) * (water_weight + food_weight) < water_weight
-            {
+            let kind = if unit(roll.rotate_left(9)) * (water_weight + food_weight) < water_weight {
                 SupplyKind::AlmondWater
             } else {
                 SupplyKind::Ration
@@ -462,10 +518,16 @@ pub(crate) fn stamp_level_door(
     wall_material: u8,
 ) {
     let to_local = |w: f32, origin: f32| ((w - origin) / voxel_size).floor() as i64;
-    let door_half = 0.6;
+    // The walk-through leaf is a CAD rough opening (same allowance as the
+    // Level 0 fabric doorways) under a CAD-height lintel, with a 0.3 u
+    // structural header over the frame. The whole footprint must stay
+    // within the 1.0 u region-window margin (see provisions), which is why
+    // the frame is a rough single door and not a paired egress leaf.
+    let door_half = crate::use_cases::level_zero::DOOR_WIDTH / 2.0;
     let jamb_half = 0.15;
-    let height_v = (2.4 / voxel_size).round() as i64;
-    let lintel_v = (2.2 / voxel_size).round() as i64;
+    let lintel_units = crate::domain::entities::cad::CAD_DOOR_HEIGHT;
+    let height_v = ((lintel_units + 0.3) / voxel_size).round() as i64;
+    let lintel_v = (lintel_units / voxel_size).round() as i64;
     let panel_t = ((0.12 / voxel_size).round() as i64).max(1);
 
     let x0 = to_local(center_x - door_half - jamb_half * 2.0, chunk_pos.x);

@@ -47,7 +47,10 @@ fn route_anchor_resolves_the_guaranteed_door_from_streamed_world_data() {
         .stats()
         .route
         .expect("the guaranteed door must be resident and selected");
-    assert_eq!(route.target_level, 1, "Level 0's guaranteed door leads to 1");
+    assert_eq!(
+        route.target_level, 1,
+        "Level 0's guaranteed door leads to 1"
+    );
     assert!(
         (5.0..40.0).contains(&route.range_m),
         "range must be the real straight-line distance, got {}",

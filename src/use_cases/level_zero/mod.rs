@@ -31,14 +31,17 @@ mod column_field;
 mod column_plan;
 mod compose_column;
 mod fabric;
+mod fixture_maintenance;
+mod fixture_plan;
 mod generate;
+mod menger_expanse;
 mod provisions;
 #[cfg(test)]
 mod tests;
 mod voxelize;
 
 pub(crate) use column_field::ColumnField;
-pub(crate) use column_plan::ColumnPlan;
+pub(crate) use column_plan::{ColumnPlan, FixtureKind, FixtureSample, FixtureState};
 pub(crate) use voxelize::voxelize_columns;
 
 /// Ceiling height of the tallest (atrium) vaults, world units.
@@ -46,8 +49,9 @@ pub const MAX_CEILING_UNITS: f32 = 5.4;
 /// Total grid height: headroom above the tallest vault.
 pub const GRID_HEIGHT_UNITS: f32 = 5.8;
 
-pub(crate) const DOOR_WIDTH: f32 = 1.2;
-pub(crate) const DOOR_HEIGHT: f32 = 2.2;
+// Door dimensions live with the rest of the planning vocabulary; re-export
+// for this module's samplers and tests.
+pub(crate) use crate::use_cases::region_plan::{DOOR_HEIGHT, DOOR_WIDTH};
 
 /// Level 0 — the Backrooms proper. One zero-sized generator; every stage it
 /// composes is a pure function of world-space coordinates and the immutable

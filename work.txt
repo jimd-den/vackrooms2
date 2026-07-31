@@ -1,0 +1,574 @@
+You are working in the Vackrooms Rust/WASM/WebGL/WebGPU codebase.
+
+Your task is to implement a first-class LOW-SPEC GREEDY-SURFACE RENDERING PATH for infinite procedural voxel architecture.
+
+This is not a request to rewrite the renderer, remove SVO/raymarch/splat paths, replace the generator, or introduce a new rendering API. Preserve all current rendering strategies and their public behavior. Improve the existing indexed greedy-surface path and its artifact preparation so that it becomes the default performance-oriented visual path for weak integrated GPUs, browser WebGL/WebGPU environments, low-end phones, and Raspberry-Pi-class hardware.
+
+The result should make ordinary Backrooms architecture—large contiguous floors, ceilings, walls, halls, rooms, and repeating materials—render with very few triangles, few draw submissions, bounded dynamic-light/shadow work, and predictable frame time.
+
+The codebase already contains:
+- Greedy surface meshing in `src/adapters/voxelmapper.rs`.
+- `MergedQuad`, `FaceDirection`, voxel halo handling, material/color/light/AO face data.
+- Surface and splat render strategies.
+- Compact GPU packed surface/face records.
+- Surface shader and surface geometry shader modules.
+- Quality profiles, renderer profiles, render toggles, and low/high GPU configuration.
+- Fog, baked/static lighting, direct light/shadow options, and CPU fallback.
+- Chunk streaming and multiple renderer strategies.
+- Tests across domain, adapters, and renderer contracts.
+
+Read the existing code before editing. Locate the exact current paths for:
+1. Voxel surface extraction and greedy meshing.
+2. Conversion from extracted quads to packed surface mesh vertices/index data.
+3. Surface chunk upload/removal/cache lifecycle.
+4. Surface draw submission and per-frame chunk selection.
+5. Lighting/shadow selection for surface rendering.
+6. Quality profile and runtime render-setting plumbing.
+7. WebGL equivalent behavior if it shares or duplicates any surface concepts.
+
+Do not guess file names or invent a parallel architecture if equivalent types/functions already exist. Follow the project’s established naming, visibility, and testing conventions.
+
+============================================================
+PRIMARY PRODUCT REQUIREMENT
+============================================================
+
+Implement a configurable low-spec surface profile that achieves these rules:
+
+1. A contiguous exposed voxel surface with compatible geometry/material semantics must merge into the largest safe rectangular quad practical for the chunk.
+2. Every merged quad renders as two triangles only.
+3. Low-spec merging must not be broken solely because neighboring voxels have different baked-light values or AO values.
+4. Low-spec geometry must still preserve:
+   - Solid/air visibility correctness.
+   - Material boundaries.
+   - Face direction/normal boundaries.
+   - Chunk boundary / halo correctness.
+   - Collision and world voxel data behavior.
+   - Emissive-material identity.
+5. Lighting variation must be represented without forcing unnecessary geometry splits:
+   - Use an existing coarse lighting representation if one already exists and is suitable.
+   - Otherwise add a clearly bounded, low-resolution per-chunk lighting payload that a merged surface can sample or interpolate.
+   - Do not create a full-resolution per-voxel light texture for low-spec mode.
+   - Do not add per-fragment ray tracing, SVO traversal, cone tracing, screen-space tracing, or unlimited dynamic-light loops to this path.
+6. The low-spec path must have explicit hard work budgets and graceful degradation.
+7. The lowest tier must prioritize stable frame pacing over maximum visual detail.
+8. The path must work with the project’s renderer abstraction and must not bypass clean architecture layers.
+
+The intended visual trade-off is:
+- Large continuous architecture remains geometrically simple.
+- Wallpaper/carpet/concrete detail comes from tiled/world-space material shading rather than tessellation.
+- Lighting is low-frequency and atmospheric rather than per-voxel-perfect.
+- Fog hides draw-distance/LOD transitions.
+- Expensive effects are optional and bounded.
+- Natural/curved/anomalous forms are NOT part of this implementation unless they already fit the existing surface abstractions; do not globally raise voxel resolution to chase smoothness.
+
+============================================================
+NON-GOALS
+============================================================
+
+Do NOT:
+- Replace voxels with marching cubes, dual contouring, terrain meshing, or a general mesh engine.
+- Change world generation resolution as a performance mechanism.
+- Change voxel scale dynamically while the player is in a loaded world.
+- Delete, disable, or regress raymarch, splat, or CPU reference renderers.
+- Make WebGPU a requirement for the low-spec route.
+- Add dependencies unless strictly necessary and justified.
+- Implement path tracing, temporal denoising, ReSTIR, voxel cone tracing, mesh shaders, compute shaders, or neural upscaling.
+- Introduce a monolithic “LowSpecRenderer” god object.
+- Add global mutable state.
+- Put GPU driver/WebGL/WebGPU code inside domain/usecase modules.
+- Put shader packing formats, GPU buffers, or browser types inside the domain.
+- Use a boolean-parameter explosion such as `low_spec: bool` throughout unrelated APIs.
+- Break current exact/high-quality greedy meshing semantics.
+
+============================================================
+ARCHITECTURE REQUIREMENTS
+============================================================
+
+Preserve clean architecture and screaming architecture.
+
+Use this separation:
+
+DOMAIN
+- Pure data/value types and deterministic rules only.
+- No renderer APIs, no GPU concepts, no browser concepts.
+- If a merge policy is a pure rule over face attributes, it may be represented as a domain-neutral value/configuration type only if that matches current project layering.
+- Prefer not to move existing adapter meshing code into domain unless architecture already establishes it there.
+
+APPLICATION / USE CASES
+- Orchestrate artifact requests, quality decisions, work budgets, and renderer-agnostic policies.
+- Own ports/interfaces for obtaining or submitting rendering artifacts when existing conventions call for it.
+- Be deterministic and testable without a browser/GPU.
+
+ADAPTERS
+- Implement voxel-grid-to-surface extraction.
+- Implement meshing policy details.
+- Implement packed render artifact conversion if that is already adapter responsibility.
+- Keep each function focused: inspect face, decide compatibility, greedy-merge a slice, build a quad, convert quad to payload.
+
+FRAMEWORKS / DRIVERS
+- WebGL/WebGPU buffer upload, binding, draw calls, shader source, resource lifetime.
+- Runtime GPU timing if existing instrumentation supports it.
+- No procedural world-generation logic here.
+- No voxel-neighborhood topology logic here.
+
+TESTS
+- Test pure policy decisions as unit tests.
+- Test meshing output using tiny deterministic voxel grids.
+- Test packing contracts independently.
+- Test profile/budget selection without GPU access.
+- Retain all existing tests and update expectations only when behavior intentionally changes.
+
+Use small, composable functions with explicit names. Prefer data in/data out. Avoid functions longer than roughly 40–60 lines when reasonable; split by responsibility, not arbitrarily.
+
+============================================================
+IMPLEMENTATION PLAN
+============================================================
+
+Implement in ordered, buildable phases. After each phase:
+- Run formatting.
+- Run the narrowest relevant tests.
+- Fix regressions before proceeding.
+- Do not leave a phase half-wired.
+
+------------------------------------------------------------
+PHASE 0 — RECONNAISSANCE AND WRITTEN PLAN
+------------------------------------------------------------
+
+Before modifying code:
+
+1. Inspect and summarize the actual call chain from:
+   `VoxelGrid / generated chunk`
+   -> surface extraction / greedy meshing
+   -> surface mesh artifact
+   -> packed GPU vertex/index payload
+   -> chunk upload/cache
+   -> visibility/draw submission
+   -> surface shader lighting.
+
+2. Identify:
+   - Current merge key fields.
+   - Why baked light and AO currently split greedy quads.
+   - Existing surface artifact structures and their consumers.
+   - Existing low-quality profile fields and defaults.
+   - Existing fog, static/baked lighting, dynamic light, and shadow controls.
+   - Existing chunk culling and draw-distance policy.
+   - Existing WebGL surface route, if any.
+   - Existing CPU fallback behavior and its relationship to quality profiles.
+
+3. Produce a short implementation plan in the CLI response before edits:
+   - Files to modify.
+   - New types/modules, if any.
+   - Existing types to extend.
+   - Exact test files to add or modify.
+   - Risks and compatibility strategy.
+
+Do not start coding until this plan matches the actual repository layout.
+
+------------------------------------------------------------
+PHASE 1 — EXPLICIT SURFACE MESHING POLICY
+------------------------------------------------------------
+
+Introduce an explicit meshing policy abstraction at the narrowest appropriate layer.
+
+The current exact behavior uses a face key that includes material/color/light/AO. Preserve that behavior as the exact/reference policy.
+
+Add a separate policy for low-spec surface extraction. Name it in the codebase’s style, for example:
+- `SurfaceMeshingPolicy`
+- `GreedyMergePolicy`
+- `SurfaceDetailPolicy`
+
+Use an enum or compact configuration value rather than free-form booleans.
+
+Minimum modes:
+- `Exact`: merge only when material/color/light/AO are compatible exactly, preserving current behavior.
+- `LowSpec`: merge when geometry/material/face direction are compatible; baked light and AO must not prevent merging.
+
+Do not make the policy decide visibility. Visibility remains:
+- Current voxel is solid/non-air.
+- Neighbor in outward face direction is air.
+- Halo behavior remains conservative and correct.
+
+The low-spec merge identity must include:
+- Material ID.
+- Base material visual/color if it is not guaranteed derivable from material ID.
+- Face direction/normal.
+- Any material/shading classification that changes shader behavior materially, including emissive classification if it is not derivable from material ID.
+- Do NOT include baked light.
+- Do NOT include AO.
+
+Keep `FaceDirection` behavior unchanged.
+
+Suggested decomposition:
+- `exposed_face_at(...) -> Option<SurfaceFaceAttributes>`
+- `merge_key_for(policy, attributes) -> SurfaceMergeKey`
+- `can_merge(policy, left, right) -> bool` only if it makes tests clearer
+- `greedy_mesh_slice(...) -> Vec<GreedyRect>`
+- `append_merged_quad(...)`
+- `build_surface_artifact(...)`
+
+Use the existing halo-aware mapping route. Do not accidentally emit a face at a solid neighboring chunk boundary.
+
+Required tests:
+1. Exact policy preserves existing behavior: adjacent faces with distinct baked light remain separate.
+2. Low-spec policy merges the same faces.
+3. Exact policy preserves existing AO-based separation, if AO is independently represented.
+4. Low-spec policy merges faces that differ only in AO.
+5. Different material never merges in either policy.
+6. Different face direction never merges.
+7. A solid halo neighbor suppresses a boundary face in both modes.
+8. A uniform 4x1x1 solid strip produces one top quad of width 4 in both modes.
+9. A uniform rectangular floor creates the expected minimal number of quads.
+10. Emissive and non-emissive materials do not merge if their shader/material identity differs.
+
+Do not yet alter shader data in this phase. The merged quad may temporarily retain a representative baked/AO value, but document through types/tests that low-spec lighting is intentionally resolved separately in the next phase.
+
+------------------------------------------------------------
+PHASE 2 — LOW-FREQUENCY SURFACE LIGHTING PAYLOAD
+------------------------------------------------------------
+
+Goal: allow large quads to remain merged while preserving believable low-frequency lighting without per-voxel geometry splits.
+
+First inspect whether the codebase already has:
+- A chunk light volume.
+- Surface irradiance data.
+- Probe grid.
+- Baked static irradiance.
+- A suitable low-resolution texture/buffer representation.
+- A shader-visible chunk-local lighting payload.
+
+If an existing compatible system is present:
+- Reuse it.
+- Add only the adapter/contract work required to expose it to the low-spec surface shader.
+- Do not duplicate lighting state.
+
+If no suitable representation exists, implement a minimal, bounded chunk-local payload:
+
+A. Data model
+- Add a renderer-agnostic artifact such as `ChunkIrradianceGrid`, `SurfaceLightingGrid`, or repository-style equivalent.
+- It must be chunk-local and finite.
+- It must be small and fixed-resolution per quality profile.
+- Suggested low-spec resolution: 4x2x4, 4x3x4, or similar based on chunk aspect ratio; inspect actual chunk dimensions before selecting.
+- Do not default to a resolution that scales with voxel density.
+- Store only what the low-spec shader needs: preferably compact RGB irradiance or a scalar plus color only if project lighting is colored.
+- Use a stable coordinate mapping from chunk-local world position to grid sample coordinates.
+
+B. Sampling/building
+- Build the grid from existing baked voxel lighting/irradiance if available.
+- Downsample deterministically using an explicitly named reduction rule.
+- Recommended baseline: average only valid/solid-adjacent samples or use a conservative max/mean rule appropriate to the existing bake semantics.
+- Never invent a physically inaccurate result without examining current light semantics.
+- Ensure empty regions do not cause NaNs or divisions by zero.
+- Define behavior at chunk borders so adjacent chunks do not show hard seams. Prefer one of:
+  - Include a one-cell halo when constructing the grid.
+  - Sample using chunk-local clamped coordinates and rely on low-frequency fog/lighting.
+  - Blend compatible neighboring data only if current artifact lifecycle makes it straightforward.
+- Do not require synchronous neighbor chunk availability.
+
+C. Shader contract
+- The surface vertex shader must provide world position or chunk-local position suitable for lookup; inspect what it already supplies first.
+- The surface fragment shader should sample/interpolate low-frequency lighting from the chunk payload.
+- Maintain material tiling in world space; do not bake texture UV coordinates per voxel.
+- The fragment path must have a cheap fallback if the lighting grid is unavailable: existing baked scalar/ambient behavior or a neutral indoor ambient.
+- No loops over arbitrary lights in the fragment shader for low-spec mode.
+- No ray query in the low-spec fragment shader.
+
+D. Lighting semantics
+- Keep static/baked low-frequency lighting as the main illumination.
+- Permit at most one “hero” dynamic light (typically flashlight or nearest active fixture) in low-spec mode, only if current shared shading architecture can do so with a bounded fixed path.
+- The hero light must have a fixed finite range and no per-pixel scene-traced visibility in low-spec mode by default.
+- Shadowing in low-spec mode defaults to off or an existing bounded hero-shadow option only when profile explicitly enables it.
+- Emissive surfaces must remain visually emissive even if the coarse grid is dark.
+
+Required tests:
+1. Grid construction is deterministic.
+2. Output dimensions are exact and independent of source voxel resolution.
+3. Empty/lightless chunk has valid finite output.
+4. A known simple lit input produces expected reduced samples.
+5. Border coordinate sampling is clamped/defined.
+6. Low-spec surface artifacts can be built when no light grid is available.
+7. Shader/packing contract tests verify the expected binding/fields are present, using existing shader-test style.
+8. Existing high/exact lighting behavior remains unchanged.
+
+------------------------------------------------------------
+PHASE 3 — SURFACE ARTIFACT AND PACKING CONTRACTS
+------------------------------------------------------------
+
+Update renderer-facing surface artifacts so they carry:
+- The merged surface mesh using the selected `SurfaceMeshingPolicy`.
+- Existing packed vertex/index data required by surface rendering.
+- Optional/bounded low-frequency lighting payload or handle.
+- Enough per-chunk metadata for shader sampling: origin, world size, voxel size, grid dimensions, and availability flag as needed.
+
+Rules:
+1. Do not expand a merged quad into one vertex per voxel.
+2. Retain indexed geometry: one quad equals four logical vertices and six indices, unless the current optimized layout uses an equivalent safe arrangement.
+3. Keep GPU packing compact and alignment-safe.
+4. Do not add a distinct draw call for every material face or quad.
+5. Preserve current high-quality/exact artifact generation untouched unless clean factoring allows shared implementation.
+6. Preserve existing packed field compatibility where possible; version or branch internal payload construction only where necessary.
+7. Do not mix CPU-only structs with `web_sys`, `wgpu`, or WebGL types.
+
+If current packed positions use a specific local fixed-point quantization, preserve it and test bounds/round-trip behavior. Existing GPU formats pack surface positions/material/light/AO fields, so carefully adapt rather than casually changing layout. [file:1]
+
+Add/update tests:
+- Packed low-spec surface payload preserves positions, normals, material identity, and index validity.
+- A large merged rectangular quad still produces six indices.
+- Upload artifact metadata identifies no-light-grid versus valid-light-grid correctly.
+- Exact profile artifact packing behavior is unchanged.
+
+------------------------------------------------------------
+PHASE 4 — GPU/WEBGL RESOURCE LIFECYCLE
+------------------------------------------------------------
+
+Implement resource handling in the renderer driver layer only.
+
+For every resident surface chunk:
+- Upload its surface vertex/index buffer once when artifact changes.
+- Upload/update its small lighting payload once when artifact changes.
+- Do not re-upload unchanged chunk geometry or lighting every frame.
+- Release both resources when the chunk is evicted/removed.
+- Clear both resources in renderer reset/clear paths.
+- Handle missing/invalid GPU resource creation gracefully.
+
+For the low-spec path:
+- Prefer a small texture, uniform-compatible fixed-size representation, or compact buffer depending on the capabilities and existing binding architecture.
+- Select the representation that best matches existing code and WebGL/WebGPU compatibility.
+- Do not depend on unsupported texture formats.
+- Use nearest/linear filtering deliberately; document and test the intended sample behavior where feasible.
+- Do not allocate one giant global texture that grows without bound as the infinite world streams.
+- Cap resident GPU chunk resources according to existing streaming/profile budgets.
+
+If WebGL and WebGPU have distinct resource implementations:
+- Share renderer-agnostic artifact formats.
+- Keep API-specific upload code isolated.
+- Ensure WebGL receives an equivalent low-spec surface behavior if the existing WebGL path supports surface rendering.
+- If WebGL lacks the required surface renderer infrastructure, do not invent a broad new renderer in this task; implement the cleanest compatible fallback and clearly report the limitation.
+
+------------------------------------------------------------
+PHASE 5 — LOW-SPEC QUALITY PROFILE
+------------------------------------------------------------
+
+Add a named, explicit profile/tier in the existing quality/profile system, aligned with current conventions.
+
+Suggested tiers, adapt to existing names rather than duplicating them:
+- `UltraLow` / `LowSpec`
+- Existing low/balanced/high remain compatible.
+
+The low-spec profile must configure all relevant controls coherently:
+
+Geometry:
+- Use `SurfaceMeshingPolicy::LowSpec`.
+- Use greedy surface meshes rather than one-face-per-voxel output.
+- Choose a bounded max visible chunk radius / max draw distance appropriate to existing world scale.
+- Do not change generated voxel scale at runtime.
+- Enable existing frustum/distance culling.
+- Prefer front-to-back submission when current renderer supports it.
+
+Lighting:
+- Enable low-frequency chunk lighting if available.
+- Limit active dynamic lights to a small fixed maximum, ideally 0–1 for ultra-low and 1 for low.
+- Default dynamic shadows off for ultra-low.
+- If a hero-light shadow option exists, make it opt-in and budgeted, not default.
+- Preserve emissive fixtures.
+
+Shading:
+- Use cheap material tiling/world-space pattern path already present.
+- Disable expensive optional lighting branches in ultra-low profile.
+- Do not add procedural loops/noise that scale with screen resolution.
+- Use fog aggressively enough to hide the draw cutoff.
+
+Resolution:
+- Expose an internal render-scale setting through the existing quality/settings abstraction.
+- Low-spec profile should have a conservative default, for example 0.50–0.75, selected based on current code and device constraints.
+- Clamp to sane legal bounds.
+- Do not resize resources every frame.
+
+Budgets:
+- Define explicit profile-level caps:
+  - Maximum resident chunks.
+  - Maximum visible surface chunks.
+  - Maximum surface triangles or indices submitted per frame if current architecture supports a cap.
+  - Maximum active dynamic lights.
+  - Maximum shadow casters or zero.
+  - Maximum lighting-grid uploads per frame, if asynchronous/streamed.
+- If over budget, degrade in this order:
+  1. Reject farthest chunks.
+  2. Retain fog-hidden cutoff.
+  3. Skip optional hero shadowing.
+  4. Retain last valid lighting payload while update is pending.
+  5. Never stall the frame waiting for a chunk/light artifact.
+- Do not “solve” budget excess by allocating more memory or synchronously rebuilding all meshes.
+
+Frame-time governance:
+- Use the project’s existing performance governor/settings mechanisms if present.
+- If no suitable governor exists, add a small renderer-agnostic `FrameQualityController` or equivalent in the application layer.
+- It must use hysteresis: downgrade quickly after sustained slow frames, upgrade only after a longer stable interval.
+- It may adjust render scale and visibility distance within the active tier.
+- It must NOT alter voxel scale, world generation determinism, collision data, or saved world data.
+- It must NOT oscillate every frame.
+
+Define clear defaults and document each field’s cost/quality purpose in developer-facing Rust documentation or configuration descriptions, not long inline essays.
+
+Required tests:
+1. Low-spec profile selects `LowSpec` merging.
+2. Exact/high profile selects `Exact` merging.
+3. Ultra-low profile has shadows disabled by default.
+4. Dynamic-light budget is finite and enforced.
+5. Resolution scale is clamped.
+6. Budget overflow drops farthest work deterministically.
+7. Hysteresis prevents immediate upgrade after a single good frame.
+8. Existing profiles maintain their intended behavior.
+
+------------------------------------------------------------
+PHASE 6 — VISIBILITY, SUBMISSION, AND DRAW-CALL CONTROL
+------------------------------------------------------------
+
+Optimize the surface rendering path around actual screen contribution.
+
+Use existing culling infrastructure where present. Do not duplicate it without reason.
+
+For every frame:
+1. Determine candidate resident chunks.
+2. Frustum/distance cull by chunk bounds before touching draw data.
+3. Order visible candidates front-to-back if it benefits existing pipeline and does not add excessive CPU sorting cost.
+4. Enforce visible-chunk / index / triangle budgets.
+5. Submit chunks using existing batching/draw patterns.
+6. Do not emit one draw call per quad.
+7. Avoid material-state churn; use shared material/pattern shader logic and packed material IDs.
+8. Prefer persistent/reused CPU scratch vectors; avoid per-frame allocations in hot loops.
+
+If the current renderer has one buffer/draw call per chunk:
+- Keep it as the safe initial baseline.
+- Optimize chunk-level culling/budgeting before attempting global dynamic batching.
+- Do not introduce a complex global mega-buffer unless profiling proves draw-call count is the bottleneck and the existing resource lifecycle makes it safe.
+
+Add telemetry counters following established project style:
+- Candidate chunks.
+- Frustum/distance-culled chunks.
+- Budget-culled chunks.
+- Visible surface chunks.
+- Submitted surface triangles/indices.
+- Surface draw calls.
+- Lighting payload uploads/bytes.
+- Active dynamic lights.
+- Shadow work skipped due to low-spec policy.
+- Current render scale and active profile.
+
+Telemetry must be cheap, reset per frame, and not allocate format strings in hot paths.
+
+Required tests:
+- Deterministic farthest-first culling under a fixed budget.
+- Hidden/out-of-range chunks never reach submission.
+- Triangle/index totals match artifact counts.
+- Budget limiting does not cause invalid index/draw ranges.
+- Repeated frames with unchanged visibility do not trigger artifact uploads.
+
+------------------------------------------------------------
+PHASE 7 — SHADER REQUIREMENTS
+------------------------------------------------------------
+
+Modify shaders minimally and preserve existing high-quality paths.
+
+For low-spec surface rendering:
+- Use the existing surface vertex/index layout wherever possible.
+- Maintain correct normals and world position.
+- Keep material pattern/tiling in world space, so a 20 m merged wall does not stretch one tiny texture across its entire area.
+- Sample the low-frequency chunk lighting payload using chunk-local coordinates.
+- Combine:
+  - Material albedo.
+  - Coarse static irradiance / existing ambient.
+  - AO only as a low-cost representative/modulation if it remains available; do not force mesh splits to preserve it.
+  - Optional fixed-budget hero-light contribution only when enabled.
+  - Emission.
+  - Fog.
+- Ensure no dynamic branch causes an unbounded loop over scene lights.
+- Ensure missing lighting payload produces a stable fallback rather than black output.
+- Avoid high-frequency aliases from coarse lighting: use interpolation/filtering appropriate to payload type.
+- Do not introduce derivatives, texture gathers, costly noise octaves, or screen-space ray effects into ultra-low mode.
+- Keep fog cutoff visually coherent with CPU/other renderer conventions if shared contracts exist.
+
+Add shader-source contract tests in the project’s existing style:
+- Low-spec entry path contains/uses the coarse-lighting contract.
+- High/exact route remains present.
+- Material tiling uses world position / voxel scale as intended.
+- Low-spec shader does not include prohibited dynamic light traversal loops or raymarch calls.
+- Missing-grid fallback exists.
+
+------------------------------------------------------------
+PHASE 8 — COMPATIBILITY AND VALIDATION
+------------------------------------------------------------
+
+Run the full relevant suite at the end:
+- `cargo fmt --check`
+- Focused unit tests for changed modules.
+- Workspace tests.
+- WASM compile/check target where project tooling supports it.
+- Existing renderer/shader contract tests.
+- Any WebGL/WebGPU/Vulkan validation test suite already configured, when environment permits.
+
+Do not claim benchmark gains without measuring.
+
+Add a reproducible benchmark or diagnostic scenario if the repository has a benchmark style:
+1. A long uniform hallway with same-material wall/floor/ceiling.
+2. A uniform rectangular room.
+3. A room with varied baked light but same material.
+4. A material boundary test room.
+5. A chunk-boundary/halo test room.
+6. A scene exceeding visible-chunk budget.
+
+For each scenario, expose/report:
+- Quad count.
+- Triangle/index count.
+- Number of surface chunks.
+- Draw calls.
+- Candidate/culled chunks.
+- Whether low-spec mode merged across light/AO variation.
+- Whether exact mode preserved splits.
+- Lighting payload size per chunk.
+- Frame telemetry when runtime renderer is available.
+
+Use repository-native testing/benchmark structure. Do not require a browser screenshot test unless existing tests already use that approach.
+
+============================================================
+ACCEPTANCE CRITERIA
+============================================================
+
+The implementation is complete only when all are true:
+
+1. Existing exact greedy meshing remains available and its key tests still pass.
+2. Low-spec meshing merges coplanar, contiguous, same-material faces even when baked light and AO differ.
+3. Material boundaries, normals/directions, exposed-face culling, and chunk halo correctness are preserved.
+4. Low-spec lighting does not force geometry fragmentation and is bounded per chunk.
+5. A uniform rectangular surface becomes one quad where topology allows, therefore six indices/two triangles.
+6. The low-spec profile has bounded visible chunks, lights, shadows, render scale, and work submission.
+7. Budget overflow degrades gracefully without blocking, unbounded allocation, or world-detail mutation.
+8. Geometry and lighting resources upload only on artifact change and free on eviction.
+9. Surface rendering remains chunk-batched; no draw call per quad.
+10. Existing renderer strategies compile and remain selectable.
+11. Existing high-quality/exact paths retain their intended lighting/meshing behavior.
+12. Tests cover policy differences, meshing correctness, payloads, profile selection, budget behavior, and shader contracts.
+13. Code remains small, composable, deterministic, and placed in the correct architectural layer.
+14. The final CLI response includes:
+    - Changed files.
+    - New/changed public types and why.
+    - Test commands run and outcome.
+    - Any known limitation, especially WebGL parity.
+    - Before/after diagnostic counts for at least the uniform-hallway scenario, if runnable.
+
+============================================================
+CODING STYLE
+============================================================
+
+- Follow existing Rust formatting and module conventions.
+- Prefer `#[derive(Debug, Clone, Copy, PartialEq, Eq)]` for compact value types when appropriate.
+- Use `Option`/`Result` instead of sentinel values.
+- Validate finite numeric settings at boundaries.
+- Avoid `unwrap()` in runtime paths unless the invariant is local and obvious.
+- Keep conversion/packing code explicit and independently testable.
+- Reuse allocations in frame loops.
+- Preserve deterministic ordering when budgets discard work.
+- Explain decisions in concise type/function documentation where future maintainers need intent.
+- Do not write speculative TODOs in place of implementation.
+- Do not refactor unrelated systems.
+
+Start with Phase 0. Show the repository-specific plan. Then implement each phase completely and verify it before moving on.

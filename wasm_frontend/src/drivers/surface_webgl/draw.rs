@@ -24,7 +24,9 @@ use crate::drivers::gl::lights::flare_cores;
 use crate::drivers::gl::math::{
     camera_matrices, look_at_matrix_down, multiply_matrices, ortho_matrix,
 };
-use crate::drivers::gl::visibility::{MAX_DRAW_DISTANCE, chunk_bounding_sphere, sphere_visible};
+use crate::drivers::gl::visibility::{
+    MAX_DRAW_DISTANCE, chunk_bounding_sphere, frustum_side_planes_visible, sphere_visible,
+};
 
 use super::SurfaceRenderer;
 use super::upload_world_surface_chunks::GpuMesh;
@@ -187,10 +189,7 @@ fn draw_supply_labels(renderer: &SurfaceRenderer, frame: &FrameParams) {
     gl.uniform_matrix4fv_with_f32_array(uniforms.projection.as_ref(), false, &projection);
     gl.uniform_matrix4fv_with_f32_array(uniforms.view.as_ref(), false, &view);
 
-    let count = frame
-        .supply_sprites
-        .len()
-        .min(supply_labels::MAX_SPRITES);
+    let count = frame.supply_sprites.len().min(supply_labels::MAX_SPRITES);
     let mut sprites = [0.0f32; supply_labels::MAX_SPRITES * 4];
     for (i, sprite) in frame.supply_sprites.iter().take(count).enumerate() {
         sprites[i * 4] = sprite.position[0];
@@ -271,6 +270,8 @@ fn prepare_visible_draws(
     let mut draws = Vec::new();
     let mut clustered = Vec::new();
     let hero_id = frame.active_scene_lights().first().map(|light| light.id);
+    let aspect = renderer.width as f32 / (renderer.height.max(1)) as f32;
+    let fov_tan = crate::drivers::webgl::fov_tan();
     for (&key, mesh) in &renderer.meshes {
         let visible = {
             if !culling_enabled {
@@ -278,6 +279,7 @@ fn prepare_visible_draws(
             } else {
                 let (center, radius) = chunk_bounding_sphere(mesh.origin, mesh.bounds_max);
                 sphere_visible(center, radius, frame, MAX_DRAW_DISTANCE).is_some()
+                    && frustum_side_planes_visible(center, radius, frame, fov_tan, aspect)
             }
         };
         if !visible {

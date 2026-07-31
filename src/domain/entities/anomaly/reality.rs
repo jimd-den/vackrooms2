@@ -340,8 +340,7 @@ impl RealitySnapshot {
     /// the snapshot — encounter stamps and other cells — is untouched.
     pub fn with_fabric_drift_advanced(&self, cell_x: i64, cell_z: i64) -> Self {
         let mut drifts = self.drifts.clone();
-        match drifts.binary_search_by_key(&(cell_x, cell_z), |drift| (drift.cell_x, drift.cell_z))
-        {
+        match drifts.binary_search_by_key(&(cell_x, cell_z), |drift| (drift.cell_x, drift.cell_z)) {
             Ok(index) => drifts[index].epoch = drifts[index].epoch.saturating_add(1),
             Err(index) => drifts.insert(
                 index,
@@ -699,7 +698,10 @@ mod tests {
             RealitySnapshot::from_words(&sealed.to_words()),
             Ok(sealed.clone())
         );
-        assert_ne!(reality.fingerprint(), RealitySnapshot::empty().fingerprint());
+        assert_ne!(
+            reality.fingerprint(),
+            RealitySnapshot::empty().fingerprint()
+        );
     }
 
     #[test]

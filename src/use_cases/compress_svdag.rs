@@ -222,9 +222,7 @@ mod tests {
     fn a_real_level_zero_chunk_compresses() {
         use crate::domain::entities::position::Position;
         use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
-        use crate::use_cases::generate_chunk::{
-            GenerateChunkArchitectureUseCase, GeneratorConfig,
-        };
+        use crate::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 
         let noise = SimpleNoiseProvider::new();
         let chunk = GenerateChunkArchitectureUseCase::new(&noise).execute(

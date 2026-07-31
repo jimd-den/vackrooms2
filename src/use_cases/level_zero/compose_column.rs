@@ -13,7 +13,7 @@ use crate::use_cases::red_rooms::geometry::sample_red_room;
 use crate::use_cases::region_plan::{PLAN_WALL_T, region_index, spawn_point};
 
 use super::circulation_sampler::SPAWN_READABLE_RADIUS;
-use super::{BackroomsLevel, ColumnPlan};
+use super::{BackroomsLevel, ColumnPlan, FixtureSample};
 
 #[cfg(test)]
 use crate::use_cases::generate_chunk::LevelTuning;
@@ -54,7 +54,7 @@ impl BackroomsLevel {
         let mut in_corridor = false;
         let mut corridor_ceiling = 0.0f32;
         let mut corridor_join_from: Option<f32> = None;
-        let mut corridor_light = false;
+        let mut corridor_fixture_sample: Option<FixtureSample> = None;
         let mut corridor_wall = false;
         // Edge-gap decisions are deferred: they read the Peripheral Shift,
         // and whether this column's fabric is frozen (spawn radius, arch
@@ -68,13 +68,14 @@ impl BackroomsLevel {
                 corridor_ceiling =
                     corridor_ceiling.max(Self::corridor_ceiling(s, noise, seed, wx, wz));
                 if let Some(join_from) = Self::corridor_ceiling_join(s, noise, seed, wx, wz) {
-                    corridor_join_from = Some(
-                        corridor_join_from.map_or(join_from, |height| height.min(join_from)),
-                    );
+                    corridor_join_from =
+                        Some(corridor_join_from.map_or(join_from, |height| height.min(join_from)));
                 }
-                // Light strip modules follow the corridor in world space.
-                if d < 0.45 && along.rem_euclid(4.0) < 1.0 {
-                    corridor_light = true;
+                let ceiling_h = corridor_ceiling.max(3.0);
+                if let Some(fixture) =
+                    super::fixture_plan::corridor_fixture_at(seed, s, ceiling_h, wx, wz)
+                {
+                    corridor_fixture_sample = Some(fixture);
                 }
             } else if d <= half + PLAN_WALL_T {
                 corridor_wall = true;
@@ -85,9 +86,11 @@ impl BackroomsLevel {
         }
         if in_corridor {
             let mut column = ColumnPlan {
-                light: corridor_light && tuning.lights > 0.0,
                 ..ColumnPlan::open(corridor_ceiling)
             };
+            if tuning.lights > 0.0 {
+                column.fixture = corridor_fixture_sample;
+            }
             if tuning.walls > 0.0 {
                 column.lintel_from_units = corridor_join_from;
             }
@@ -104,8 +107,8 @@ impl BackroomsLevel {
             {
                 let depth = blackout.normalized_depth(wx, wz);
                 if depth > 0.22 {
-                    column.light = false;
-                } else if depth > 0.0 && column.light {
+                    column.fixture = None;
+                } else if depth > 0.0 && column.fixture.is_some() {
                     let module = (wx.floor() as i64) ^ ((wz.floor() as i64) << 17);
                     let hash = {
                         let mut h =
@@ -113,7 +116,9 @@ impl BackroomsLevel {
                         h ^= h >> 33;
                         (h >> 40) as f32 / (1u64 << 24) as f32
                     };
-                    column.light = hash < 1.0 - depth / 0.22;
+                    if hash >= 1.0 - depth / 0.22 {
+                        column.fixture = None;
+                    }
                 }
             }
             return column;
@@ -174,7 +179,7 @@ impl BackroomsLevel {
                     continue;
                 }
                 let mut base =
-                    Self::assembly_column(a, renovator_structure.as_ref(), tuning, wx, wz);
+                    Self::assembly_column(a, renovator_structure.as_ref(), tuning, seed, wx, wz);
                 if corridor_wall
                     && !base.solid
                     && tuning.walls > 0.0

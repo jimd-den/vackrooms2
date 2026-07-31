@@ -357,8 +357,12 @@ mod tests {
     #[test]
     fn fragment_applies_shared_finishes_before_display_encoding() {
         let source = fragment_source();
-        let pattern = source.find("applyMaterialPattern(").expect("material finish");
-        let display = source.rfind("encodeDisplayColor(").expect("display encoding");
+        let pattern = source
+            .find("applyMaterialPattern(")
+            .expect("material finish");
+        let display = source
+            .rfind("encodeDisplayColor(")
+            .expect("display encoding");
         assert!(pattern < display);
         assert!(!source.contains("quantize5"));
     }

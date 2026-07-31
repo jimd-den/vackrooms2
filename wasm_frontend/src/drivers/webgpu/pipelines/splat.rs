@@ -11,7 +11,7 @@ use crate::application::rendering::encode_display_color;
 
 use super::raster_shadow::{HeroShadowMap, HeroShadowOptions};
 use super::surface::create_chunk_layout;
-use super::visibility::{bounds_sphere, sphere_is_visible};
+use super::visibility::{bounds_sphere, frustum_side_planes_visible, sphere_is_visible};
 use crate::drivers::webgpu::frame_resources::FrameResources;
 use crate::drivers::webgpu::gpu_types::{GpuChunkUniforms, GpuPackedFace};
 use crate::drivers::webgpu::shader::ShaderProgram;
@@ -217,6 +217,8 @@ impl SplatPipeline {
         frame: &FrameParams,
         toggles: RenderToggles,
         light_count: u32,
+        fov_tan: f32,
+        aspect: f32,
     ) {
         for chunk in self.chunks.values() {
             let uniforms = GpuChunkUniforms {
@@ -286,7 +288,9 @@ impl SplatPipeline {
         for chunk in chunks {
             if toggles.distance_cull {
                 let (center, radius) = bounds_sphere(chunk.origin, chunk.bounds_max);
-                if !sphere_is_visible(center, radius, frame, self.max_draw_distance) {
+                if !sphere_is_visible(center, radius, frame, self.max_draw_distance)
+                    || !frustum_side_planes_visible(center, radius, frame, fov_tan, aspect)
+                {
                     self.stats.faces_dropped =
                         self.stats.faces_dropped.saturating_add(chunk.face_count);
                     continue;
@@ -311,7 +315,10 @@ impl SplatPipeline {
                         chunk.origin[2] + (f32::from(cell.cell[2]) + 0.5) * chunk.cell_size,
                     ];
                     let radius = conservative_cell_radius(chunk.cell_size);
-                    if !sphere_is_visible(center, radius, frame, self.max_draw_distance) {
+                    if !sphere_is_visible(center, radius, frame, self.max_draw_distance)
+                        || (toggles.distance_cull
+                            && !frustum_side_planes_visible(center, radius, frame, fov_tan, aspect))
+                    {
                         self.stats.cells_culled = self.stats.cells_culled.saturating_add(1);
                         continue;
                     }

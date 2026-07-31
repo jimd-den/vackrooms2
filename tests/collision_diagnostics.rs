@@ -1,5 +1,5 @@
-use vackrooms::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_STAINED_CARPET, VOXEL_WALL};
 use vackrooms::domain::entities::position::Position;
+use vackrooms::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_STAINED_CARPET, VOXEL_WALL};
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 /// Collision Diagnostic Tests — TDD Phase 1
 ///

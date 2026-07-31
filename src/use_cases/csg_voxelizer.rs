@@ -72,12 +72,12 @@ impl VoxelSampler for SolidSampler<'_> {
     fn uniform_hint(&self, cube_origin: [u32; 3], size: u32) -> Option<SvoLeaf> {
         // A cube of cells wholly outside the solid's AABB is provably air.
         let (lo, hi) = self.bounds?;
-        let cube_min = self.cell_center(cube_origin[0], cube_origin[1], cube_origin[2])
+        let cube_min = self
+            .cell_center(cube_origin[0], cube_origin[1], cube_origin[2])
             .map(|c| c - 0.5 * self.voxel_size);
         let extent = f64::from(size) * self.voxel_size;
-        let outside = (0..3).any(|axis| {
-            cube_min[axis] >= hi[axis] || cube_min[axis] + extent <= lo[axis]
-        });
+        let outside =
+            (0..3).any(|axis| cube_min[axis] >= hi[axis] || cube_min[axis] + extent <= lo[axis]);
         outside.then_some(SvoLeaf::AIR)
     }
 }

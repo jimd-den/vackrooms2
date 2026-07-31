@@ -41,7 +41,10 @@ impl ProbeGrid {
     /// - `height`: Grid extent along Y axis.
     /// - `depth`: Grid extent along Z axis.
     pub fn new(width: usize, height: usize, depth: usize) -> Self {
-        let size = width.saturating_mul(height).saturating_mul(depth).saturating_mul(3);
+        let size = width
+            .saturating_mul(height)
+            .saturating_mul(depth)
+            .saturating_mul(3);
         Self {
             width,
             height,
@@ -115,15 +118,21 @@ impl ProbeGrid {
 
         for pz in 0..target_depth {
             let z_start = (pz * vox_d) / target_depth;
-            let z_end = (((pz + 1) * vox_d) / target_depth).max(z_start + 1).min(vox_d);
+            let z_end = (((pz + 1) * vox_d) / target_depth)
+                .max(z_start + 1)
+                .min(vox_d);
 
             for py in 0..target_height {
                 let y_start = (py * vox_h) / target_height;
-                let y_end = (((py + 1) * vox_h) / target_height).max(y_start + 1).min(vox_h);
+                let y_end = (((py + 1) * vox_h) / target_height)
+                    .max(y_start + 1)
+                    .min(vox_h);
 
                 for px in 0..target_width {
                     let x_start = (px * vox_w) / target_width;
-                    let x_end = (((px + 1) * vox_w) / target_width).max(x_start + 1).min(vox_w);
+                    let x_end = (((px + 1) * vox_w) / target_width)
+                        .max(x_start + 1)
+                        .min(vox_w);
 
                     let mut sum_r: u32 = 0;
                     let mut sum_g: u32 = 0;
@@ -159,6 +168,20 @@ impl ProbeGrid {
         }
 
         probe_grid
+    }
+
+    /// Trilinearly interpolates or samples probe RGB irradiance at normalized chunk coordinates in [0.0, 1.0].
+    /// Border coordinates outside [0.0, 1.0] are safely clamped to grid edges.
+    pub fn sample_normalized(&self, norm_x: f32, norm_y: f32, norm_z: f32) -> [u8; 3] {
+        if self.width == 0 || self.height == 0 || self.depth == 0 || self.data.is_empty() {
+            return [16, 16, 16]; // Safe neutral indoor ambient default
+        }
+
+        let cx = (norm_x.clamp(0.0, 1.0) * (self.width.saturating_sub(1) as f32)).round() as usize;
+        let cy = (norm_y.clamp(0.0, 1.0) * (self.height.saturating_sub(1) as f32)).round() as usize;
+        let cz = (norm_z.clamp(0.0, 1.0) * (self.depth.saturating_sub(1) as f32)).round() as usize;
+
+        self.get_probe(cx, cy, cz)
     }
 }
 
@@ -200,5 +223,51 @@ mod tests {
         // Region mapped to first octant should carry the average light values
         let p0 = probe_grid.get_probe(0, 0, 0);
         assert!(p0[0] > 0 && p0[1] > 0 && p0[2] > 0);
+    }
+
+    #[test]
+    fn test_sample_normalized_clamping() {
+        let mut grid = ProbeGrid::new(4, 2, 4);
+        grid.set_probe(0, 0, 0, [100, 150, 200]);
+        grid.set_probe(3, 1, 3, [50, 60, 70]);
+
+        // Exact origin sample
+        assert_eq!(grid.sample_normalized(0.0, 0.0, 0.0), [100, 150, 200]);
+        // Far corner sample
+        assert_eq!(grid.sample_normalized(1.0, 1.0, 1.0), [50, 60, 70]);
+
+        // Out-of-bounds negative coordinate clamping
+        assert_eq!(grid.sample_normalized(-0.5, -1.0, -2.0), [100, 150, 200]);
+        // Out-of-bounds positive coordinate clamping
+        assert_eq!(grid.sample_normalized(1.5, 2.0, 3.0), [50, 60, 70]);
+    }
+
+    #[test]
+    fn test_empty_probe_grid_fallback() {
+        let empty_grid = ProbeGrid::new(0, 0, 0);
+        let sampled = empty_grid.sample_normalized(0.5, 0.5, 0.5);
+        assert_eq!(
+            sampled,
+            [16, 16, 16],
+            "empty probe grid must return safe finite ambient fallback"
+        );
+    }
+
+    #[test]
+    fn test_known_lit_input_deterministic_downsample() {
+        let mut voxels = VoxelGrid::new(8, 4, 8);
+        // Set all air voxels to uniform light 100, 100, 100
+        for z in 0..8 {
+            for y in 0..4 {
+                for x in 0..8 {
+                    voxels.set_light_rgb(x, y, z, [100, 100, 100]);
+                }
+            }
+        }
+
+        let probe_grid = ProbeGrid::from_voxel_grid(&voxels, 4, 2, 4);
+        assert_eq!(probe_grid.dimensions(), (4, 2, 4));
+        assert_eq!(probe_grid.get_probe(0, 0, 0), [100, 100, 100]);
+        assert_eq!(probe_grid.get_probe(3, 1, 3), [100, 100, 100]);
     }
 }

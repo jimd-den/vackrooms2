@@ -241,12 +241,9 @@ impl Body {
         let cost = (1.0 + 0.9 * heat_stress + 0.9 * dehydration + 0.5 * hunger + 0.6 * injury)
             .clamp(1.0, 3.0);
         // Recovery quality: how well rest actually restores.
-        let recovery_quality = (1.0
-            - 0.45 * dehydration
-            - 0.30 * hunger
-            - 0.25 * self.fatigue
-            - 0.25 * heat_stress)
-            .clamp(0.25, 1.0);
+        let recovery_quality =
+            (1.0 - 0.45 * dehydration - 0.30 * hunger - 0.25 * self.fatigue - 0.25 * heat_stress)
+                .clamp(0.25, 1.0);
 
         // -- exertion: approach a cost-scaled target ---------------------------
         let target_exertion = (intensity * HEALTHY_WALK_EXERTION * cost).clamp(0.0, 1.0);
@@ -267,8 +264,8 @@ impl Body {
             0.0
         };
         if self.exertion > FATIGUE_EXERTION_THRESHOLD {
-            let over = (self.exertion - FATIGUE_EXERTION_THRESHOLD)
-                / (1.0 - FATIGUE_EXERTION_THRESHOLD);
+            let over =
+                (self.exertion - FATIGUE_EXERTION_THRESHOLD) / (1.0 - FATIGUE_EXERTION_THRESHOLD);
             self.fatigue += over * FATIGUE_RISE_PER_S * dt;
         } else if resting && self.still_seconds >= FATIGUE_REST_DELAY_S {
             self.fatigue -= FATIGUE_RECOVERY_PER_S * recovery_quality * dt;
@@ -391,8 +388,7 @@ impl Body {
         let c = self.context;
         if c.condition < 0.25 || self.bpm > 160.0 {
             PulseSignal::Critical
-        } else if self.bpm > 118.0 || c.hydration < 0.2 || self.fatigue > 0.7 || c.condition < 0.6
-        {
+        } else if self.bpm > 118.0 || c.hydration < 0.2 || self.fatigue > 0.7 || c.condition < 0.6 {
             PulseSignal::Strained
         } else if self.bpm > 76.0 {
             PulseSignal::Active
@@ -568,7 +564,10 @@ mod tests {
         };
         walk(&mut body, 300.0, 3.0, brutal);
         let tired = body.readout().fatigue;
-        assert!(tired > 0.1, "sustained redline must accrue fatigue: {tired}");
+        assert!(
+            tired > 0.1,
+            "sustained redline must accrue fatigue: {tired}"
+        );
         assert!(body.movement_factor() < 0.9);
 
         // Deliberate rest under decent conditions mends it.

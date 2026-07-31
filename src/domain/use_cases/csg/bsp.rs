@@ -29,9 +29,7 @@ impl BspNode {
         if polygons.is_empty() {
             return;
         }
-        let plane = *self
-            .plane
-            .get_or_insert_with(|| polygons[0].plane);
+        let plane = *self.plane.get_or_insert_with(|| polygons[0].plane);
 
         let mut front = Vec::new();
         let mut back = Vec::new();
@@ -50,9 +48,7 @@ impl BspNode {
         self.polygons.extend(coplanar_front);
         self.polygons.extend(coplanar_back);
         if !front.is_empty() {
-            self.front
-                .get_or_insert_with(Box::default)
-                .build(front);
+            self.front.get_or_insert_with(Box::default).build(front);
         }
         if !back.is_empty() {
             self.back.get_or_insert_with(Box::default).build(back);

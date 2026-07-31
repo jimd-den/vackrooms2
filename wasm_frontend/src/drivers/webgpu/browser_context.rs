@@ -46,8 +46,7 @@ impl BrowserGpuContext {
         // limits make `requestDevice` reject outright on mobile GPUs. Any
         // pipeline that truly needs more than the clamped budget fails with
         // a specific validation error instead.
-        let required_limits =
-            wgpu::Limits::default().or_worse_values_from(&adapter.limits());
+        let required_limits = wgpu::Limits::default().or_worse_values_from(&adapter.limits());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("vackrooms-webgpu-device"),

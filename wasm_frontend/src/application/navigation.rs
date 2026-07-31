@@ -11,8 +11,8 @@
 //! is labelled RANGE by the presenter — there is no navigable route graph
 //! in the engine today, so a "path distance" would be a fabrication.
 
-use vackrooms::domain::entities::anomaly::{AnomalyKind, PitHazard, TraversalGate};
 use vackrooms::domain::entities::anomaly::LevelExit;
+use vackrooms::domain::entities::anomaly::{AnomalyKind, PitHazard, TraversalGate};
 
 /// A selected navigation objective (a real, resident level door).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -225,8 +225,7 @@ mod tests {
             gate(10, AnomalyKind::BlackoutExpanse, 2.0),
             gate(11, AnomalyKind::RedRoom, 9.0),
         ];
-        let focus =
-            select_anomaly_focus(gates.iter(), [pit].iter(), [0.0, 0.0], 20.0).unwrap();
+        let focus = select_anomaly_focus(gates.iter(), [pit].iter(), [0.0, 0.0], 20.0).unwrap();
         assert_eq!(focus.instance_id, 11, "danger class outranks distance");
 
         // Outside awareness range: honestly nothing.
@@ -240,8 +239,7 @@ mod tests {
             gate(21, AnomalyKind::BlackoutExpanse, 3.0),
             gate(20, AnomalyKind::BlackoutExpanse, -3.0),
         ];
-        let focus =
-            select_anomaly_focus(twins.iter(), [].iter(), [0.0, 0.0], 20.0).unwrap();
+        let focus = select_anomaly_focus(twins.iter(), [].iter(), [0.0, 0.0], 20.0).unwrap();
         assert_eq!(focus.instance_id, 20);
     }
 }

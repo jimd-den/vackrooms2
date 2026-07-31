@@ -74,6 +74,8 @@ fn every_production_pipeline_renders_offscreen_on_vulkan() {
             &fixture.frame,
             fixture.toggles,
             fixture.frame.scene_lights.len() as u32,
+            FOV_TAN,
+            WIDTH as f32 / HEIGHT as f32,
         );
     });
     assert_non_clear_variation("surface", &surface);
@@ -91,6 +93,8 @@ fn every_production_pipeline_renders_offscreen_on_vulkan() {
                 &fixture.frame,
                 fixture.toggles,
                 fixture.frame.scene_lights.len() as u32,
+                FOV_TAN,
+                WIDTH as f32 / HEIGHT as f32,
             );
             pipelines.supply_labels.draw(
                 &gpu.queue,
@@ -118,6 +122,8 @@ fn every_production_pipeline_renders_offscreen_on_vulkan() {
             &fixture.frame,
             fixture.toggles,
             fixture.frame.scene_lights.len() as u32,
+            FOV_TAN,
+            WIDTH as f32 / HEIGHT as f32,
         );
     });
     assert_non_clear_variation("splat", &splat);
@@ -377,6 +383,8 @@ fn exercise_raster_shadow_profiles(
             &fixture.frame,
             toggles,
             fixture.frame.scene_lights.len() as u32,
+            FOV_TAN,
+            WIDTH as f32 / HEIGHT as f32,
         );
     });
     assert_non_clear_variation("surface-shadow-low", &surface_low);
@@ -391,6 +399,8 @@ fn exercise_raster_shadow_profiles(
             &fixture.frame,
             toggles,
             fixture.frame.scene_lights.len() as u32,
+            FOV_TAN,
+            WIDTH as f32 / HEIGHT as f32,
         );
     });
     assert_non_clear_variation("splat-shadow-low", &splat_low);
@@ -430,6 +440,8 @@ fn exercise_raster_shadow_profiles(
                 &fixture.frame,
                 toggles,
                 fixture.frame.scene_lights.len() as u32,
+                FOV_TAN,
+                WIDTH as f32 / HEIGHT as f32,
             );
         });
     assert_non_clear_variation("surface-shadow-high", &surface_high_pixels);
@@ -444,6 +456,8 @@ fn exercise_raster_shadow_profiles(
             &fixture.frame,
             toggles,
             fixture.frame.scene_lights.len() as u32,
+            FOV_TAN,
+            WIDTH as f32 / HEIGHT as f32,
         );
     });
     assert_non_clear_variation("splat-shadow-high", &splat_high_pixels);

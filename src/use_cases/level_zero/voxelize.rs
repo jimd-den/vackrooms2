@@ -1,9 +1,38 @@
 //! Materialize sampled Level 0 columns at the requested voxel size.
 
 use crate::domain::entities::voxel_grid::{
-    VOXEL_CEILING, VOXEL_METAL_DOOR, VOXEL_RED_LIGHT, VoxelGrid,
+    VOXEL_CEILING, VOXEL_LIGHT, VOXEL_METAL_DOOR, VOXEL_RED_LIGHT, VoxelGrid,
 };
 use crate::use_cases::level_zero::ColumnField;
+use crate::use_cases::level_zero::{FixtureKind, FixtureState};
+
+fn fixture_is_emissive(state: FixtureState) -> bool {
+    matches!(
+        state,
+        FixtureState::Lit | FixtureState::Flickering | FixtureState::Dim | FixtureState::Emergency
+    )
+}
+
+fn material_for_fixture(fixture: &crate::use_cases::level_zero::FixtureSample) -> u8 {
+    let red = fixture.red_room;
+    match fixture.kind {
+        FixtureKind::FluorescentPanel | FixtureKind::FluorescentStrip => {
+            if red {
+                VOXEL_RED_LIGHT
+            } else {
+                match fixture.state {
+                    FixtureState::Dead => VOXEL_CEILING,
+                    _ => VOXEL_LIGHT,
+                }
+            }
+        }
+        FixtureKind::EmergencyStrip => match fixture.state {
+            FixtureState::Dead => VOXEL_CEILING,
+            _ => VOXEL_RED_LIGHT,
+        },
+        FixtureKind::DeadPanel => VOXEL_CEILING,
+    }
+}
 
 /// Writes geometry and fixture voxels without knowing seeds, regions,
 /// anomalies, chunks, or recursive branches.  Those are planning concerns;
@@ -80,13 +109,11 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
                 grid.set(x, y, z, cap_material);
             }
 
-            if plan.light && !plan.solid {
-                let material = if plan.red_light {
-                    VOXEL_RED_LIGHT
-                } else {
-                    plan.light_material
-                };
-                grid.set(x, ceiling_y, z, material);
+            if let Some(fixture) = plan.fixture
+                && !plan.solid
+                && fixture_is_emissive(fixture.state)
+            {
+                grid.set(x, ceiling_y, z, material_for_fixture(&fixture));
             }
         }
     }
@@ -100,6 +127,22 @@ mod tests {
     };
     use crate::use_cases::level_zero::ColumnPlan;
 
+    use crate::use_cases::level_zero::{FixtureKind, FixtureSample, FixtureState};
+
+    fn solid_column_fixture() -> FixtureSample {
+        FixtureSample {
+            id: 1,
+            kind: FixtureKind::FluorescentPanel,
+            state: FixtureState::Lit,
+            center_x: 0.0,
+            center_z: 0.0,
+            half_x: 0.3,
+            half_z: 0.3,
+            ceiling_units: 4.0,
+            red_room: false,
+        }
+    }
+
     /// Level 0 currently has one authored emitter contract: fixtures are
     /// exposed panels in open ceiling columns. A fixture request on a solid
     /// column must therefore remain ordinary architecture, never a buried
@@ -108,9 +151,7 @@ mod tests {
     fn solid_columns_cannot_voxelize_fake_emitters() {
         let mut column = ColumnPlan::open(4.0);
         column.solid = true;
-        column.light = true;
-        column.red_light = true;
-        column.light_material = VOXEL_RED_LIGHT;
+        column.fixture = Some(solid_column_fixture());
 
         let field = ColumnField::sample(1, 1, |_, _| column);
         let mut grid = VoxelGrid::new(1, 6, 1);

@@ -234,7 +234,10 @@ mod tests {
     #[test]
     fn macro_cell_addresses_are_stable_across_negative_space() {
         assert_eq!(MacroCellId::containing(-0.1, 0.1), MacroCellId::new(-1, 0));
-        assert_eq!(MacroCellId::containing(159.9, -160.0), MacroCellId::new(0, -1));
+        assert_eq!(
+            MacroCellId::containing(159.9, -160.0),
+            MacroCellId::new(0, -1)
+        );
         assert_eq!(MacroCellId::of_region(-1, -2), MacroCellId::new(-1, -1));
         assert_eq!(MacroCellId::of_region(2, 3), MacroCellId::new(1, 1));
     }

@@ -7,6 +7,7 @@ use crate::domain::entities::architecture::{
 };
 use crate::use_cases::generate_chunk::LevelTuning;
 
+use super::fixture_plan::{FixtureOwner, fixture_at};
 use super::{BackroomsLevel, ColumnPlan};
 
 fn distance_to_zone(zone: &CeilingZone, wx: f32, wz: f32) -> f32 {
@@ -68,6 +69,7 @@ impl BackroomsLevel {
         a: &AssemblyInstance,
         renovator: Option<&StructuralSystemInstance>,
         tuning: &LevelTuning,
+        seed: u32,
         wx: f32,
         wz: f32,
     ) -> ColumnPlan {
@@ -92,15 +94,14 @@ impl BackroomsLevel {
         for host in a.hosts.iter().filter(|host| host.contains_plan(wx, wz)) {
             covering_hosts += 1;
             ceiling_units = ceiling_units.max(host.top_units);
-            if let Some(opening) = a.openings.iter().find(|opening| {
-                opening.host == host.id && opening.contains_plan(host, wx, wz)
-            }) {
+            if let Some(opening) = a
+                .openings
+                .iter()
+                .find(|opening| opening.host == host.id && opening.contains_plan(host, wx, wz))
+            {
                 cut_hosts += 1;
                 lintel_units = lintel_units.max(opening.lintel_units.unwrap_or(0.0));
-                door_leaf |= a
-                    .door_leaves
-                    .iter()
-                    .any(|leaf| leaf.opening == opening.id);
+                door_leaf |= a.door_leaves.iter().any(|leaf| leaf.opening == opening.id);
             }
         }
         if covering_hosts > 0 {
@@ -133,16 +134,11 @@ impl BackroomsLevel {
             }
         }
 
-        // Fixtures, tied to the assembly's ceiling modules. In a red room
-        // every fixture burns red: the anomaly is the room's light, applied
-        // after all geometry decisions and on the same fixture spacing.
+        // Fixtures follow the assembly's ceiling zones and structural grid.
         if !plan.solid && tuning.lights > 0.0 {
-            for f in &a.fixtures {
-                if f.lit && (wx - f.at.x).abs() <= f.half_x && (wz - f.at.z).abs() <= f.half_z {
-                    plan.light = true;
-                    plan.red_light = a.corruption.red_room;
-                    break;
-                }
+            if let Some(zone) = ceiling_zone_at(a, wx, wz) {
+                plan.fixture =
+                    fixture_at(seed, FixtureOwner::Assembly { assembly: a, zone }, wx, wz);
             }
         }
         plan
@@ -196,8 +192,9 @@ mod tests {
     fn assembly_columns_use_the_spatially_containing_ceiling_zone() {
         let assembly = zoned_assembly();
         let tuning = LevelTuning::default();
-        let low = BackroomsLevel::assembly_column(&assembly, None, &tuning, 2.0, 2.0);
-        let high = BackroomsLevel::assembly_column(&assembly, None, &tuning, 8.0, 2.0);
+        let seed = 42;
+        let low = BackroomsLevel::assembly_column(&assembly, None, &tuning, seed, 2.0, 2.0);
+        let high = BackroomsLevel::assembly_column(&assembly, None, &tuning, seed, 8.0, 2.0);
         assert_eq!(low.ceiling_units, 3.2);
         assert_eq!(high.ceiling_units, 4.8);
     }

@@ -122,8 +122,7 @@ impl BackroomsLevel {
         // on is simply wall now. The threshold shrinks the same hash's
         // acceptance, so rising tiers close mouths instead of moving them.
         if tier >= 2
-            && Self::cell_hash(noise, seed, salt ^ 0x2B, section, side)
-                < 0.22 * (tier - 1) as f32
+            && Self::cell_hash(noise, seed, salt ^ 0x2B, section, side) < 0.22 * (tier - 1) as f32
         {
             return false;
         }

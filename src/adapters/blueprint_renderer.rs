@@ -1,6 +1,4 @@
-use crate::domain::entities::architecture::{
-    RegionPlan, SpaceProgram, StructuralSystem,
-};
+use crate::domain::entities::architecture::{RegionPlan, SpaceProgram, StructuralSystem};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlueprintOptions {
@@ -70,12 +68,8 @@ pub fn render_region_blueprint_svg(
         grid_y += grid_step;
     }
 
-    let to_svg_x = |wx: f32| -> f32 {
-        (wx - plan.origin_world.x) * scale
-    };
-    let to_svg_y = |wz: f32| -> f32 {
-        (plan.size_world - (wz - plan.origin_world.z)) * scale
-    };
+    let to_svg_x = |wx: f32| -> f32 { (wx - plan.origin_world.x) * scale };
+    let to_svg_y = |wz: f32| -> f32 { (plan.size_world - (wz - plan.origin_world.z)) * scale };
 
     // Layer 1: Corridors
     for s in &plan.corridors {
@@ -105,7 +99,10 @@ pub fn render_region_blueprint_svg(
         for &(vx, vz) in &a.footprint.vertices {
             points_str.push_str(&format!("{},{} ", to_svg_x(vx), to_svg_y(vz)));
         }
-        let class_name = if a.corruption.misalignment.0 != 0.0 || a.corruption.misalignment.1 != 0.0 || a.corruption.abandoned {
+        let class_name = if a.corruption.misalignment.0 != 0.0
+            || a.corruption.misalignment.1 != 0.0
+            || a.corruption.abandoned
+        {
             "assembly-corrupt"
         } else {
             "assembly"
@@ -122,9 +119,19 @@ pub fn render_region_blueprint_svg(
         for e in a.entrances() {
             let door_half_w = e.width * 0.5;
             let (x1, z1, x2, z2) = if e.through_x_wall {
-                (e.center.x - door_half_w, e.center.z, e.center.x + door_half_w, e.center.z)
+                (
+                    e.center.x - door_half_w,
+                    e.center.z,
+                    e.center.x + door_half_w,
+                    e.center.z,
+                )
             } else {
-                (e.center.x, e.center.z - door_half_w, e.center.x, e.center.z + door_half_w)
+                (
+                    e.center.x,
+                    e.center.z - door_half_w,
+                    e.center.x,
+                    e.center.z + door_half_w,
+                )
             };
 
             let svg_x1 = to_svg_x(x1);
@@ -136,8 +143,12 @@ pub fn render_region_blueprint_svg(
                 r##"  <line class="entrance" x1="{}" y1="{}" x2="{}" y2="{}" />
   <circle class="entrance-node" cx="{}" cy="{}" r="3.5" />
 "##,
-                svg_x1, svg_y1, svg_x2, svg_y2,
-                to_svg_x(e.center.x), to_svg_y(e.center.z)
+                svg_x1,
+                svg_y1,
+                svg_x2,
+                svg_y2,
+                to_svg_x(e.center.x),
+                to_svg_y(e.center.z)
             ));
 
             let txt_x = to_svg_x(e.center.x);
@@ -159,7 +170,11 @@ pub fn render_region_blueprint_svg(
                 let svg_f_x = to_svg_x(f.at.x) - w_px * 0.5;
                 let svg_f_y = to_svg_y(f.at.z) - h_px * 0.5;
 
-                let class_name = if f.lit { "fixture-lit" } else { "fixture-unlit" };
+                let class_name = if f.lit {
+                    "fixture-lit"
+                } else {
+                    "fixture-unlit"
+                };
                 svg.push_str(&format!(
                     r##"  <rect class="{}" x="{}" y="{}" width="{}" height="{}" rx="1" />
 "##,
@@ -247,8 +262,13 @@ pub fn render_region_blueprint_svg(
                 r##"  <rect class="chunk-grid" x="{}" y="{}" width="{}" height="{}" />
   <text class="chunk-label" x="{}" y="{}" text-anchor="start" dominant-baseline="hanging">{}</text>
 "##,
-                svg_min_x, svg_min_y, w_px, h_px,
-                svg_min_x + 6.0, svg_min_y + 6.0, cb.label
+                svg_min_x,
+                svg_min_y,
+                w_px,
+                h_px,
+                svg_min_x + 6.0,
+                svg_min_y + 6.0,
+                cb.label
             ));
         }
     }
@@ -269,11 +289,16 @@ pub fn render_region_blueprint_svg(
     <text class="title-sub" x="15" y="105">Scale: 1 unit = {}px</text>
   </g>
 "##,
-        title_x, title_y,
-        options.seed, options.level,
-        rx, rz,
-        plan.size_world, plan.size_world,
-        options.voxel_scale, scale
+        title_x,
+        title_y,
+        options.seed,
+        options.level,
+        rx,
+        rz,
+        plan.size_world,
+        plan.size_world,
+        options.voxel_scale,
+        scale
     ));
 
     svg.push_str("</svg>\n");
@@ -282,10 +307,10 @@ pub fn render_region_blueprint_svg(
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BlueprintSlice {
-    FloorPlan,       // y = 0: floor, walls projected upward
-    WallPlan,        // any WALL / REDWALL in y = 1..ceiling
-    CeilingPlan,     // ceiling and LIGHT voxels
-    Composite,       // wall + floor + light + semantic overlay
+    FloorPlan,   // y = 0: floor, walls projected upward
+    WallPlan,    // any WALL / REDWALL in y = 1..ceiling
+    CeilingPlan, // ceiling and LIGHT voxels
+    Composite,   // wall + floor + light + semantic overlay
 }
 
 pub fn render_voxel_chunk_svg(
@@ -296,8 +321,8 @@ pub fn render_voxel_chunk_svg(
     semantics: Option<&RegionPlan>,
 ) -> String {
     use crate::domain::entities::voxel_grid::{
-        VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT,
-        VOXEL_RED_LIGHT, VOXEL_RED_WALL, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER,
+        VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT,
+        VOXEL_RED_WALL, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER,
     };
 
     let w_voxels = grid.width().saturating_sub(2);
@@ -373,10 +398,9 @@ pub fn render_voxel_chunk_svg(
                     semantic_class = "cell-secondary-corridor";
                 } else {
                     for a in &plan.assemblies {
-                        if a.footprint.contains(
-                            wx + config.voxel_scale * 0.5,
-                            wz + config.voxel_scale * 0.5,
-                        ) {
+                        if a.footprint
+                            .contains(wx + config.voxel_scale * 0.5, wz + config.voxel_scale * 0.5)
+                        {
                             semantic_class = "cell-assembly";
                             break;
                         }
@@ -413,23 +437,41 @@ pub fn render_voxel_chunk_svg(
             let voxel_class = match slice {
                 BlueprintSlice::FloorPlan => {
                     if has_wall || has_red_wall || has_tree {
-                        Some(if has_red_wall { "voxel-red-wall" } else { "voxel-wall" })
+                        Some(if has_red_wall {
+                            "voxel-red-wall"
+                        } else {
+                            "voxel-wall"
+                        })
                     } else if has_floor || has_grass || has_water {
-                        Some(if has_water { "voxel-water" } else if has_grass { "voxel-grass" } else { "voxel-floor" })
+                        Some(if has_water {
+                            "voxel-water"
+                        } else if has_grass {
+                            "voxel-grass"
+                        } else {
+                            "voxel-floor"
+                        })
                     } else {
                         None
                     }
                 }
                 BlueprintSlice::WallPlan => {
                     if has_wall || has_red_wall || has_tree {
-                        Some(if has_red_wall { "voxel-red-wall" } else { "voxel-wall" })
+                        Some(if has_red_wall {
+                            "voxel-red-wall"
+                        } else {
+                            "voxel-wall"
+                        })
                     } else {
                         None
                     }
                 }
                 BlueprintSlice::CeilingPlan => {
                     if has_light || has_red_light {
-                        Some(if has_red_light { "voxel-red-light" } else { "voxel-light" })
+                        Some(if has_red_light {
+                            "voxel-red-light"
+                        } else {
+                            "voxel-light"
+                        })
                     } else if has_ceiling {
                         Some("voxel-ceiling")
                     } else {
@@ -438,11 +480,25 @@ pub fn render_voxel_chunk_svg(
                 }
                 BlueprintSlice::Composite => {
                     if has_wall || has_red_wall || has_tree {
-                        Some(if has_red_wall { "voxel-red-wall" } else { "voxel-wall" })
+                        Some(if has_red_wall {
+                            "voxel-red-wall"
+                        } else {
+                            "voxel-wall"
+                        })
                     } else if has_light || has_red_light {
-                        Some(if has_red_light { "voxel-red-light" } else { "voxel-light" })
+                        Some(if has_red_light {
+                            "voxel-red-light"
+                        } else {
+                            "voxel-light"
+                        })
                     } else if has_floor || has_grass || has_water {
-                        Some(if has_water { "voxel-water" } else if has_grass { "voxel-grass" } else { "voxel-floor" })
+                        Some(if has_water {
+                            "voxel-water"
+                        } else if has_grass {
+                            "voxel-grass"
+                        } else {
+                            "voxel-floor"
+                        })
                     } else {
                         None
                     }
@@ -592,7 +648,10 @@ pub fn render_large_voxel_blueprint_svg(
                 for &(vx, vz) in &a.footprint.vertices {
                     points_str.push_str(&format!("{},{} ", to_svg_x(vx), to_svg_y(vz)));
                 }
-                let class_name = if a.corruption.misalignment.0 != 0.0 || a.corruption.misalignment.1 != 0.0 || a.corruption.abandoned {
+                let class_name = if a.corruption.misalignment.0 != 0.0
+                    || a.corruption.misalignment.1 != 0.0
+                    || a.corruption.abandoned
+                {
                     "assembly-corrupt"
                 } else {
                     "assembly"
@@ -620,7 +679,9 @@ pub fn render_large_voxel_blueprint_svg(
                     svg.push_str(&format!(
                         r##"  <path class="{}" d="{}" stroke-width="{}" />
 "##,
-                        class_name, d_str, c.width * scale
+                        class_name,
+                        d_str,
+                        c.width * scale
                     ));
                 }
             }
@@ -723,12 +784,16 @@ pub fn render_large_voxel_blueprint_svg(
     <text class="title-sub" x="15" y="105">Resolution: {}x{} cells</text>
   </g>
 "##,
-            title_x, title_y,
+            title_x,
+            title_y,
             slice,
-            rx_origin, rz_origin,
-            size_world, size_world,
+            rx_origin,
+            rz_origin,
+            size_world,
+            size_world,
             voxel_scale,
-            total_w, total_d
+            total_w,
+            total_d
         ));
     }
 

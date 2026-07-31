@@ -14,16 +14,12 @@
 /// (`VoxelGrid`, `RegionPlan`, `Position`) and converts them into a string
 /// artifact (SVG) for the browser presentation layer.  It contains no
 /// business logic; all meaning lives in the entities it receives.
-
-use crate::domain::entities::architecture::{
-    RegionPlan, SpaceProgram,
-};
-use crate::domain::entities::voxel_grid::{
-    VoxelGrid,
-    VOXEL_WALL, VOXEL_RED_WALL, VOXEL_FLOOR, VOXEL_CEILING,
-    VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_GRASS, VOXEL_WATER, VOXEL_TREE,
-};
+use crate::domain::entities::architecture::{RegionPlan, SpaceProgram};
 use crate::domain::entities::position::Position;
+use crate::domain::entities::voxel_grid::{
+    VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_RED_WALL,
+    VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
+};
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -82,34 +78,42 @@ fn world_to_voxel(world: f32, chunk_origin: f32, voxel_scale: f32) -> f32 {
 /// "real" chunk interior occupies [1, width-1] × [1, depth-1].
 #[inline]
 fn clip_rect(
-    x0: f32, z0: f32, x1: f32, z1: f32,
-    grid_w: f32, grid_d: f32,
+    x0: f32,
+    z0: f32,
+    x1: f32,
+    z1: f32,
+    grid_w: f32,
+    grid_d: f32,
 ) -> Option<(f32, f32, f32, f32)> {
     let cx0 = x0.max(1.0);
     let cz0 = z0.max(1.0);
     let cx1 = x1.min(grid_w - 1.0);
     let cz1 = z1.min(grid_d - 1.0);
-    if cx1 > cx0 && cz1 > cz0 { Some((cx0, cz0, cx1, cz1)) } else { None }
+    if cx1 > cx0 && cz1 > cz0 {
+        Some((cx0, cz0, cx1, cz1))
+    } else {
+        None
+    }
 }
 
 /// Return the canonical debug label for a `SpaceProgram` variant.
 const fn program_label(p: SpaceProgram) -> &'static str {
     match p {
-        SpaceProgram::Arrival            => "ARRIVAL",
-        SpaceProgram::Reception          => "RECEPTION",
-        SpaceProgram::MainCorridor       => "MAIN CORRIDOR",
-        SpaceProgram::SecondaryHall      => "SECONDARY HALL",
-        SpaceProgram::OpenOffice         => "OPEN OFFICE",
-        SpaceProgram::PrivateOffice      => "PRIVATE OFFICE",
-        SpaceProgram::ConferenceRoom     => "CONFERENCE RM",
-        SpaceProgram::WaitingArea        => "WAITING AREA",
-        SpaceProgram::BreakRoom          => "BREAK ROOM",
-        SpaceProgram::Storage            => "STORAGE",
-        SpaceProgram::ServerRoom         => "SERVER ROOM",
-        SpaceProgram::RestroomCore       => "RESTROOM",
-        SpaceProgram::Stair              => "STAIR",
-        SpaceProgram::Mechanical         => "MECHANICAL",
-        SpaceProgram::Atrium             => "ATRIUM",
+        SpaceProgram::Arrival => "ARRIVAL",
+        SpaceProgram::Reception => "RECEPTION",
+        SpaceProgram::MainCorridor => "MAIN CORRIDOR",
+        SpaceProgram::SecondaryHall => "SECONDARY HALL",
+        SpaceProgram::OpenOffice => "OPEN OFFICE",
+        SpaceProgram::PrivateOffice => "PRIVATE OFFICE",
+        SpaceProgram::ConferenceRoom => "CONFERENCE RM",
+        SpaceProgram::WaitingArea => "WAITING AREA",
+        SpaceProgram::BreakRoom => "BREAK ROOM",
+        SpaceProgram::Storage => "STORAGE",
+        SpaceProgram::ServerRoom => "SERVER ROOM",
+        SpaceProgram::RestroomCore => "RESTROOM",
+        SpaceProgram::Stair => "STAIR",
+        SpaceProgram::Mechanical => "MECHANICAL",
+        SpaceProgram::Atrium => "ATRIUM",
         SpaceProgram::AbandonedExpansion => "ABANDONED",
     }
 }
@@ -120,10 +124,10 @@ const fn program_label(p: SpaceProgram) -> &'static str {
 const fn material_priority(voxel: u8) -> u8 {
     match voxel {
         VOXEL_WALL | VOXEL_RED_WALL | VOXEL_TREE => 4,
-        VOXEL_LIGHT | VOXEL_RED_LIGHT             => 3,
-        VOXEL_CEILING                             => 2,
-        VOXEL_FLOOR | VOXEL_GRASS | VOXEL_WATER   => 1,
-        _                                         => 0,
+        VOXEL_LIGHT | VOXEL_RED_LIGHT => 3,
+        VOXEL_CEILING => 2,
+        VOXEL_FLOOR | VOXEL_GRASS | VOXEL_WATER => 1,
+        _ => 0,
     }
 }
 
@@ -131,16 +135,16 @@ const fn material_priority(voxel: u8) -> u8 {
 #[inline]
 const fn material_class(voxel: u8) -> &'static str {
     match voxel {
-        VOXEL_WALL      => "vw",
-        VOXEL_RED_WALL  => "vrw",
-        VOXEL_TREE      => "vwt",
-        VOXEL_LIGHT     => "vli",
+        VOXEL_WALL => "vw",
+        VOXEL_RED_WALL => "vrw",
+        VOXEL_TREE => "vwt",
+        VOXEL_LIGHT => "vli",
         VOXEL_RED_LIGHT => "vrli",
-        VOXEL_CEILING   => "vce",
-        VOXEL_FLOOR     => "vfl",
-        VOXEL_GRASS     => "vgr",
-        VOXEL_WATER     => "vwa",
-        _               => "vair",
+        VOXEL_CEILING => "vce",
+        VOXEL_FLOOR => "vfl",
+        VOXEL_GRASS => "vgr",
+        VOXEL_WATER => "vwa",
+        _ => "vair",
     }
 }
 
@@ -175,7 +179,7 @@ pub fn render_chunk_voxel_blueprint_svg(
 ) -> String {
     let ppv = options.pixels_per_voxel;
 
-    let gw = grid.width();   // includes 1-cell padding on each side
+    let gw = grid.width(); // includes 1-cell padding on each side
     let gd = grid.depth();
     let gh = grid.height();
 
@@ -188,10 +192,14 @@ pub fn render_chunk_voxel_blueprint_svg(
     let chunk_size_world = interior * voxel_scale;
     let cx_idx = if chunk_size_world > 0.0 {
         (chunk_origin.x / chunk_size_world).floor() as i32
-    } else { 0 };
+    } else {
+        0
+    };
     let cz_idx = if chunk_size_world > 0.0 {
         (chunk_origin.z / chunk_size_world).floor() as i32
-    } else { 0 };
+    } else {
+        0
+    };
 
     // ── Coordinate transform closures ─────────────────────────────────
     //
@@ -212,10 +220,10 @@ pub fn render_chunk_voxel_blueprint_svg(
 
     // Float voxel → SVG pixel.
     let vpx = |vx_f: f32| -> f32 { vx_f * ppv };
-    let vpy_top = |vz_f: f32| -> f32 { canvas_h - vz_f * ppv };   // top edge of a box whose Z min = vz_f
+    let vpy_top = |vz_f: f32| -> f32 { canvas_h - vz_f * ppv }; // top edge of a box whose Z min = vz_f
 
-    let label_fs  = (ppv * 1.1).max(7.0_f32).min(13.0_f32);
-    let label_sm  = (ppv * 0.85).max(5.5_f32).min(10.0_f32);
+    let label_fs = (ppv * 1.1).max(7.0_f32).min(13.0_f32);
+    let label_sm = (ppv * 0.85).max(5.5_f32).min(10.0_f32);
 
     // ── Build SVG string ───────────────────────────────────────────────
     let mut svg = String::with_capacity(256 * 1024);
@@ -243,8 +251,10 @@ pub fn render_chunk_voxel_blueprint_svg(
   </style>
 </defs>
 "#,
-        cw = canvas_w, ch = canvas_h,
-        lfs = label_fs, lsm = label_sm,
+        cw = canvas_w,
+        ch = canvas_h,
+        lfs = label_fs,
+        lsm = label_sm,
     ));
 
     // ── Pass 1: voxel fills ────────────────────────────────────────────
@@ -353,15 +363,21 @@ pub fn render_chunk_voxel_blueprint_svg(
         // We draw per-segment rather than the whole path AABB so that
         // L-shaped corridors clip correctly at the chunk boundary.
         for spine in &plan.corridors {
-            if spine.path.len() < 2 { continue; }
+            if spine.path.len() < 2 {
+                continue;
+            }
             let hw = spine.width * 0.5;
             let (fill, stroke, label_text) = match spine.spine_kind {
-                SpaceProgram::MainCorridor =>
-                    ("#00ffff", "#00e5ff",
-                     format!("{} · {:.1}m", program_label(spine.spine_kind), spine.width)),
-                _ =>
-                    ("#a855f7", "#c084fc",
-                     format!("{} · {:.1}m", program_label(spine.spine_kind), spine.width)),
+                SpaceProgram::MainCorridor => (
+                    "#00ffff",
+                    "#00e5ff",
+                    format!("{} · {:.1}m", program_label(spine.spine_kind), spine.width),
+                ),
+                _ => (
+                    "#a855f7",
+                    "#c084fc",
+                    format!("{} · {:.1}m", program_label(spine.spine_kind), spine.width),
+                ),
             };
             for seg in spine.path.windows(2) {
                 let (a, b) = (seg[0], seg[1]);
@@ -370,9 +386,27 @@ pub fn render_chunk_voxel_blueprint_svg(
                 let x1 = a.x.max(b.x) + hw;
                 let z1 = a.z.max(b.z) + hw;
                 if fill == "#00ffff" {
-                    emit_box!(x0, z0, x1, z1, "#00ffff", "#00e5ff", false, label_text.as_str());
+                    emit_box!(
+                        x0,
+                        z0,
+                        x1,
+                        z1,
+                        "#00ffff",
+                        "#00e5ff",
+                        false,
+                        label_text.as_str()
+                    );
                 } else {
-                    emit_box!(x0, z0, x1, z1, "#a855f7", "#c084fc", false, label_text.as_str());
+                    emit_box!(
+                        x0,
+                        z0,
+                        x1,
+                        z1,
+                        "#a855f7",
+                        "#c084fc",
+                        false,
+                        label_text.as_str()
+                    );
                 }
             }
         }
@@ -382,37 +416,89 @@ pub fn render_chunk_voxel_blueprint_svg(
             let (mx, mz, xx, xz) = asm.footprint.bounds();
             let label_text = format!("#{} {}", asm.id, program_label(asm.program));
             if asm.corruption.abandoned {
-                emit_box!(mx, mz, xx, xz, "#ff00ff", "#e879f9", false, label_text.as_str());
+                emit_box!(
+                    mx,
+                    mz,
+                    xx,
+                    xz,
+                    "#ff00ff",
+                    "#e879f9",
+                    false,
+                    label_text.as_str()
+                );
             } else {
-                emit_box!(mx, mz, xx, xz, "#ffffff", "#cbd5e1", false, label_text.as_str());
+                emit_box!(
+                    mx,
+                    mz,
+                    xx,
+                    xz,
+                    "#ffffff",
+                    "#cbd5e1",
+                    false,
+                    label_text.as_str()
+                );
             }
 
             // Sub-spaces within the assembly.
             for space in &asm.spaces {
                 let (sx0, sz0, sx1, sz1) = space.footprint.bounds();
-                emit_box!(sx0, sz0, sx1, sz1, "#94a3b8", "#64748b", false,
-                          program_label(space.program));
+                emit_box!(
+                    sx0,
+                    sz0,
+                    sx1,
+                    sz1,
+                    "#94a3b8",
+                    "#64748b",
+                    false,
+                    program_label(space.program)
+                );
             }
 
             // Ceiling zones (dashed gold).
             for cz in &asm.ceiling_zones {
                 let (zx0, zz0, zx1, zz1) = cz.area.bounds();
                 let clabel = format!("VAULT · {:.1}m", cz.height_units);
-                emit_box!(zx0, zz0, zx1, zz1, "#ca8a04", "#fbbf24", true, clabel.as_str());
+                emit_box!(
+                    zx0,
+                    zz0,
+                    zx1,
+                    zz1,
+                    "#ca8a04",
+                    "#fbbf24",
+                    true,
+                    clabel.as_str()
+                );
             }
 
             // Openings / portals (green).
             for opening in asm.entrances() {
                 let hw = opening.width * 0.5;
                 let (ox0, oz0, ox1, oz1) = if opening.through_x_wall {
-                    (opening.center.x - hw, opening.center.z - voxel_scale,
-                     opening.center.x + hw, opening.center.z + voxel_scale)
+                    (
+                        opening.center.x - hw,
+                        opening.center.z - voxel_scale,
+                        opening.center.x + hw,
+                        opening.center.z + voxel_scale,
+                    )
                 } else {
-                    (opening.center.x - voxel_scale, opening.center.z - hw,
-                     opening.center.x + voxel_scale, opening.center.z + hw)
+                    (
+                        opening.center.x - voxel_scale,
+                        opening.center.z - hw,
+                        opening.center.x + voxel_scale,
+                        opening.center.z + hw,
+                    )
                 };
                 let plabel = format!("PORTAL · {:.1}m", opening.width);
-                emit_box!(ox0, oz0, ox1, oz1, "#10b981", "#34d399", false, plabel.as_str());
+                emit_box!(
+                    ox0,
+                    oz0,
+                    ox1,
+                    oz1,
+                    "#10b981",
+                    "#34d399",
+                    false,
+                    plabel.as_str()
+                );
             }
         }
 
@@ -432,8 +518,10 @@ pub fn render_chunk_voxel_blueprint_svg(
     // ── Header strip ──────────────────────────────────────────────────
     let header = format!(
         "CHUNK ({cx}, {cz})  ·  {ic}×{ic} voxels  ·  {vs}m/voxel",
-        cx = cx_idx, cz = cz_idx,
-        ic = interior as usize, vs = voxel_scale,
+        cx = cx_idx,
+        cz = cz_idx,
+        ic = interior as usize,
+        vs = voxel_scale,
     );
     let header_h = ppv * 1.8;
     svg.push_str(&format!(
@@ -445,12 +533,12 @@ pub fn render_chunk_voxel_blueprint_svg(
     // ── Legend ─────────────────────────────────────────────────────────
     if options.show_labels {
         let legend_items: &[(&str, &str)] = &[
-            ("vw",   "WALL"),
-            ("vrw",  "RED WALL"),
-            ("vli",  "LIGHT"),
+            ("vw", "WALL"),
+            ("vrw", "RED WALL"),
+            ("vli", "LIGHT"),
             ("vrli", "RED LIGHT"),
-            ("vfl",  "FLOOR"),
-            ("vce",  "CEILING"),
+            ("vfl", "FLOOR"),
+            ("vce", "CEILING"),
         ];
         let legend_col_w = ppv * 8.5;
         let legend_row_h = ppv * 1.1;
@@ -460,8 +548,10 @@ pub fn render_chunk_voxel_blueprint_svg(
         svg.push_str(&format!(
             "<rect x=\"{lx}\" y=\"{ly}\" width=\"{lw}\" height=\"{lh}\" \
              fill=\"#0f172a\" fill-opacity=\"0.88\" rx=\"3\"/>\n",
-            lx = legend_x, ly = legend_y,
-            lw = legend_col_w, lh = legend_total_h,
+            lx = legend_x,
+            ly = legend_y,
+            lw = legend_col_w,
+            lh = legend_total_h,
         ));
         for (i, (cls, label)) in legend_items.iter().enumerate() {
             let ry = legend_y + 3.0 + i as f32 * legend_row_h;
@@ -470,7 +560,8 @@ pub fn render_chunk_voxel_blueprint_svg(
                  <text class=\"lsm\" x=\"{tx}\" y=\"{ry}\" fill=\"#94a3b8\">{label}</text>\n",
                 cls = cls,
                 sx = legend_x + 3.0,
-                ry = ry, ppv = ppv,
+                ry = ry,
+                ppv = ppv,
                 tx = legend_x + ppv + 6.0,
                 label = label,
             ));

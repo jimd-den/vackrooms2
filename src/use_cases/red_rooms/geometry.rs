@@ -7,8 +7,8 @@
 use crate::domain::entities::anomaly::{AnomalyInstance, Axis2, RealitySnapshot, RedRoomPhase};
 use crate::domain::entities::environment::EnvironmentProfile;
 use crate::domain::entities::voxel_grid::VOXEL_STICKY_CARPET;
-use crate::use_cases::level_zero::ColumnPlan;
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::level_zero::ColumnPlan;
 use crate::use_cases::region_plan::PLAN_WALL_T;
 
 /// Applies avoidable warning cues and the committed encounter topology.
@@ -42,7 +42,17 @@ pub(crate) fn sample_red_room(
             column.ceiling_units = (column.ceiling_units - 0.4).max(2.4);
         }
     }
-    column.red_light = true;
+    column.fixture = Some(crate::use_cases::level_zero::FixtureSample {
+        id: (instance.id as u64).wrapping_mul(0x9E37_79B9),
+        kind: crate::use_cases::level_zero::FixtureKind::FluorescentPanel,
+        state: crate::use_cases::level_zero::FixtureState::Lit,
+        center_x: 0.0,
+        center_z: 0.0,
+        half_x: 0.3,
+        half_z: 0.3,
+        ceiling_units: column.ceiling_units,
+        red_room: true,
+    });
 
     let Some(state) = instance.state(reality) else {
         return column;
@@ -59,7 +69,7 @@ pub(crate) fn sample_red_room(
     column.floor_material = VOXEL_STICKY_CARPET;
     column.ceiling_units = column.ceiling_units.min(2.8);
     if column.solid {
-        column.light = false;
+        column.fixture = None;
     }
 
     if state.phase == RedRoomPhase::EscapeOpen {

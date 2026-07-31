@@ -8,9 +8,9 @@
 //! floating squares" artifact) fail the test with a diagnostic dump.
 
 use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
-use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
+use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 
 use wasm_frontend::adapters::local_chunk_source::LocalChunkSource;

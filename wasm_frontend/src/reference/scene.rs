@@ -4,11 +4,11 @@
 use crate::adapters::collect_emissive_lights::collect_emissive_lights;
 use crate::application::ports::{ChunkDraw, LightSource};
 use crate::reference::room::RoomScene;
-use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
+use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use vackrooms::domain::entities::voxel_grid::VoxelGrid;
-use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::use_cases::bake_voxel_lighting::{VoxelLightingSettings, bake_voxel_lighting};
+use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderSceneSnapshot {
@@ -31,8 +31,8 @@ pub fn build_render_scene(scene: RoomScene) -> RenderSceneSnapshot {
         .expect("RoomScene guarantees a positive finite voxel size");
     bake_voxel_lighting(&mut voxels, lighting);
 
-    let svo = BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE)
-        .execute(&voxels, svo_depth, world_size);
+    let svo =
+        BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE).execute(&voxels, svo_depth, world_size);
     let serialized = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
     RenderSceneSnapshot {
         atlas: serialized.texel_data,

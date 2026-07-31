@@ -157,7 +157,10 @@ fn chunks_tile_seamlessly() {
                 .unwrap();
             let expect =
                 BackroomsLevel::plan_column(plan, &noise, 42, &LevelTuning::default(), wx, wz);
-            let got_solid = grid.get(lx, 1, z) == VOXEL_WALL;
+            // Any solid material counts: fabric decay can voxelize a wall
+            // or gallery post as aged wallpaper instead of VOXEL_WALL.
+            let got_solid =
+                crate::domain::entities::voxel_grid::SOLID_MATERIALS.contains(&grid.get(lx, 1, z));
             // Raised floor (stair treads) also writes wall material at
             // the walkable layer, so it counts as expected solid here.
             let expect_solid =
@@ -417,9 +420,7 @@ fn hosted_entrances_cut_one_continuous_path_from_corridor_to_room() {
             assert!(
                 !column.solid,
                 "assembly {} entrance at ({:.1},{:.1}) is blocked {offset:.1} u from its host; corridor clearance {corridor_clearance:.2}",
-                assembly.id,
-                entrance.center.x,
-                entrance.center.z,
+                assembly.id, entrance.center.x, entrance.center.z,
             );
         }
     }
@@ -456,7 +457,11 @@ fn every_authored_interior_opening_survives_column_sampling() {
                     opening.center.x,
                     opening.center.z,
                 );
-                assert!(!column.solid, "interior opening {:?} is blocked", opening.id);
+                assert!(
+                    !column.solid,
+                    "interior opening {:?} is blocked",
+                    opening.id
+                );
                 checked += 1;
             }
         }
@@ -505,7 +510,7 @@ fn abandoned_expansions_are_unlit() {
                             let c = BackroomsLevel::plan_column(
                                 plan, &noise, 42, &tuning, probe_x, probe_z,
                             );
-                            assert!(!c.light, "abandoned assembly {} is lit", a.id);
+                            assert!(!c.has_lit_fixture(), "abandoned assembly {} is lit", a.id);
                         }
                         probe_x += 0.8;
                     }
@@ -662,7 +667,10 @@ fn open_fabric_ceiling_steps_receive_supported_bulkheads() {
         }
     }
 
-    assert!(checked > 8, "sample did not cross enough ceiling territories");
+    assert!(
+        checked > 8,
+        "sample did not cross enough ceiling territories"
+    );
 }
 
 #[test]
@@ -830,7 +838,11 @@ fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
     // Chunk (170, -120)..(180, -110) contains the authored door (172, -116).
     let chunk = Position::new(170.0, -120.0);
     let grid = BackroomsLevel.generate(chunk, 42, config, &noise);
-    assert_eq!(grid.entities.level_exits.len(), 1, "authored door must export");
+    assert_eq!(
+        grid.entities.level_exits.len(),
+        1,
+        "authored door must export"
+    );
     let exit = grid.entities.level_exits[0];
     assert_eq!(exit.target_level, 1);
     assert!(exit.contains(172.0, -116.0));
@@ -942,7 +954,7 @@ fn spawn_is_a_readable_walled_corridor() {
         let wx = sp.x + step as f32;
         let c = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, sp.z);
         assert!(!c.solid, "main corridor blocked at ({wx}, {})", sp.z);
-        lit |= c.light;
+        lit |= c.has_lit_fixture();
         for (i, side) in [-1.0, 1.0f32].iter().enumerate() {
             let wz = sp.z + side * (half + PLAN_WALL_T * 0.5);
             if BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, wz).solid {
@@ -1077,8 +1089,11 @@ fn red_rooms_are_lit_red_but_never_built_red() {
                 // Its lit fixtures plan red lights.
                 let f = a.fixtures.iter().find(|f| f.lit).expect("lit fixture");
                 let c = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, f.at.x, f.at.z);
-                if c.light {
-                    assert!(c.red_light, "red-room fixture plans a warm light");
+                if c.has_lit_fixture() {
+                    assert!(
+                        c.fixture.as_ref().map_or(false, |f| f.red_room),
+                        "red-room fixture plans a warm light"
+                    );
                     red_room_seen = true;
                     break 'search;
                 }
@@ -1211,7 +1226,10 @@ fn blackout_has_a_recoverable_glimmer_lane_and_compressed_dark_core() {
         core.x,
         core.z,
     );
-    assert!(!core_plan.light, "blackout core has an ordinary fixture");
+    assert!(
+        !core_plan.has_lit_fixture(),
+        "blackout core has an ordinary fixture"
+    );
     assert_eq!(core_plan.ceiling_units, 2.6);
 }
 
@@ -1584,7 +1602,7 @@ fn pillar_expanse_is_dry_and_its_bearing_lane_is_lit_in_rhythm() {
             let p = instance.world_coords(lx, 0.0);
             let c = sample_anomaly(&instance, &noise, 42, &config, &empty, p.x, p.z);
             modules += 1;
-            if c.light {
+            if c.has_lit_fixture() {
                 lit += 1;
             }
         }
@@ -1612,7 +1630,7 @@ fn blackout_cues_are_glimmers_and_floors_pool_fluid() {
     while lx < instance.footprint.half_x {
         let p = instance.world_coords(lx, 0.0);
         let c = sample_anomaly(&instance, &noise, 42, &config, &empty, p.x, p.z);
-        if c.light {
+        if c.has_lit_fixture() {
             assert_eq!(
                 c.light_material, VOXEL_GLIMMER,
                 "skeleton cue is not a glimmer"
@@ -2061,12 +2079,12 @@ fn a_blackout_owns_the_dark_even_over_the_main_corridor() {
         assert!(!column.solid, "main corridor blocked at ({wx}, {wz})");
         if instance.contains(wx, wz) && instance.normalized_depth(wx, wz) > 0.25 {
             assert!(
-                !column.light,
+                !column.has_lit_fixture(),
                 "corridor light strip survives deep blackout at ({wx}, {wz})"
             );
             dark_deep_modules += 1;
         } else if !instance.contains(wx, wz) {
-            lit_outside_modules += usize::from(column.light);
+            lit_outside_modules += usize::from(column.has_lit_fixture());
         }
     }
     assert!(
@@ -2156,7 +2174,7 @@ fn old_territory_has_more_dead_lights_than_young_territory() {
             } else {
                 continue;
             };
-            bucket.0 += usize::from(column.light);
+            bucket.0 += usize::from(column.has_lit_fixture());
             bucket.1 += 1;
         }
     }
@@ -2243,7 +2261,7 @@ fn test_print_ascii_map() {
             let col = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, wz);
             if col.solid {
                 map.push('#');
-            } else if col.light {
+            } else if col.has_lit_fixture() {
                 map.push('*');
             } else if col.lintel_from_units.is_some() {
                 map.push('d');

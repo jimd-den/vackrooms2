@@ -109,7 +109,12 @@ mod tests {
             (1, 1),
         ];
         for &(dx, dz) in offsets.iter().take(count) {
-            grid.set((x as i64 + dx) as usize, 0, (z as i64 + dz) as usize, VOXEL_FLUID);
+            grid.set(
+                (x as i64 + dx) as usize,
+                0,
+                (z as i64 + dz) as usize,
+                VOXEL_FLUID,
+            );
         }
     }
 

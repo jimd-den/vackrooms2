@@ -28,8 +28,19 @@ use crate::use_cases::ports::NoiseProvider;
 
 /// Side of a region, world units. A multiple of both chunk sizes (10/20).
 pub const REGION_SIZE: f32 = 80.0;
-/// Plan wall thickness: one coarse voxel, so walls survive every LOD.
-pub const PLAN_WALL_T: f32 = 0.4;
+/// Plan wall thickness: an institutional double-wythe partition (two CAD
+/// interior walls back to back). The value must also stay >= one coarse
+/// voxel (0.4) or walls vanish at the LOD-1 proxy resolution.
+pub const PLAN_WALL_T: f32 = 2.0 * crate::domain::entities::cad::CAD_WALL_THICKNESS;
+/// Doorways are cased rough openings around the referencable CAD single
+/// door: finished width plus 0.15 u of jamb clearance per side, so the
+/// coarsest supported voxel scale (0.4 u) still quantizes the opening
+/// wider than the player capsule.
+pub const DOOR_JAMB_CLEARANCE: f32 = 0.15;
+pub const DOOR_WIDTH: f32 =
+    crate::domain::entities::cad::CAD_DOOR_WIDTH + 2.0 * DOOR_JAMB_CLEARANCE;
+/// Lintels sit at the standard CAD door-frame height.
+pub const DOOR_HEIGHT: f32 = crate::domain::entities::cad::CAD_DOOR_HEIGHT;
 /// Snap lattice for all plan geometry (= coarsest voxel size).
 const SNAP: f32 = 0.4;
 /// Keep-out margin from region edges for assembly footprints.
@@ -76,7 +87,6 @@ pub fn spawn_point(seed: u32) -> Position {
     // on a straight, readable stretch of corridor.
     Position::new(6.0, v_edge_portal_z(seed, 0, 0))
 }
-
 
 // ---------------------------------------------------------------------------
 // The planning stages, one intent per module.

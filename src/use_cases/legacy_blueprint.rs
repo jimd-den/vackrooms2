@@ -9,11 +9,11 @@
 //! module is consulted by Level 0 or the grassland level.
 
 use crate::domain::entities::grid::Grid;
+use crate::domain::entities::position::Position;
 use crate::domain::entities::voxel_grid::{
     VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
 };
 use crate::domain::use_cases::generate_maze::{GrowingTreeGenerator, MazeGenerator};
-use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::{NoiseProvider, TelemetryPort};
 use rand::rngs::StdRng;

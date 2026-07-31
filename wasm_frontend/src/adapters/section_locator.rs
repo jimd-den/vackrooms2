@@ -46,8 +46,7 @@ impl SectionLocator {
         if level == LEVEL_HABITABLE {
             // Level 1's sectors are a pure world-lattice function; no
             // region plan exists (or is needed) on the Habitable Zone.
-            let sector =
-                vackrooms::use_cases::level_one::Sector::at(self.seed, x, z).name();
+            let sector = vackrooms::use_cases::level_one::Sector::at(self.seed, x, z).name();
             return format!("LEVEL 1 · HABITABLE ZONE · {sector}");
         }
         let rx = (x / REGION_SIZE).floor() as i64;

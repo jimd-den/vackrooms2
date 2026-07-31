@@ -123,7 +123,8 @@ impl LightSelectionCache {
 
         selected.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let result: Vec<LightSource> = selected.into_iter().take(top_k).map(|(_, l)| *l).collect();
-        self.entries.insert(key, result.iter().map(|l| l.id).collect());
+        self.entries
+            .insert(key, result.iter().map(|l| l.id).collect());
         result
     }
 }
@@ -196,13 +197,25 @@ mod tests {
         let l2 = light(2, [0.1, 1.0, 0.0]);
 
         // First frame selects l1 as top 1
-        let sel1 = cache.select_lights_with_hysteresis(chunk_key, &[l1, l2], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1);
+        let sel1 = cache.select_lights_with_hysteresis(
+            chunk_key,
+            &[l1, l2],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            1,
+        );
         assert_eq!(sel1.len(), 1);
         assert_eq!(sel1[0].id, 1);
 
         // Second frame: l2 moves slightly closer, but l1 is retained due to hysteresis
         let l2_slightly_closer = light(2, [0.0, 0.95, 0.0]);
-        let sel2 = cache.select_lights_with_hysteresis(chunk_key, &[l1, l2_slightly_closer], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1);
+        let sel2 = cache.select_lights_with_hysteresis(
+            chunk_key,
+            &[l1, l2_slightly_closer],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            1,
+        );
         assert_eq!(sel2.len(), 1);
         assert_eq!(sel2[0].id, 1);
     }

@@ -245,7 +245,10 @@ mod tests {
             weary.step_with_effort(dt, &intent, &world, 0.5);
         }
         let speed = (before - weary.position[2]).abs();
-        assert!((speed - 1.25).abs() < 0.05, "half effort halves terminal: {speed}");
+        assert!(
+            (speed - 1.25).abs() < 0.05,
+            "half effort halves terminal: {speed}"
+        );
 
         // Hostile effort values are clamped, never zeroing movement.
         let mut p = Player::new([0.0, 1.7, 0.0]);

@@ -52,12 +52,9 @@ impl Sector {
     pub fn at(seed: u32, wx: f32, wz: f32) -> Self {
         let cx = (wx / SECTOR_CELL).floor() as i64;
         let cz = (wz / SECTOR_CELL).floor() as i64;
-        let roll = crate::use_cases::anomalies::determinism::hash(
-            seed,
-            0x1EE1_5EC7_0A00_0001,
-            cx,
-            cz,
-        ) % 100;
+        let roll =
+            crate::use_cases::anomalies::determinism::hash(seed, 0x1EE1_5EC7_0A00_0001, cx, cz)
+                % 100;
         // The arrival cell is always Aquila: the wanderer steps out of the
         // door into readable parking-lot openness, exactly the first-report
         // canon of Level 1.

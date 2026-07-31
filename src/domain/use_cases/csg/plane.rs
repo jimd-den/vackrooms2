@@ -109,7 +109,10 @@ impl Plane {
                     ));
                 }
                 if back_vertices.len() >= 3 {
-                    back.push(Polygon::from_vertices_with_plane(back_vertices, polygon.plane));
+                    back.push(Polygon::from_vertices_with_plane(
+                        back_vertices,
+                        polygon.plane,
+                    ));
                 }
             }
         }

@@ -242,6 +242,8 @@ impl WebGpuRenderer {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("vackrooms.webgpu.frame"),
                 });
+        let aspect = self.context.width() as f32 / (self.context.height().max(1)) as f32;
+        let fov_tan = super::camera_state::fov_tan();
         match &mut self.strategy {
             Strategy::Surface(pipeline) => pipeline.draw(
                 &self.context.queue,
@@ -252,6 +254,8 @@ impl WebGpuRenderer {
                 frame,
                 toggles,
                 lights.len().min(u32::MAX as usize) as u32,
+                fov_tan,
+                aspect,
             ),
             Strategy::Splat(pipeline) => pipeline.draw(
                 &self.context.queue,
@@ -262,6 +266,8 @@ impl WebGpuRenderer {
                 frame,
                 toggles,
                 lights.len().min(u32::MAX as usize) as u32,
+                fov_tan,
+                aspect,
             ),
             Strategy::Raymarch(pipeline) => pipeline.draw(
                 &self.context.queue,

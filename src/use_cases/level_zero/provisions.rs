@@ -9,9 +9,9 @@
 
 use crate::domain::entities::anomaly::{AnomalyKind, LevelExit, RealitySnapshot};
 use crate::domain::entities::architecture::RegionPlan;
+use crate::domain::entities::position::Position;
 use crate::domain::entities::supplies::{SupplyItem, SupplyKind};
 use crate::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_WALL, VoxelGrid};
-use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::generated_chunk::GeneratedChunk;
@@ -139,8 +139,7 @@ fn decide_supply_items(chunk_pos: Position, ctx: &ProvisionContext<'_>) -> Vec<S
             if !near_chunk(px, pz, 0.5) || !ctx.is_open_floor(px, pz) {
                 continue;
             }
-            let kind = if unit(roll.rotate_left(11)) * (water_weight + food_weight) < food_weight
-            {
+            let kind = if unit(roll.rotate_left(11)) * (water_weight + food_weight) < food_weight {
                 SupplyKind::Ration
             } else {
                 SupplyKind::AlmondWater
@@ -164,8 +163,7 @@ pub(crate) fn stamp_level_zero_provisions(
     ctx: &ProvisionContext<'_>,
 ) {
     let doors = ctx.config.tuning.level_doors.clamp(0.0, 4.0);
-    let has_supplies =
-        ctx.config.tuning.almond_water > 0.0 || ctx.config.tuning.rations > 0.0;
+    let has_supplies = ctx.config.tuning.almond_water > 0.0 || ctx.config.tuning.rations > 0.0;
     if !has_supplies && doors <= 0.0 {
         return;
     }
@@ -270,12 +268,7 @@ fn carve_door_clearing(
                 grid.set(xu, y as usize, zu, VOXEL_AIR);
             }
             if grid.get(xu, 0, zu) == VOXEL_AIR {
-                grid.set(
-                    xu,
-                    0,
-                    zu,
-                    crate::domain::entities::voxel_grid::VOXEL_FLOOR,
-                );
+                grid.set(xu, 0, zu, crate::domain::entities::voxel_grid::VOXEL_FLOOR);
             }
         }
     }
@@ -299,13 +292,8 @@ mod tests {
 
         for chunk in 0..40i64 {
             let chunk_pos = Position::new(chunk as f32 * config.chunk_size, 0.0);
-            let plans = BackroomsLevel::region_plans_for(
-                chunk_pos,
-                config.chunk_size,
-                42,
-                &config,
-                &noise,
-            );
+            let plans =
+                BackroomsLevel::region_plans_for(chunk_pos, config.chunk_size, 42, &config, &noise);
             let ctx = ProvisionContext {
                 seed: 42,
                 config: &config,

@@ -33,9 +33,9 @@ mod raycast;
 pub mod settings;
 pub mod shading;
 pub mod surface_geometry;
-mod update_atlas_rows;
 #[cfg(test)]
 mod tests;
+mod update_atlas_rows;
 
 pub use rasterizer::{SoftwareRasterizer, SoftwareRasterizerTelemetry};
 pub use raycast::{RayHit, trace_svo};
