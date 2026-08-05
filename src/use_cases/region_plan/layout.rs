@@ -33,14 +33,23 @@ use super::territories::Territory;
 /// first, but taking all five open offices before any other program lets
 /// the first entry eat the floor and returns a region of nothing but open
 /// offices. One pass per round, largest programs earliest in the round.
-const PROGRAM_BUDGET: [(SpaceProgram, usize); 7] = [
+const PROGRAM_BUDGET: [(SpaceProgram, usize); 11] = [
+    // Public and large first: these are the rooms a bad leftover shape
+    // ruins, and the ones that give a floor its character.
+    (SpaceProgram::Atrium, 1),
     (SpaceProgram::OpenOffice, 3),
+    (SpaceProgram::Reception, 1),
     (SpaceProgram::ConferenceRoom, 2),
     (SpaceProgram::WaitingArea, 1),
     (SpaceProgram::BreakRoom, 1),
     (SpaceProgram::PrivateOffice, 3),
+    // Service last: small, tolerant of awkward remainders, and plausible
+    // wherever they end up. A floor plan that never shows its plumbing or
+    // its plant reads as a set rather than a building.
+    (SpaceProgram::RestroomCore, 2),
     (SpaceProgram::Storage, 2),
     (SpaceProgram::ServerRoom, 1),
+    (SpaceProgram::Mechanical, 1),
 ];
 
 /// Rounds the solver makes over the budget. Each round places at most one
@@ -179,6 +188,20 @@ pub(super) fn lay_out_suites(
                         if b.0 < leg.x0 + LEG_END_MARGIN || b.2 > leg.x1 - LEG_END_MARGIN {
                             continue;
                         }
+                        // Every entrance must land in a corridor's wall
+                        // band -- outside the clear width, inside the band
+                        // beyond it. An entrance sitting *in* the route is
+                        // carved full height by circulation priority and
+                        // loses the lintel that makes it read as a door.
+                        if !candidate.entrances().all(|e| {
+                            spines.iter().any(|s| {
+                                let d = s.distance(e.center.x, e.center.z);
+                                d >= s.width * 0.5 - 0.05
+                                    && d <= s.width * 0.5 + wall_thickness + 0.05
+                            })
+                        }) {
+                            continue;
+                        }
                         if taken.iter().any(|t| {
                             b.0 < t.2 + ROOM_SEPARATION
                                 && t.0 < b.2 + ROOM_SEPARATION
@@ -294,6 +317,10 @@ fn ideal_area(program: SpaceProgram) -> f32 {
         SpaceProgram::PrivateOffice => 45.0,
         SpaceProgram::Storage => 55.0,
         SpaceProgram::ServerRoom => 60.0,
+        SpaceProgram::Atrium => 300.0,
+        SpaceProgram::Reception => 110.0,
+        SpaceProgram::RestroomCore => 40.0,
+        SpaceProgram::Mechanical => 50.0,
         _ => 100.0,
     }
 }

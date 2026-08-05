@@ -26,6 +26,9 @@ pub fn debug_region_ascii(plan: &RegionPlan, step: f32) -> String {
                         SpaceProgram::WaitingArea => 'w',
                         SpaceProgram::AbandonedExpansion => 'x',
                         SpaceProgram::Atrium => 'A',
+                        SpaceProgram::Reception => 'R',
+                        SpaceProgram::RestroomCore => 't',
+                        SpaceProgram::Mechanical => 'm',
                         SpaceProgram::Stair => 'S',
                         _ => 'r',
                     };

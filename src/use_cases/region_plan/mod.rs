@@ -97,12 +97,13 @@ mod corruption;
 mod debug;
 mod genome;
 mod suites;
-// The scored-placement pipeline (Phase 2 steps 2-3). Built and unit-tested,
-// but not yet driving `generate_region_plan`: wiring it in destabilizes two
-// architectural invariants -- `rare_doorways_still_have_lintels` and
-// `red_rooms_are_lit_red_but_never_built_red` -- that are not yet
-// understood. It stays compiled and tested so the diagnosis can continue
-// against a green tree rather than a broken one.
+// Phase 2 steps 2-3: free-space decomposition and scored greedy placement.
+// Built, unit-tested, and proven to lift a region from 2 rooms to 6 with a
+// real program mix -- but still not driving `generate_region_plan`. Wiring
+// it in leaves three failures (`rare_doorways_still_have_lintels`,
+// `red_rooms_are_lit_red_but_never_built_red`, and
+// `peripheral_shift_rearranges_fabric_but_never_the_plan`), down from five.
+// Kept compiled so the remaining diagnosis runs against a green tree.
 #[allow(dead_code)]
 mod layout;
 #[allow(dead_code)]

@@ -9,6 +9,7 @@ use super::{EDGE_MARGIN, PLAN_WALL_T, snap};
 /// The suite program palette placed beside main corridors, roughly weighted.
 /// Large, unfinished open-office masses dominate. Small private rooms remain
 /// present only as occasional evidence that this once had an office program.
+#[allow(dead_code)]
 pub(super) const SUITE_PROGRAMS: [SpaceProgram; 12] = [
     SpaceProgram::OpenOffice,
     SpaceProgram::OpenOffice,
@@ -280,6 +281,42 @@ fn keyed_unit(seed: f32, key: u32) -> f32 {
     (value >> 8) as f32 / (1u32 << 24) as f32
 }
 
+/// Whether an interior partition would run into an opening and seal it.
+///
+/// Subdivision and the openings are derived independently, so nothing stops
+/// a partition plane from landing on a doorway: the opening is cut
+/// correctly and then a wall is built across it, perpendicular, from the
+/// inside. The room reads as walled shut and the plan's whole reachability
+/// argument fails at its first step. Observed as soon as rooms are placed
+/// densely: entrance on HostId(0) at x=11.20 with a Partition at x=11.20
+/// running through it.
+fn blocks_opening(start: Position, end: Position, opening: &Opening) -> bool {
+    let partition_is_horizontal = (start.z - end.z).abs() <= 1e-4;
+    // `through_x_wall` means you walk through it along Z, so the opening
+    // sits on a wall parallel to X and its clear span runs along X. A
+    // partition threatens it only when it runs the other way.
+    if partition_is_horizontal == opening.through_x_wall {
+        return false;
+    }
+    let (plane, along) = if partition_is_horizontal {
+        (start.z, opening.center.z)
+    } else {
+        (start.x, opening.center.x)
+    };
+    if (plane - along).abs() >= opening.width * 0.5 + PLAN_WALL_T {
+        return false;
+    }
+    // The plane alone is not enough: the partition must actually reach the
+    // opening's wall to seal it. One on the far side of the room merely
+    // sharing a coordinate with the doorway is not in its way.
+    let (near, far, wall) = if partition_is_horizontal {
+        (start.x.min(end.x), start.x.max(end.x), opening.center.x)
+    } else {
+        (start.z.min(end.z), start.z.max(end.z), opening.center.z)
+    };
+    near - PLAN_WALL_T <= wall && wall <= far + PLAN_WALL_T
+}
+
 /// Lower a suite's room subdivision into explicit wall hosts and hosted
 /// openings. The recursive/automata layer can rewrite these elements later;
 /// voxel sampling no longer has to rediscover partitions from rectangles.
@@ -300,7 +337,10 @@ fn hosts_and_openings_for(
     // partition, so topology stays legible and walkable.
     let retained = evolve_partitions(partition_segments, partition_density, grammar_seed);
     for (&(start, end), retain) in partition_segments.iter().zip(retained) {
-        if retain {
+        // Checked against every opening accepted so far, not just the
+        // entrance: two partitions can collide with each other's doorways
+        // exactly as one can collide with the shell's.
+        if retain && !openings.iter().any(|o| blocks_opening(start, end, o)) {
             let host_id = HostId(hosts.len() as u32);
             let horizontal = (start.z - end.z).abs() <= 1e-4;
             let center = Position::new((start.x + end.x) * 0.5, (start.z + end.z) * 0.5);
