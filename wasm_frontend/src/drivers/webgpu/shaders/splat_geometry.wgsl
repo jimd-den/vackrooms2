@@ -36,42 +36,37 @@ fn splat_face_center(packed: PackedFace) -> vec3<f32> {
 }
 
 // Reality-unfold. `chunk.origin_world_size.w` is the chunk's resolve
-// progress: 0 is an unresolved lattice of suspended voxel specks, 1 is
-// settled architecture. Faces grow about their own centre and converge
-// along their normal, so a materializing chunk reads as its substrate
+// progress: 0 is an unresolved lattice of voxel specks, 1 is settled
+// architecture. Faces grow about their own centre and slide into place
+// within their own plane, so a materializing chunk reads as its substrate
 // assembling rather than as geometry fading up from nothing.
 //
 // This lives in the vertex path deliberately: the fragment path is the
 // renderer's bottleneck, and this costs it nothing.
-//
-// Duplicated from `common.wgsl::normal_for_axis` on purpose -- the splat
-// *shadow* program composes this file without `common.wgsl`.
-fn unfold_face_normal(axis: u32) -> vec3<f32> {
-    switch axis {
-        case 0u: { return vec3<f32>(0.0, 1.0, 0.0); }
-        case 1u: { return vec3<f32>(0.0, -1.0, 0.0); }
-        case 2u: { return vec3<f32>(0.0, 0.0, -1.0); }
-        case 3u: { return vec3<f32>(0.0, 0.0, 1.0); }
-        case 4u: { return vec3<f32>(1.0, 0.0, 0.0); }
-        default: { return vec3<f32>(-1.0, 0.0, 0.0); }
-    }
-}
 
 /// Fraction of the unfold window spent staggering face start times, so the
 /// lattice fills in unevenly instead of inflating as one rigid block.
 const UNFOLD_STAGGER: f32 = 0.45;
-/// How far, in voxels, an unresolved face floats off its final position.
-const UNFOLD_SCATTER: f32 = 5.0;
+/// How far, in voxels, an unresolved face slides *within its own plane*
+/// before settling. Deliberately tangential, never along the normal: a
+/// face that leaves its surface exposes the faces behind it, and the
+/// effect is meant to read as one surface assembling, not as the building
+/// coming apart.
+const UNFOLD_SCATTER: f32 = 2.4;
 /// Size an unresolved face keeps so the lattice stays visible as specks
 /// rather than collapsing to zero-area invisibility.
 const UNFOLD_MIN_SIZE: f32 = 0.16;
 
-fn unfold_face_hash(packed: PackedFace) -> f32 {
-    var h = packed.xy ^ (packed.z_extents * 2654435761u);
+fn unfold_face_hash_at(packed: PackedFace, salt: u32) -> f32 {
+    var h = (packed.xy ^ salt) ^ (packed.z_extents * 2654435761u);
     h = h ^ (h >> 15u);
     h = h * 2246822519u;
     h = h ^ (h >> 13u);
     return f32(h & 65535u) * (1.0 / 65535.0);
+}
+
+fn unfold_face_hash(packed: PackedFace) -> f32 {
+    return unfold_face_hash_at(packed, 0u);
 }
 
 fn splat_face_world_position(packed: PackedFace, corner_index: u32) -> vec3<f32> {
@@ -92,13 +87,14 @@ fn splat_face_world_position(packed: PackedFace, corner_index: u32) -> vec3<f32>
     );
     let grow = local * local * (3.0 - 2.0 * local);
     let size = mix(UNFOLD_MIN_SIZE, 1.0, grow);
-    let scatter = (1.0 - grow)
-        * (stagger - 0.5)
-        * chunk.bounds_voxel_size.w
-        * UNFOLD_SCATTER;
+    // A second decorrelated hash so the slide direction is not tied to the
+    // face's own start time.
+    let drift = unfold_face_hash_at(packed, 0x9E3779B9u);
+    let slide = (1.0 - grow) * chunk.bounds_voxel_size.w * UNFOLD_SCATTER;
 
     return splat_face_center(packed)
-        + unfold_face_normal(axis) * scatter
+        + face_u(axis) * (stagger - 0.5) * slide
+        + face_v(axis) * (drift - 0.5) * slide
         + face_u(axis) * corner.x * extent_u * chunk.bounds_voxel_size.w * 0.5 * size
         + face_v(axis) * corner.y * extent_v * chunk.bounds_voxel_size.w * 0.5 * size;
 }
