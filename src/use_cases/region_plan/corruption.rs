@@ -38,8 +38,26 @@ pub(super) fn corrupt(
     if h(1) < 0.6 {
         let src = pick_index(h(2), assemblies.len());
         let shift = snap(12.0 + 12.0 * h(3));
-        if let Some(dup) = duplicate_suite_candidate(assemblies, taken, spines, rx, rz, src, shift)
-        {
+        // Try a spread of offsets rather than exactly one. A single
+        // candidate was enough when a region held two suites and the floor
+        // was mostly empty; against a fully laid-out floor one offset
+        // almost always lands on a neighbour, and duplication -- the most
+        // recognizably Backrooms corruption there is -- silently never
+        // happened. Mirrored and halved offsets first keep the copy near
+        // its source, which is what makes the repetition legible.
+        let dup = [
+            shift,
+            -shift,
+            shift * 0.5,
+            -shift * 0.5,
+            shift * 1.5,
+            -shift * 1.5,
+        ]
+        .into_iter()
+        .find_map(|offset| {
+            duplicate_suite_candidate(assemblies, taken, spines, rx, rz, src, snap(offset))
+        });
+        if let Some(dup) = dup {
             taken.push(dup.footprint.bounds());
             assemblies.push(dup);
         }
@@ -96,10 +114,16 @@ fn duplicate_suite_candidate(
         && b.3 < (rz + 1) as f32 * REGION_SIZE - EDGE_MARGIN;
     // The skewed entrance must still reach a corridor, or the copy would be
     // a sealed pocket.
+    // The entrance must land in a corridor's *wall band* -- outside the
+    // clear width, inside the band beyond it. Merely being "near enough" to
+    // a corridor also admits an entrance sitting in the middle of the
+    // route, where circulation priority carves the column full height and
+    // the doorway loses the lintel that makes it read as a door.
     let reachable = dup.entrances().any(|e| {
-        spines
-            .iter()
-            .any(|s| s.distance(e.center.x, e.center.z) <= s.width * 0.5 + PLAN_WALL_T + 0.05)
+        spines.iter().any(|s| {
+            let d = s.distance(e.center.x, e.center.z);
+            d >= s.width * 0.5 - 0.05 && d <= s.width * 0.5 + PLAN_WALL_T + 0.05
+        })
     });
     (inside && reachable && !taken.iter().any(|t| aabb_overlap(*t, b, 0.4))).then_some(dup)
 }
@@ -319,6 +343,13 @@ mod tests {
     /// region boundary — a corridor at the very edge is not a shape any
     /// real region plan produces, and would fail `place_suite`'s margin
     /// check for reasons unrelated to whatever a test is actually checking.
+    /// Where `place_suite` actually seats a suite's front wall against
+    /// `corridor_spine`: half the clear width plus half a wall band past
+    /// the centerline. Fixtures that sit *on* the centerline describe a
+    /// room built in the middle of the corridor, which the planner never
+    /// produces and the sampler would carve full height.
+    const SUITE_FRONT_Z: f32 = REGION_SIZE * 0.5 + 2.0 + PLAN_WALL_T * 0.5;
+
     fn corridor_spine() -> CirculationSpine {
         CirculationSpine {
             id: 0,
@@ -453,7 +484,7 @@ mod tests {
 
     #[test]
     fn duplicate_candidate_is_translated_and_flagged() {
-        let assemblies = vec![minimal_assembly(0, 20.0, REGION_SIZE * 0.5)];
+        let assemblies = vec![minimal_assembly(0, 20.0, SUITE_FRONT_Z)];
         let taken = [];
         let spines = [corridor_spine()];
         let dup = duplicate_suite_candidate(&assemblies, &taken, &spines, 0, 0, 0, 24.0)
@@ -468,9 +499,9 @@ mod tests {
 
     #[test]
     fn duplicate_candidate_rejects_overlap_with_taken_space() {
-        let assemblies = vec![minimal_assembly(0, 20.0, REGION_SIZE * 0.5)];
+        let assemblies = vec![minimal_assembly(0, 20.0, SUITE_FRONT_Z)];
         // Something already occupies exactly where the duplicate would land.
-        let taken = [(44.0, REGION_SIZE * 0.5, 58.0, REGION_SIZE * 0.5 + 10.0)];
+        let taken = [(44.0, SUITE_FRONT_Z, 58.0, SUITE_FRONT_Z + 10.0)];
         let spines = [corridor_spine()];
         assert!(
             duplicate_suite_candidate(&assemblies, &taken, &spines, 0, 0, 0, 24.0).is_none(),
