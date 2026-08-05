@@ -129,6 +129,13 @@ fn main() {
         MAX_DRAW_DISTANCE,
         FACE_BUDGET,
     );
+    // `UNFOLD=0..1` freezes the reality-unfold mid-assembly for stills.
+    if let Some(unfold) = std::env::var("UNFOLD")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        splat.set_unfold(unfold);
+    }
     splat.upload(&device, &surface_chunks);
     let pixels = render_offscreen(
         &device,
@@ -283,9 +290,17 @@ fn load_spawn_world(seed: u32) -> LoadedWorld {
     let origin_z = (spawn.z / config.chunk_size).floor() * config.chunk_size;
     let source = LocalChunkSource::new(SimpleNoiseProvider::new(), seed, config);
 
+    // `RADIUS` widens the loaded neighborhood; the default 1 (3x3) frames
+    // the spawn corridor, but anything testing fog or draw distance needs
+    // the real streaming footprint because `fog_start` alone exceeds a
+    // 3x3's half-extent.
+    let radius: i32 = std::env::var("RADIUS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
     let mut payloads = Vec::new();
-    for dz in -1..=1 {
-        for dx in -1..=1 {
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
             let x = origin_x + dx as f32 * config.chunk_size;
             let z = origin_z + dz as f32 * config.chunk_size;
             payloads.push((x, z, source.load(x, z, 0, 0)));
@@ -330,7 +345,7 @@ fn load_spawn_world(seed: u32) -> LoadedWorld {
         yaw,
         pitch: 0.0,
         scene_lights: unique_lights.into_values().collect(),
-        environment: Environment::interior(),
+        environment: fog_override(Environment::interior()),
         ..FrameParams::default()
     };
 
@@ -340,6 +355,30 @@ fn load_spawn_world(seed: u32) -> LoadedWorld {
         atlas,
         frame,
     }
+}
+
+/// `FOG_DENSITY` / `FOG_START` override the level's authored atmosphere so
+/// a density ladder can be eyeballed without editing `Environment`.
+fn fog_override(mut environment: Environment) -> Environment {
+    if let Some(density) = std::env::var("FOG_DENSITY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        environment.fog_density = density;
+    }
+    if let Some(color) = std::env::var("FOG_COLOR").ok().and_then(|value| {
+        let mut parts = value.split(',').map(|part| part.trim().parse::<f32>());
+        Some([parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?])
+    }) {
+        environment.fog_color = color;
+    }
+    if let Some(start) = std::env::var("FOG_START")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        environment.fog_start = start;
+    }
+    environment
 }
 
 fn render_offscreen(

@@ -51,9 +51,21 @@ pub struct SplatPipeline {
     max_draw_distance: f32,
     face_budget: u32,
     stats: SplatFrameStats,
+    /// Reality-unfold progress applied to every chunk this frame. 1.0 is
+    /// settled architecture; lower values suspend the voxel lattice
+    /// mid-assembly. Per-chunk progress replaces this once the engine
+    /// tracks chunk age.
+    unfold: f32,
 }
 
 impl SplatPipeline {
+    /// Sets reality-unfold progress for subsequent frames. 1.0 draws
+    /// settled architecture; 0.0 suspends every face as a scattered
+    /// lattice speck. Values outside 0..=1 are clamped in the shader.
+    pub fn set_unfold(&mut self, unfold: f32) {
+        self.unfold = if unfold.is_finite() { unfold } else { 1.0 };
+    }
+
     pub fn new(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
@@ -134,6 +146,7 @@ impl SplatPipeline {
             max_draw_distance,
             face_budget,
             stats: SplatFrameStats::default(),
+            unfold: 1.0,
         }
     }
 
@@ -222,7 +235,12 @@ impl SplatPipeline {
     ) {
         for chunk in self.chunks.values() {
             let uniforms = GpuChunkUniforms {
-                origin_world_size: [chunk.origin[0], chunk.origin[1], chunk.origin[2], 0.0],
+                origin_world_size: [
+                    chunk.origin[0],
+                    chunk.origin[1],
+                    chunk.origin[2],
+                    self.unfold,
+                ],
                 bounds_voxel_size: [
                     chunk.bounds_max[0],
                     chunk.bounds_max[1],
