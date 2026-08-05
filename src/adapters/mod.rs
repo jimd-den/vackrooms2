@@ -1,5 +1,6 @@
 pub mod ascii_renderer;
 pub mod blueprint_renderer;
+pub mod brick_pool_gpu_serializer;
 pub mod chunk_voxel_renderer;
 pub mod json_presenter;
 pub mod material_palette;
