@@ -78,6 +78,15 @@ fn material_noise(point: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+// Two octaves of value noise. Enough for damp blotches and grime drift
+// without paying for a full fbm in the inner shading loop.
+fn material_noise_2(point: vec2<f32>) -> f32 {
+    return material_noise(point) * 0.65 + material_noise(point * 2.17 + 19.3) * 0.35;
+}
+
+// Lay-in acoustic tile: 0.61 m (2 ft) module on a visible T-bar grid.
+const CEILING_TILE_MODULE: f32 = 0.61;
+
 fn apply_material_pattern(
     material: u32,
     albedo: vec3<f32>,
@@ -85,15 +94,50 @@ fn apply_material_pattern(
     normal: vec3<f32>,
     sample_footprint: f32,
 ) -> vec3<f32> {
+    // Distance fade: high-frequency detail is dropped as the sample footprint
+    // grows so far surfaces stay stable instead of aliasing into noise.
+    let detail = clamp(1.15 - sample_footprint * 0.32, 0.20, 1.0);
+
     let carpet = material == 2u || material == 12u || material == 13u
         || material == 14u || material == 25u;
     if carpet && normal.y > 0.5 {
-        let broad = material_noise(world.xz * 0.18);
-        let fibers = material_noise(world.xz * 1.15);
-        let detail = clamp(1.15 - sample_footprint * 0.32, 0.20, 1.0);
-        let wear = 0.88 + 0.18 * broad + (fibers - 0.5) * 0.055 * detail;
-        return albedo * wear;
+        // Frequencies are in cycles per world unit and a room is only ~10 u
+        // across, so anything below ~0.2 spans less than one noise cell over
+        // the whole visible floor and reads as flat.
+        let broad = material_noise(world.xz * 0.45);
+        let fibers = material_noise(world.xz * 2.2);
+        // Damp patches: mid-frequency blotches that darken and desaturate,
+        // the single most recognizable Level 0 floor cue.
+        let damp = smoothstep(0.48, 0.78, material_noise_2(world.xz * 0.30));
+        // Traffic lanes rubbed pale along the corridor run.
+        let lane = smoothstep(0.55, 0.85, material_noise(world.xz * vec2<f32>(0.16, 0.55)));
+        let wear = 0.80 + 0.28 * broad + (fibers - 0.5) * 0.17 * detail + lane * 0.09;
+        let damped = albedo * wear * mix(1.0, 0.62, damp * 0.85);
+        return mix(damped, vec3<f32>(dot(damped, vec3<f32>(0.33))), damp * 0.30);
     }
+
+    let ceiling = material == 3u;
+    if ceiling && normal.y < -0.5 {
+        let tile = world.xz / CEILING_TILE_MODULE;
+        let cell = floor(tile);
+        let within = abs(fract(tile) - 0.5);
+        // T-bar grid: thin darker seam framing every tile.
+        let seam = max(
+            smoothstep(0.40, 0.485, within.x),
+            smoothstep(0.40, 0.485, within.y)
+        );
+        // Each tile ages on its own: pinholes, yellowing, replacement panels.
+        let tile_age = material_hash(cell);
+        let panel = 0.90 + tile_age * 0.16;
+        // Water damage bleeding through a minority of tiles.
+        let stain_field = material_noise_2(world.xz * 0.09);
+        let stain = smoothstep(0.58, 0.88, stain_field) * step(0.45, tile_age);
+        let speckle = (material_noise(world.xz * 9.0) - 0.5) * 0.05 * detail;
+        let value = (panel + speckle) * mix(1.0, 0.48, seam * 0.75 * detail);
+        let stained = mix(albedo, vec3<f32>(0.46, 0.36, 0.20), stain * 0.55);
+        return stained * value;
+    }
+
     let wallpaper = material == 1u || material == 24u;
     if wallpaper && abs(normal.y) < 0.5 {
         let along = select(world.x, world.z, abs(normal.x) > 0.5);
@@ -106,8 +150,21 @@ fn apply_material_pattern(
         let age = select(0.0, 1.0, material == 24u);
         let stain = material_noise(vec2<f32>(along * 0.09, world.y * 0.16));
         let motif = stem * (0.45 + 0.55 * vine) + medallion * 0.55;
-        let factor = 1.025 - motif * (0.12 + age * 0.035) - age * stain * 0.07;
-        return albedo * factor;
+        var factor = 1.05 - motif * (0.28 + age * 0.10) - age * stain * 0.16;
+
+        // Butt seams every 0.53 m (21 in) where wallpaper strips meet.
+        let seam = smoothstep(0.955, 0.995, abs(sin(along * PI / 0.53)));
+        factor = factor * mix(1.0, 0.90, seam * detail);
+
+        // Rising damp: grime creeping up from the floor, strongest at the base.
+        let rise = 1.0 - smoothstep(0.0, 0.75, world.y);
+        let grime = material_noise_2(vec2<f32>(along * 0.22, world.y * 0.5));
+        factor = factor * mix(1.0, 0.74, rise * grime * 0.9);
+
+        // Scuffing along the baseboard contact line.
+        let scuff = (1.0 - smoothstep(0.0, 0.16, world.y)) * grime;
+        let tinted = mix(albedo, vec3<f32>(0.30, 0.26, 0.16), scuff * 0.45);
+        return tinted * factor;
     }
     return albedo;
 }
