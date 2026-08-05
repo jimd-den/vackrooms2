@@ -27,7 +27,7 @@ use crate::application::ports::{
 };
 use crate::application::prepare_frame_lighting::select_scene_lights;
 use crate::application::streaming::{
-    ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
+    ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, ViewCone, chunk_key,
 };
 use crate::application::survival_inventory::{ConsumptionIntent, SurvivalInventory};
 use crate::application::thermal;
@@ -153,6 +153,13 @@ pub struct HudStats {
 /// chunk is first loaded at this LOD (voxels 2x the size, ~1/8 the cost) so
 /// the whole streaming footprint becomes visible before any chunk is refined.
 const COARSE_LOD: u8 = 1;
+/// Chunks this close stay resident whatever the player looks at, so a
+/// fast turn never reveals an unloaded chunk.
+const VISUAL_CORE_RADIUS: i32 = 2;
+/// Half-angle of the streaming view cone. A 90 degree horizontal field of
+/// view is 45 degrees each side; the extra margin covers turning between
+/// the moment a chunk is requested and the moment it arrives.
+const VISUAL_CONE_HALF_ANGLE: f32 = 1.13;
 /// Budget units one fine load costs; a coarse load costs 1. Coarse generation
 /// touches ~1/8 the voxels but has fixed per-chunk overhead, so 4 (not 8)
 /// keeps the worst-case tick cost at the old two-fine-loads level.
@@ -313,13 +320,13 @@ impl Engine {
         player.yaw = config.spawn_yaw;
         Self {
             player,
-            policy: StreamingPolicy {
-                chunk_size: config.chunk_size,
-                radius,
-            },
+            // Collision residency is omnidirectional on purpose: it may
+            // never depend on view direction.
+            policy: StreamingPolicy::omnidirectional(config.chunk_size, radius),
             visual_policy: StreamingPolicy {
                 chunk_size: config.chunk_size,
                 radius: visual_radius,
+                core_radius: VISUAL_CORE_RADIUS.min(visual_radius),
             },
             store: ChunkStore::new(),
             pool: AtlasPool::new(),
@@ -983,9 +990,15 @@ impl Engine {
         let desired = self
             .policy
             .desired_origins(self.player.position[0], self.player.position[2]);
-        let desired_visual = self
-            .visual_policy
-            .desired_origins(self.player.position[0], self.player.position[2]);
+        // Visibility streaming: beyond the core radius, only chunks the
+        // player could actually see are worth generating. In a corridor
+        // world the square footprint is mostly behind walls and behind the
+        // player.
+        let desired_visual = self.visual_policy.desired_origins_in_view(
+            self.player.position[0],
+            self.player.position[2],
+            Some(ViewCone::from_yaw(self.player.yaw, VISUAL_CONE_HALF_ANGLE)),
+        );
         let keep: Vec<_> = desired_visual
             .iter()
             .map(|&(x, z)| chunk_key(x, z))
