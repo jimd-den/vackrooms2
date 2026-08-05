@@ -36,6 +36,83 @@ fn ceiling_height_for(program: SpaceProgram, aseed: f32) -> f32 {
     }
 }
 
+/// Splits a room's flat ceiling into authored bands.
+///
+/// One height across a whole room is a specification, not a design. Level 0
+/// is described by its *contrast* -- compression against expanse -- and the
+/// canon reads that way at room scale too: carpet runs deep under arches and
+/// shallow between pillars, ceilings drop and lift as you cross a space.
+///
+/// The band is a deliberate violation of the room's own baseline, which is
+/// what makes it read as authored rather than noisy: the room states a
+/// height, then contradicts it once, across a strip you walk through. Two
+/// contradictions in one room would just be a bumpy ceiling.
+///
+/// Which contradiction depends on the designer. A mechanical-heavy hand
+/// (`ExposedSoffit`) drops a soffit; anyone else lifts the band instead,
+/// because a raised centre is what an architect does with a room they are
+/// proud of. Rooms too small to carry a band keep their single zone -- a
+/// strip needs room on both sides or it is just a lower ceiling.
+fn ceiling_bands_for(
+    footprint: &Polygon2,
+    base: CeilingZone,
+    genome: &ArchitectGenome,
+    aseed: f32,
+) -> Vec<CeilingZone> {
+    /// Fraction of rooms that get a band at all. Most ceilings stay flat,
+    /// so the ones that do not are events.
+    const BAND_SHARE: f32 = 0.45;
+    /// Shortest room side that can carry a band across it.
+    const MIN_SIDE: f32 = 8.0;
+
+    let (x0, z0, x1, z1) = footprint.bounds();
+    let (width, depth) = (x1 - x0, z1 - z0);
+    if width.min(depth) < MIN_SIDE || keyed_unit(aseed, 0xBA4D) > BAND_SHARE {
+        return vec![base];
+    }
+
+    // The band crosses the room's *long* axis, so it is something you pass
+    // under rather than a lower corner you never visit.
+    let long_x = width >= depth;
+    let span = if long_x { width } else { depth };
+    let band_width = snap((span * (0.22 + 0.16 * keyed_unit(aseed, 0xBA5E))).clamp(2.4, 9.6));
+    // Kept off the room's ends, so the band never merges with a wall.
+    let free = span - band_width - 2.0 * PLAN_WALL_T;
+    if free <= 0.0 {
+        return vec![base];
+    }
+    let offset = snap(PLAN_WALL_T + free * keyed_unit(aseed, 0xBA60));
+
+    let (band_area, drop) = if long_x {
+        (Polygon2::rect(x0 + offset, z0, band_width, depth), true)
+    } else {
+        (Polygon2::rect(x0, z0 + offset, width, band_width), true)
+    };
+    let _ = drop;
+
+    let compress = genome.ceiling_language == CeilingLanguage::ExposedSoffit;
+    let height = if compress {
+        // Never below head height plus a margin; a soffit you cannot walk
+        // under is a wall.
+        (base.height_units - 0.8 - 0.4 * keyed_unit(aseed, 0xBA61)).max(2.4)
+    } else {
+        base.height_units + 0.6 + 0.8 * keyed_unit(aseed, 0xBA61)
+    };
+
+    vec![
+        base,
+        CeilingZone {
+            area: band_area,
+            language: if compress {
+                CeilingLanguage::ExposedSoffit
+            } else {
+                CeilingLanguage::Coffered
+            },
+            height_units: height,
+        },
+    ]
+}
+
 fn structure_for(genome: &ArchitectGenome, aseed: f32) -> StructuralSystemInstance {
     let bay = snap(4.4 + 1.6 * aseed);
     let (bay_x, bay_z) = match genome.structural_system {
@@ -541,7 +618,7 @@ pub(super) fn place_suite(
         program,
         spaces: layout.spaces,
         structure: structure_for(genome, aseed),
-        ceiling_zones: vec![ceiling],
+        ceiling_zones: ceiling_bands_for(&footprint, ceiling, genome, aseed),
         fixtures: fixtures_for(genome, &footprint, true, aseed),
         service_voids: Vec::new(),
         corruption: CorruptionProfile::default(),
@@ -724,6 +801,72 @@ mod tests {
                 "retained partition {:?} has no traversable opening",
                 host.id
             );
+        }
+    }
+    /// A ceiling band is an authored contradiction of the room's own stated
+    /// height, and has to stay walkable and inside the room to be one.
+    #[test]
+    fn ceiling_bands_contradict_the_baseline_without_leaving_the_room() {
+        let footprint = Polygon2::rect(10.0, 20.0, 18.0, 14.0);
+        let base = CeilingZone {
+            area: footprint.clone(),
+            language: CeilingLanguage::FlatTiles,
+            height_units: 3.6,
+        };
+        let mut banded = 0;
+        for step in 0..64 {
+            let aseed = step as f32 / 64.0;
+            for language in [
+                CeilingLanguage::FlatTiles,
+                CeilingLanguage::ExposedSoffit,
+                CeilingLanguage::Coffered,
+            ] {
+                let mut genome = genome_with(0.5, 0.5);
+                genome.ceiling_language = language;
+                let zones = ceiling_bands_for(&footprint, base.clone(), &genome, aseed);
+                assert!(zones.len() <= 2, "one contradiction per room, not several");
+                assert_eq!(zones[0].height_units, base.height_units, "baseline kept");
+                let Some(band) = zones.get(1) else { continue };
+                banded += 1;
+                assert_ne!(
+                    band.height_units, base.height_units,
+                    "a band at the baseline height contradicts nothing"
+                );
+                assert!(band.height_units >= 2.4, "a soffit must stay walkable");
+                let (bx0, bz0, bx1, bz1) = band.area.bounds();
+                let (fx0, fz0, fx1, fz1) = footprint.bounds();
+                assert!(
+                    bx0 >= fx0 - 1e-3
+                        && bz0 >= fz0 - 1e-3
+                        && bx1 <= fx1 + 1e-3
+                        && bz1 <= fz1 + 1e-3,
+                    "band {:?} escapes the room",
+                    band.area.bounds()
+                );
+                // The soffit designer compresses; everyone else lifts.
+                if language == CeilingLanguage::ExposedSoffit {
+                    assert!(band.height_units < base.height_units);
+                } else {
+                    assert!(band.height_units > base.height_units);
+                }
+            }
+        }
+        assert!(banded > 0, "sanity: some rooms must actually get a band");
+    }
+
+    /// Rooms too small to carry a strip keep their single flat zone.
+    #[test]
+    fn small_rooms_keep_one_flat_ceiling() {
+        let footprint = Polygon2::rect(0.0, 0.0, 6.0, 5.0);
+        let base = CeilingZone {
+            area: footprint.clone(),
+            language: CeilingLanguage::FlatTiles,
+            height_units: 3.2,
+        };
+        let genome = genome_with(0.5, 0.5);
+        for step in 0..32 {
+            let zones = ceiling_bands_for(&footprint, base.clone(), &genome, step as f32 / 32.0);
+            assert_eq!(zones.len(), 1, "a small room cannot carry a band");
         }
     }
 }
