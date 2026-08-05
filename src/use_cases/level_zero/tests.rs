@@ -828,9 +828,14 @@ fn tuning_knobs_control_density() {
     );
 }
 
-/// The guaranteed Level 1 door exists at its authored spot, exports its
+/// The guaranteed Level 1 door exists near its authored spot, exports its
 /// LevelExit from exactly one chunk, and the `level_doors` knob at zero
 /// removes it entirely.
+///
+/// "Near", not "at": the authored coordinate is a hint, and the door seats
+/// itself in the nearest hosting wall (see `wall_host_near`). It used to
+/// land exactly on the authored point because it stood free on cleared
+/// floor, which was the bug.
 #[test]
 fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
     let noise = TestNoise;
@@ -845,7 +850,12 @@ fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
     );
     let exit = grid.entities.level_exits[0];
     assert_eq!(exit.target_level, 1);
-    assert!(exit.contains(172.0, -116.0));
+    // Within the search reach of the authored hint, and no further.
+    let drift = (exit.center.x - 172.0).hypot(exit.center.z + 116.0);
+    assert!(
+        drift <= 5.0,
+        "spawn door seated {drift} u from its authored hint at (172, -116)"
+    );
 
     let mut doorless = config;
     doorless.tuning.level_doors = 0.0;

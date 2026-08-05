@@ -10,7 +10,9 @@
 //! ```
 //!
 //! Output lands in `target/vulkan-snapshots/*.png`. Environment knobs:
-//! `SEED` (default 42), `SNAPSHOT_SIZE` (`WxH`, default 960x540).
+//! `SEED` (default 42), `SNAPSHOT_SIZE` (`WxH`, default 960x540), and
+//! `ONLY` (comma-separated renderer names) to render a subset -- useful
+//! when iterating on one pipeline, or when one of them must not be run.
 
 use std::collections::HashMap;
 use std::fs;
@@ -47,6 +49,14 @@ struct LoadedWorld {
     frame: FrameParams,
 }
 
+/// Renderers selected by `ONLY`; all of them when it is unset.
+fn wanted(name: &str) -> bool {
+    match std::env::var("ONLY") {
+        Ok(list) => list.split(',').any(|entry| entry.trim() == name),
+        Err(_) => true,
+    }
+}
+
 fn main() {
     let seed: u32 = std::env::var("SEED")
         .ok()
@@ -81,13 +91,8 @@ fn main() {
     let out_dir = PathBuf::from("target/vulkan-snapshots");
     fs::create_dir_all(&out_dir).expect("create snapshot directory");
 
-    // Surface: indexed meshes, one upload per chunk.
-    let mut surface = SurfacePipeline::new(
-        &device,
-        TARGET_FORMAT,
-        frame_resources.layout(),
-        MAX_DRAW_DISTANCE,
-    );
+    // Shared by the surface and splat pipelines: both consume the same
+    // greedy-quad artifacts, so this is built once regardless of `ONLY`.
     let surface_chunks: Vec<SurfaceChunk> = world
         .payloads
         .iter()
@@ -97,126 +102,142 @@ fn main() {
             mesh: &payload.surface,
         })
         .collect();
-    surface.upload(&device, &surface_chunks);
-    let pixels = render_offscreen(
-        &device,
-        &queue,
-        width,
-        height,
-        true,
-        |encoder, color, depth| {
-            surface.draw(
-                &queue,
-                encoder,
-                color,
-                depth.expect("surface pass renders with depth"),
-                &frame_resources,
-                &world.frame,
-                toggles,
-                world.frame.scene_lights.len() as u32,
-                FOV_TAN,
-                width as f32 / (height.max(1)) as f32,
-            );
-        },
-    );
-    write_png(&out_dir, "surface", width, height, &pixels);
 
-    // Splat: compact face pages expanded on the GPU.
-    let mut splat = SplatPipeline::new(
-        &device,
-        TARGET_FORMAT,
-        frame_resources.layout(),
-        MAX_DRAW_DISTANCE,
-        FACE_BUDGET,
-    );
-    // `UNFOLD=0..1` freezes the reality-unfold mid-assembly for stills.
-    if let Some(unfold) = std::env::var("UNFOLD")
-        .ok()
-        .and_then(|value| value.parse().ok())
-    {
-        splat.set_unfold(unfold);
+    if wanted("surface") {
+        // Surface: indexed meshes, one upload per chunk.
+        let mut surface = SurfacePipeline::new(
+            &device,
+            TARGET_FORMAT,
+            frame_resources.layout(),
+            MAX_DRAW_DISTANCE,
+        );
+        surface.upload(&device, &surface_chunks);
+        let pixels = render_offscreen(
+            &device,
+            &queue,
+            width,
+            height,
+            true,
+            |encoder, color, depth| {
+                surface.draw(
+                    &queue,
+                    encoder,
+                    color,
+                    depth.expect("surface pass renders with depth"),
+                    &frame_resources,
+                    &world.frame,
+                    toggles,
+                    world.frame.scene_lights.len() as u32,
+                    FOV_TAN,
+                    width as f32 / (height.max(1)) as f32,
+                );
+            },
+        );
+        write_png(&out_dir, "surface", width, height, &pixels);
     }
-    splat.upload(&device, &surface_chunks);
-    let pixels = render_offscreen(
-        &device,
-        &queue,
-        width,
-        height,
-        true,
-        |encoder, color, depth| {
-            splat.draw(
-                &queue,
-                encoder,
-                color,
-                depth.expect("splat pass renders with depth"),
-                &frame_resources,
-                &world.frame,
-                toggles,
-                world.frame.scene_lights.len() as u32,
-                FOV_TAN,
-                width as f32 / (height.max(1)) as f32,
-            );
-        },
-    );
-    write_png(&out_dir, "splat", width, height, &pixels);
 
-    // Raymarch: canonical SVO words traced in the fragment shader.
-    let mut raymarch = RaymarchPipeline::new(
-        &device,
-        TARGET_FORMAT,
-        frame_resources.layout(),
-        world.chunks.len(),
-    );
-    raymarch.configure(RaymarchRuntimeOptions::new(MAX_DRAW_DISTANCE, true, 4));
-    raymarch.upload_atlas(&device, &world.atlas);
-    let pixels = render_offscreen(
-        &device,
-        &queue,
-        width,
-        height,
-        false,
-        |encoder, color, _| {
-            raymarch.draw(
-                &queue,
-                encoder,
-                color,
-                &frame_resources,
-                &world.frame,
-                &world.chunks,
-                toggles,
-            );
-        },
-    );
-    write_png(&out_dir, "raymarch", width, height, &pixels);
+    if wanted("splat") {
+        // Splat: compact face pages expanded on the GPU.
+        let mut splat = SplatPipeline::new(
+            &device,
+            TARGET_FORMAT,
+            frame_resources.layout(),
+            MAX_DRAW_DISTANCE,
+            FACE_BUDGET,
+        );
+        // `UNFOLD=0..1` freezes the reality-unfold mid-assembly for stills.
+        if let Some(unfold) = std::env::var("UNFOLD")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        {
+            splat.set_unfold(unfold);
+        }
+        splat.upload(&device, &surface_chunks);
+        let pixels = render_offscreen(
+            &device,
+            &queue,
+            width,
+            height,
+            true,
+            |encoder, color, depth| {
+                splat.draw(
+                    &queue,
+                    encoder,
+                    color,
+                    depth.expect("splat pass renders with depth"),
+                    &frame_resources,
+                    &world.frame,
+                    toggles,
+                    world.frame.scene_lights.len() as u32,
+                    FOV_TAN,
+                    width as f32 / (height.max(1)) as f32,
+                );
+            },
+        );
+        write_png(&out_dir, "splat", width, height, &pixels);
+    }
 
-    // CPU splatter, presented through the production WebGPU texture pass.
-    let mut cpu_present = CpuPresentPipeline::new(&device, TARGET_FORMAT, width, height);
-    cpu_present.upload_atlas(&world.atlas);
-    let cpu_settings = CpuRenderSettings {
-        max_draw_distance: MAX_DRAW_DISTANCE,
-        shadows: CpuShadowMode::Off,
-        fov_tan: FOV_TAN,
-        toggles,
-        ..CpuRenderSettings::default()
-    };
-    let pixels = render_offscreen(
-        &device,
-        &queue,
-        width,
-        height,
-        false,
-        |encoder, color, _| {
-            cpu_present.draw(
-                &queue,
-                encoder,
-                color,
-                &world.frame,
-                &world.chunks,
-                cpu_settings,
-            );
-        },
-    );
-    write_png(&out_dir, "cpu", width, height, &pixels);
+    if wanted("raymarch") {
+        // Raymarch: canonical SVO words traced in the fragment shader.
+        let mut raymarch = RaymarchPipeline::new(
+            &device,
+            TARGET_FORMAT,
+            frame_resources.layout(),
+            world.chunks.len(),
+        );
+        raymarch.configure(RaymarchRuntimeOptions::new(MAX_DRAW_DISTANCE, true, 4));
+        raymarch.upload_atlas(&device, &world.atlas);
+        let pixels = render_offscreen(
+            &device,
+            &queue,
+            width,
+            height,
+            false,
+            |encoder, color, _| {
+                raymarch.draw(
+                    &queue,
+                    encoder,
+                    color,
+                    &frame_resources,
+                    &world.frame,
+                    &world.chunks,
+                    toggles,
+                );
+            },
+        );
+        write_png(&out_dir, "raymarch", width, height, &pixels);
+    }
+
+    if wanted("cpu") {
+        // CPU splatter, presented through the production WebGPU texture pass.
+        let mut cpu_present = CpuPresentPipeline::new(&device, TARGET_FORMAT, width, height);
+        cpu_present.upload_atlas(&world.atlas);
+        let cpu_settings = CpuRenderSettings {
+            max_draw_distance: MAX_DRAW_DISTANCE,
+            shadows: CpuShadowMode::Off,
+            fov_tan: FOV_TAN,
+            toggles,
+            ..CpuRenderSettings::default()
+        };
+        let pixels = render_offscreen(
+            &device,
+            &queue,
+            width,
+            height,
+            false,
+            |encoder, color, _| {
+                cpu_present.draw(
+                    &queue,
+                    encoder,
+                    color,
+                    &world.frame,
+                    &world.chunks,
+                    cpu_settings,
+                );
+            },
+        );
+        write_png(&out_dir, "cpu", width, height, &pixels);
+    }
 
     eprintln!("snapshots written to {}", out_dir.display());
 }

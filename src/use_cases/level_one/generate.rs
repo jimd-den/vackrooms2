@@ -505,10 +505,14 @@ pub(crate) fn stamp_supply_marker(
     }
 }
 
-/// Stamps a free-standing metal door: jambs, lintel, and a walk-through
-/// panel. The frame runs along the X axis (panel plane faces Z). The whole
+/// Stamps a metal door: jambs, lintel, and a walk-through panel. The whole
 /// footprint stays inside a 1.0u halo of its center so Level 0's region
 /// window can always reproduce it across chunk seams.
+///
+/// `along_x` selects which way the frame runs, and so which wall the door
+/// can be set into: `true` spans the X axis with its panel facing Z (a wall
+/// at constant Z), `false` is the transpose. A door has to match the wall
+/// it belongs to -- a frame across the grain is a frame standing in a room.
 pub(crate) fn stamp_level_door(
     grid: &mut VoxelGrid,
     chunk_pos: Position,
@@ -516,7 +520,15 @@ pub(crate) fn stamp_level_door(
     center_x: f32,
     center_z: f32,
     wall_material: u8,
+    along_x: bool,
 ) {
+    // Work in (along, across) and transpose on write, so one body serves
+    // both orientations and they cannot drift apart.
+    let (center_along, center_across, origin_along, origin_across) = if along_x {
+        (center_x, center_z, chunk_pos.x, chunk_pos.z)
+    } else {
+        (center_z, center_x, chunk_pos.z, chunk_pos.x)
+    };
     let to_local = |w: f32, origin: f32| ((w - origin) / voxel_size).floor() as i64;
     // The walk-through leaf is a CAD rough opening (same allowance as the
     // Level 0 fabric doorways) under a CAD-height lintel, with a 0.3 u
@@ -530,20 +542,24 @@ pub(crate) fn stamp_level_door(
     let lintel_v = (lintel_units / voxel_size).round() as i64;
     let panel_t = ((0.12 / voxel_size).round() as i64).max(1);
 
-    let x0 = to_local(center_x - door_half - jamb_half * 2.0, chunk_pos.x);
-    let x1 = to_local(center_x + door_half + jamb_half * 2.0, chunk_pos.x);
-    let z0 = to_local(center_z - panel_t as f32 * voxel_size * 0.5, chunk_pos.z);
-    let jamb_from = to_local(center_x - door_half, chunk_pos.x);
-    let jamb_to = to_local(center_x + door_half, chunk_pos.x);
+    let a0 = to_local(center_along - door_half - jamb_half * 2.0, origin_along);
+    let a1 = to_local(center_along + door_half + jamb_half * 2.0, origin_along);
+    let b0 = to_local(
+        center_across - panel_t as f32 * voxel_size * 0.5,
+        origin_across,
+    );
+    let jamb_from = to_local(center_along - door_half, origin_along);
+    let jamb_to = to_local(center_along + door_half, origin_along);
 
-    for x in x0..=x1 {
-        for dz in 0..panel_t {
-            let z = z0 + dz;
-            if x < 0 || z < 0 {
+    for a in a0..=a1 {
+        for db in 0..panel_t {
+            let b = b0 + db;
+            if a < 0 || b < 0 {
                 continue;
             }
+            let (x, z) = if along_x { (a, b) } else { (b, a) };
             for y in 1..=height_v {
-                let material = if x < jamb_from || x > jamb_to || y >= lintel_v {
+                let material = if a < jamb_from || a > jamb_to || y >= lintel_v {
                     wall_material
                 } else {
                     VOXEL_METAL_DOOR
@@ -617,6 +633,7 @@ impl LevelGenerator for HabitableLevel {
                 RETURN_DOOR.0,
                 RETURN_DOOR.1,
                 VOXEL_CONCRETE_WALL,
+                true,
             );
         }
         if RETURN_DOOR.0 >= chunk_pos.x

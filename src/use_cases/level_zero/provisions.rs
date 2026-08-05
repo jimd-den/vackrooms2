@@ -21,7 +21,7 @@ use crate::use_cases::level_one::generate::{
     ARRIVAL_POINT, DOOR_TRIGGER_HALF, stamp_level_door, stamp_supply_marker,
 };
 use crate::use_cases::ports::NoiseProvider;
-use crate::use_cases::region_plan::{REGION_SIZE, region_index};
+use crate::use_cases::region_plan::{DOOR_WIDTH, PLAN_WALL_T, REGION_SIZE, region_index};
 
 use super::BackroomsLevel;
 
@@ -82,6 +82,129 @@ impl ProvisionContext<'_> {
             wz,
         );
         column.floor && !column.solid && column.floor_units < 0.05
+    }
+
+    /// True when the walking plane at a world point is inside solid fabric --
+    /// the complement of [`Self::is_open_floor`] that a wall host needs.
+    fn is_solid(&self, wx: f32, wz: f32) -> bool {
+        let Some(plan) = self.plan_of(wx, wz) else {
+            return false;
+        };
+        BackroomsLevel::plan_column_in_reality(
+            plan,
+            self.noise,
+            self.seed,
+            self.config,
+            self.reality,
+            wx,
+            wz,
+        )
+        .solid
+    }
+
+    /// Finds the wall this door should be set into, near a candidate point.
+    ///
+    /// A door is a hole in something. Placing one on open floor and clearing
+    /// room around it -- which is what this used to do -- yields a frame
+    /// standing free in the middle of a room, joined to nothing. Instead,
+    /// hunt for real masonry near the candidate and seat the frame in it.
+    /// The pair of open cells either side *is* the connectivity record: the
+    /// door demonstrably joins two spaces, and the level exit inherits the
+    /// architecture's own topology rather than contradicting it.
+    ///
+    /// The search is empirical rather than lattice-based on purpose. Walls
+    /// arrive here from several systems -- fabric cells on the 7.2u lattice,
+    /// corridor spines from the region plan, assembly shells -- and only the
+    /// first is on a lattice this module could predict. Probing the pure
+    /// column sampler finds all three without knowing which produced what.
+    ///
+    /// Returns the seat's centre and which axis the frame runs along.
+    fn wall_host_near(&self, px: f32, pz: f32) -> Option<(f32, f32, bool)> {
+        /// Perpendicular reach used to prove open rooms either side: past
+        /// the thickest wall band, short of the next parallel wall.
+        const SIDE_PROBE: f32 = 1.1;
+        /// Half the frame's footprint along the wall: the span that must be
+        /// continuous masonry before the door is cut into it.
+        const FRAME_HALF: f32 = DOOR_WIDTH * 0.5 + 0.3;
+        /// How far from the candidate a wall may be and still host its door.
+        const REACH: f32 = 5.0;
+        /// Probe pitch. Finer than the thinnest wall band, so no wall can
+        /// slip between two samples.
+        const STEP: f32 = 0.15;
+
+        let steps = (REACH / STEP) as i32;
+        let mut best: Option<(f32, f32, bool, f32)> = None;
+        for iz in -steps..=steps {
+            for ix in -steps..=steps {
+                let (sx, sz) = (px + ix as f32 * STEP, pz + iz as f32 * STEP);
+                if !self.is_solid(sx, sz) {
+                    continue;
+                }
+                // Which way does this masonry run? A seat needs the frame's
+                // full width of it, so test both axes and take whichever
+                // holds. Testing the centre alone accepts two wrong seats: a
+                // frame laid across the grain of a wall it merely touches,
+                // and one plugging a doorway the fabric already knocked
+                // through.
+                for along_x in [true, false] {
+                    let (ax, az) = if along_x { (1.0, 0.0) } else { (0.0, 1.0) };
+                    let (nx, nz) = (az, ax);
+                    let seated = [
+                        -FRAME_HALF,
+                        -FRAME_HALF * 0.5,
+                        0.0,
+                        FRAME_HALF * 0.5,
+                        FRAME_HALF,
+                    ]
+                    .into_iter()
+                    .all(|t| self.is_solid(sx + ax * t, sz + az * t));
+                    if !seated {
+                        continue;
+                    }
+                    // Centre the frame across the band, so the door sits in
+                    // the middle of the wall rather than flush to one face.
+                    let Some((cx, cz)) = self.centre_across(sx, sz, nx, nz) else {
+                        continue;
+                    };
+                    let front = self.is_open_floor(cx + nx * SIDE_PROBE, cz + nz * SIDE_PROBE);
+                    let back = self.is_open_floor(cx - nx * SIDE_PROBE, cz - nz * SIDE_PROBE);
+                    if !front || !back {
+                        continue;
+                    }
+                    let distance = (cx - px).hypot(cz - pz);
+                    if best.is_none_or(|(_, _, _, d)| distance < d) {
+                        best = Some((cx, cz, along_x, distance));
+                    }
+                }
+            }
+        }
+        best.map(|(cx, cz, along_x, _)| (cx, cz, along_x))
+    }
+
+    /// Walks out along `(nx, nz)` to both faces of the wall band containing
+    /// a solid sample, returning its mid-plane. Bails on anything thicker
+    /// than a wall -- that is a solid mass, not a wall with two sides.
+    fn centre_across(&self, sx: f32, sz: f32, nx: f32, nz: f32) -> Option<(f32, f32)> {
+        const STEP: f32 = 0.05;
+        const MAX_THICKNESS: f32 = 1.2;
+
+        let mut face = [0.0f32; 2];
+        for (slot, sign) in [1.0f32, -1.0].into_iter().enumerate() {
+            let mut reach = 0.0;
+            loop {
+                let next = reach + STEP;
+                if next > MAX_THICKNESS {
+                    return None;
+                }
+                if !self.is_solid(sx + nx * sign * next, sz + nz * sign * next) {
+                    break;
+                }
+                reach = next;
+            }
+            face[slot] = sign * reach;
+        }
+        let mid = (face[0] + face[1]) * 0.5;
+        Some((sx + nx * mid, sz + nz * mid))
     }
 }
 
@@ -204,8 +327,8 @@ pub(crate) fn stamp_level_zero_provisions(
             let spawn_door_region =
                 rx == region_index(SPAWN_DOOR.0) && rz == region_index(SPAWN_DOOR.1);
             let (dx, dz) = if spawn_door_region {
-                // The authored guaranteed door carves its own clearing; no
-                // floor check, so it exists in every reality.
+                // The authored guaranteed door still exists in every
+                // reality; only its seat is negotiated with the fabric.
                 SPAWN_DOOR
             } else {
                 let roll = hash(ctx.seed, 0xD00E_0000_5EED_0000, rx, rz);
@@ -222,12 +345,22 @@ pub(crate) fn stamp_level_zero_provisions(
                 }
                 (px, pz)
             };
+            // Seat the door in a real wall. Every chunk that overlaps the
+            // footprint runs this same search over the same pure sampling
+            // function, so they all agree on where the door ended up
+            // without comparing notes.
+            let Some((dx, dz, along_x)) = ctx.wall_host_near(dx, dz) else {
+                // No wall within reach means this region simply has no
+                // door -- the same outcome the open-floor test already
+                // produced for solid or anomalous ground.
+                continue;
+            };
             if !near_chunk(dx, dz, DOOR_STAMP_MARGIN) {
                 continue;
             }
 
-            carve_door_clearing(chunk, chunk_pos, s, dx, dz);
-            stamp_level_door(chunk, chunk_pos, s, dx, dz, VOXEL_WALL);
+            carve_door_threshold(chunk, chunk_pos, s, dx, dz, along_x);
+            stamp_level_door(chunk, chunk_pos, s, dx, dz, VOXEL_WALL, along_x);
             if in_chunk(dx, dz) {
                 chunk.entities.level_exits.push(LevelExit {
                     id: hash(ctx.seed, 0xD00E_0000_0000_1D00, rx, rz),
@@ -241,23 +374,36 @@ pub(crate) fn stamp_level_zero_provisions(
     }
 }
 
-/// Guarantees approach space on both sides of a door: air to 2.6u within a
-/// small square, with the floor slab restored underneath. The radius stays
-/// under `DOOR_STAMP_MARGIN` so the carve never outruns what neighboring
-/// chunks can reproduce.
-fn carve_door_clearing(
+/// Cuts the rough opening the door frame is then set into: a slot through
+/// the wall band, as wide as the frame and no wider.
+///
+/// This replaces a 0.95u clearing bubble. The bubble existed because the
+/// door used to stand on open floor and needed room around it; a door in a
+/// wall needs the opposite -- the wall must survive everywhere except the
+/// slot, or the frame stops reading as part of it. Depth spans the wall
+/// band with a small margin so no residual voxel blocks the threshold, and
+/// stays under `DOOR_STAMP_MARGIN` so the cut never outruns what
+/// neighbouring chunks reproduce.
+fn carve_door_threshold(
     grid: &mut VoxelGrid,
     chunk_pos: Position,
     voxel_size: f32,
     cx: f32,
     cz: f32,
+    along_x: bool,
 ) {
-    let radius = 0.95;
+    let half_along = DOOR_WIDTH * 0.5 + 0.3;
+    let half_across = PLAN_WALL_T * 0.5 + 0.25;
+    let (half_x, half_z) = if along_x {
+        (half_along, half_across)
+    } else {
+        (half_across, half_along)
+    };
     let height_v = (2.6 / voxel_size).round() as i64;
-    let x0 = ((cx - radius - chunk_pos.x) / voxel_size).floor() as i64;
-    let x1 = ((cx + radius - chunk_pos.x) / voxel_size).floor() as i64;
-    let z0 = ((cz - radius - chunk_pos.z) / voxel_size).floor() as i64;
-    let z1 = ((cz + radius - chunk_pos.z) / voxel_size).floor() as i64;
+    let x0 = ((cx - half_x - chunk_pos.x) / voxel_size).floor() as i64;
+    let x1 = ((cx + half_x - chunk_pos.x) / voxel_size).floor() as i64;
+    let z0 = ((cz - half_z - chunk_pos.z) / voxel_size).floor() as i64;
+    let z1 = ((cz + half_z - chunk_pos.z) / voxel_size).floor() as i64;
     for z in z0.max(0)..=z1.max(-1) {
         for x in x0.max(0)..=x1.max(-1) {
             let (xu, zu) = (x as usize, z as usize);
@@ -342,5 +488,80 @@ mod tests {
             plans: &plans,
         };
         assert!(decide_supply_items(chunk_pos, &ctx).is_empty());
+    }
+    /// Every level-exit door must be a hole in a wall, not a frame standing
+    /// in a room.
+    ///
+    /// This is the regression guard for the original bug: the door was
+    /// stamped at a hashed open-floor point and a 0.95u bubble was cleared
+    /// around it, so it stood free in the middle of a room, joined to
+    /// nothing. The plan read literally `.....#DDDDDDDD#.....` with open
+    /// floor above and below.
+    ///
+    /// The property asserted is architectural rather than incidental: along
+    /// the frame axis the door must run into masonry at both ends (it is set
+    /// into a wall), and across it there must be open floor on both sides
+    /// (it joins two spaces, which is what makes it a door at all).
+    #[test]
+    fn every_level_door_is_seated_in_a_wall_between_two_rooms() {
+        const SIDE_PROBE: f32 = 1.1;
+        const FRAME_HALF: f32 = DOOR_WIDTH * 0.5 + 0.3;
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let reality = RealitySnapshot::empty();
+
+        // Sweep the neighbourhood holding the authored spawn door plus a
+        // spread of hashed ones, so this covers both placement paths.
+        let mut seated = 0usize;
+        for (px, pz) in [
+            SPAWN_DOOR,
+            (40.0, 40.0),
+            (-120.0, 200.0),
+            (320.0, -80.0),
+            (80.0, 80.0),
+            (-40.0, -40.0),
+            (200.0, 160.0),
+            (-200.0, 40.0),
+        ] {
+            let chunk_pos = Position::new(
+                (px / config.chunk_size).floor() * config.chunk_size,
+                (pz / config.chunk_size).floor() * config.chunk_size,
+            );
+            let plans =
+                BackroomsLevel::region_plans_for(chunk_pos, config.chunk_size, 42, &config, &noise);
+            let ctx = ProvisionContext {
+                seed: 42,
+                config: &config,
+                reality: &reality,
+                noise: &noise,
+                plans: &plans,
+            };
+            let Some((cx, cz, along_x)) = ctx.wall_host_near(px, pz) else {
+                // No wall in reach is a legitimate answer -- that region
+                // simply has no door. It must never be a *placed* door.
+                continue;
+            };
+            seated += 1;
+
+            let (ax, az) = if along_x { (1.0, 0.0) } else { (0.0, 1.0) };
+            let (nx, nz) = (az, ax);
+            for end in [-FRAME_HALF, FRAME_HALF] {
+                assert!(
+                    ctx.is_solid(cx + ax * end, cz + az * end),
+                    "door at ({cx}, {cz}) along_x={along_x} has no wall at \
+                     offset {end}: it is a free-standing frame"
+                );
+            }
+            assert!(
+                ctx.is_open_floor(cx + nx * SIDE_PROBE, cz + nz * SIDE_PROBE)
+                    && ctx.is_open_floor(cx - nx * SIDE_PROBE, cz - nz * SIDE_PROBE),
+                "door at ({cx}, {cz}) does not join two open spaces"
+            );
+        }
+
+        assert!(
+            seated >= 4,
+            "sanity: the sweep must actually seat doors, got {seated}"
+        );
     }
 }
