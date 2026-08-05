@@ -20,6 +20,7 @@
 //! prove large uniform regions cheaply without touching a dense array —
 //! this pipeline's grid is already dense by the time it reaches here.
 
+use vackrooms::adapters::brick_pool_gpu_serializer::BrickPoolGpuSerializer;
 use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use vackrooms::domain::entities::anomaly::RealitySnapshot;
@@ -30,6 +31,7 @@ use vackrooms::domain::entities::voxel_grid::{
     FACE_OCCLUDED_POSITIVE_X, FACE_OCCLUDED_POSITIVE_Y, FACE_OCCLUDED_POSITIVE_Z, VOXEL_AIR,
     VoxelGrid,
 };
+use vackrooms::use_cases::build_brick_pool::build_brick_pool;
 use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::use_cases::compress_svdag::compress_svdag;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
@@ -128,7 +130,17 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             config.svo_world_size(),
         );
 
-        let (root, nodes) = if artifacts.svo_nodes() {
+        let (root, nodes, brick_voxels) = if artifacts.bricks() {
+            // Bricking folds the bottom two levels into dense blocks, so
+            // the ray stops pointer-chasing where the nodes actually are.
+            // Deliberately built from the tree, not the SVDAG: a brick is
+            // addressed by a word offset the parent hands out, and shared
+            // subtrees would have to agree on one, which is the DAG's whole
+            // point undone. Bricking already removes ~93% of the nodes.
+            let pool = build_brick_pool(&svo);
+            let gpu = BrickPoolGpuSerializer::serialize_to_gpu_data(&pool);
+            (gpu.root, gpu.node_data, gpu.voxel_data)
+        } else if artifacts.svo_nodes() {
             // SVDAG upload: identical subtrees collapse to one shared block.
             // Traversal-only consumers (the raymarch shader) are agnostic;
             // the collision walk below deliberately keeps the tree because
@@ -137,15 +149,17 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             (
                 dag.root as u32,
                 OctreeGpuSerializer::serialize_to_gpu_data(&dag).texel_data,
+                Vec::new(),
             )
         } else {
-            (0, Vec::new())
+            (0, Vec::new(), Vec::new())
         };
         let collision = extract_collision_boxes(&svo, origin_x, origin_z, config.voxel_scale);
 
         ChunkPayload {
             root,
             nodes,
+            brick_voxels,
             world_size: config.svo_world_size(),
             voxel_size: config.voxel_scale,
             svo_depth: svo_depth as u8,

@@ -59,6 +59,10 @@ pub struct RaymarchPipeline {
     pipeline: wgpu::RenderPipeline,
     scene_layout: wgpu::BindGroupLayout,
     atlas: wgpu::Buffer,
+    /// Dense brick voxel arena. Never empty as a GPU object -- a storage
+    /// binding must exist even when the atlas holds the plain SVO encoding
+    /// and no brick pointer will ever read from it.
+    bricks: wgpu::Buffer,
     chunks: wgpu::Buffer,
     scene: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -122,11 +126,13 @@ impl RaymarchPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_group = create_bind_group(device, &scene_layout, &atlas, &chunks, &scene);
+        let bricks = create_brick_buffer(device, &[0, 0]);
+        let bind_group = create_bind_group(device, &scene_layout, &atlas, &chunks, &scene, &bricks);
         Self {
             pipeline,
             scene_layout,
             atlas,
+            bricks,
             chunks,
             scene,
             bind_group,
@@ -150,12 +156,24 @@ impl RaymarchPipeline {
         self.atlas = create_atlas_buffer(device, words);
         self.atlas_word_capacity = words.len();
         self.atlas_initialized = !texels.is_empty();
+        self.rebuild_bind_group(device);
+    }
+
+    /// Replaces the dense voxel arena the brick nodes index into. An empty
+    /// upload keeps a minimal placeholder rather than dropping the binding.
+    pub fn upload_brick_voxels(&mut self, device: &wgpu::Device, words: &[u32]) {
+        self.bricks = create_brick_buffer(device, if words.is_empty() { &[0, 0] } else { words });
+        self.rebuild_bind_group(device);
+    }
+
+    fn rebuild_bind_group(&mut self, device: &wgpu::Device) {
         self.bind_group = create_bind_group(
             device,
             &self.scene_layout,
             &self.atlas,
             &self.chunks,
             &self.scene,
+            &self.bricks,
         );
     }
 
@@ -380,7 +398,25 @@ fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(8),
+                },
+                count: None,
+            },
         ],
+    })
+}
+
+fn create_brick_buffer(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("webgpu.raymarch.bricks"),
+        contents: bytemuck::cast_slice(words),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     })
 }
 
@@ -398,6 +434,7 @@ fn create_bind_group(
     atlas: &wgpu::Buffer,
     chunks: &wgpu::Buffer,
     scene: &wgpu::Buffer,
+    bricks: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("webgpu.raymarch.scene-bind-group"),
@@ -414,6 +451,10 @@ fn create_bind_group(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: scene.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: bricks.as_entire_binding(),
             },
         ],
     })

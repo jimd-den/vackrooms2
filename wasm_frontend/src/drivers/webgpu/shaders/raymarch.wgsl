@@ -1,6 +1,12 @@
 // SVO raymarch strategy. Nodes remain in the canonical four-u32 encoding;
 // point lookup is stateless, and optional empty-leaf stepping changes only
 // how far an empty sample advances.
+//
+// The atlas may hold either the plain SVO encoding or the bricked one. The
+// two are bit-identical for internal and leaf nodes and differ only by an
+// extra node kind, so this file needs no mode switch: `lookup_leaf` simply
+// recognizes a brick pointer when it meets one, and every consumer above it
+// keeps seeing the same `VoxelLeaf` contract.
 
 struct RayChunk {
     origin_world_size: vec4<f32>,
@@ -25,6 +31,16 @@ const DIRECT_VISIBILITY_TRACE_BUDGET: u32 = 4096u;
 @group(1) @binding(0) var<storage, read> atlas_words: array<u32>;
 @group(1) @binding(1) var<storage, read> ray_chunks: array<RayChunk>;
 @group(1) @binding(2) var<uniform> ray_scene: RayScene;
+// Dense brick voxel arena, two words per voxel. Empty when the atlas holds
+// the plain SVO encoding; no brick pointer exists to reach into it then.
+@group(1) @binding(3) var<storage, read> brick_words: array<u32>;
+
+/// Voxels along one brick edge. Must match `BRICK_EDGE` in the core's
+/// `build_brick_pool`.
+const BRICK_EDGE: u32 = 4u;
+const NODE_KIND_INTERNAL: u32 = 0u;
+const NODE_KIND_LEAF: u32 = 1u;
+const NODE_KIND_BRICK: u32 = 2u;
 
 struct FullscreenVertex {
     @builtin(position) clip_position: vec4<f32>,
@@ -134,6 +150,57 @@ fn box_intersection(
     return BoxHit(true, max(entry, 0.0), exit, normal);
 }
 
+/// Indexes a dense brick. This is the whole point of bricking: the walk
+/// stops here and the voxel arrives from one contiguous fetch instead of
+/// two more dependent pointer chases.
+///
+/// The returned bounds are the *individual voxel's* box, never the brick's.
+/// Empty-space skipping advances a ray to the far side of whatever bounds
+/// it is handed, so returning the brick would step straight over the solid
+/// voxels sharing it.
+fn read_brick_voxel(
+    word_base: u32,
+    point: vec3<f32>,
+    bounds_min: vec3<f32>,
+    bounds_max: vec3<f32>,
+) -> VoxelLeaf {
+    let extent = (bounds_max - bounds_min) / f32(BRICK_EDGE);
+    let limit = f32(BRICK_EDGE) - 1.0;
+    // The DDA samples a hair inside the cell it means, but rounding can
+    // still land a fraction outside the brick; clamping keeps the fetch in
+    // bounds without moving any sample that was already correct.
+    let local = clamp(
+        floor((point - bounds_min) / extent),
+        vec3<f32>(0.0),
+        vec3<f32>(limit)
+    );
+    let cell = vec3<u32>(local);
+    let offset = cell.z * BRICK_EDGE * BRICK_EDGE + cell.y * BRICK_EDGE + cell.x;
+    let word = word_base + offset * 2u;
+    let packed_voxel = brick_words[word];
+    let packed_light = brick_words[word + 1u];
+
+    // Re-pack into the leaf light layout so every consumer above decodes
+    // one encoding: scalar level, then occlusion at bit 8, then r/g/b.
+    let red = (packed_light >> 8u) & 0xFu;
+    let green = (packed_light >> 12u) & 0xFu;
+    let blue = (packed_light >> 16u) & 0xFu;
+    let light_word = max(red, max(green, blue))
+        | ((packed_light & 0xFFu) << 8u)
+        | (red << 16u)
+        | (green << 20u)
+        | (blue << 24u);
+
+    let voxel_min = bounds_min + local * extent;
+    return VoxelLeaf(
+        packed_voxel >> 24u,
+        packed_voxel & 0x00FFFFFFu,
+        light_word,
+        voxel_min,
+        voxel_min + extent
+    );
+}
+
 fn lookup_leaf(point: vec3<f32>, chunk: RayChunk) -> VoxelLeaf {
     var node_index = chunk.indices.x;
     var bounds_min = vec3<f32>(0.0);
@@ -145,8 +212,11 @@ fn lookup_leaf(point: vec3<f32>, chunk: RayChunk) -> VoxelLeaf {
         let payload = atlas_words[word + 1u];
         let color_or_mask = atlas_words[word + 2u];
         let light_word = atlas_words[word + 3u];
-        if node_type == 1u || level >= depth {
+        if node_type == NODE_KIND_LEAF || level >= depth {
             return VoxelLeaf(payload, color_or_mask, light_word, bounds_min, bounds_max);
+        }
+        if node_type == NODE_KIND_BRICK {
+            return read_brick_voxel(payload, point, bounds_min, bounds_max);
         }
         let center = (bounds_min + bounds_max) * 0.5;
         let child_x = select(0u, 1u, point.x >= center.x);

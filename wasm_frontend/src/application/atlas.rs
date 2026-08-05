@@ -25,10 +25,17 @@ pub const ROW_TEXELS: usize = 1024;
 /// One air-leaf texel (type flag 1, voxel type 0): what free space decodes to.
 const AIR_LEAF: [u32; 4] = [1, 0, 0, 0];
 
+/// Brick voxel words per slot row. The dense arena pools on the same slot
+/// index as the node arena, so one `assign` places a chunk in both.
+pub const BRICK_ROW_WORDS: usize = 1024;
+
 #[derive(Debug, Default)]
 pub struct AtlasPool {
     /// Rows per slot. Grows (forcing a relayout) when a chunk won't fit.
     slot_rows: usize,
+    /// Rows per slot in the brick voxel arena, sized independently: a chunk
+    /// that is mostly uniform has many nodes and few bricks, and vice versa.
+    brick_slot_rows: usize,
     /// Slot occupancy; index is the slot number.
     slots: Vec<Option<ChunkKey>>,
 }
@@ -53,14 +60,42 @@ impl AtlasPool {
     /// assignment is then dropped and the caller must reassign all resident
     /// chunks and re-upload the whole pool.
     pub fn ensure_layout(&mut self, num_slots: usize, rows: usize) -> bool {
-        let changed = rows > self.slot_rows || num_slots > self.slots.len();
+        self.ensure_layout_with_bricks(num_slots, rows, 0)
+    }
+
+    /// As [`Self::ensure_layout`], additionally sizing the brick voxel
+    /// arena. Either arena outgrowing its slot relayouts both, so the two
+    /// stay addressable from one slot index.
+    pub fn ensure_layout_with_bricks(
+        &mut self,
+        num_slots: usize,
+        rows: usize,
+        brick_rows: usize,
+    ) -> bool {
+        let changed = rows > self.slot_rows
+            || brick_rows > self.brick_slot_rows
+            || num_slots > self.slots.len();
         if changed {
             self.slot_rows = self.slot_rows.max(rows);
+            self.brick_slot_rows = self.brick_slot_rows.max(brick_rows);
             let len = self.slots.len().max(num_slots);
             self.slots.clear();
             self.slots.resize(len, None);
         }
         changed
+    }
+
+    /// Brick voxel words per slot.
+    pub fn brick_slot_words(&self) -> usize {
+        self.brick_slot_rows * BRICK_ROW_WORDS
+    }
+
+    /// Word offset of `key`'s brick block within the pooled voxel arena.
+    pub fn brick_offset_of(&self, key: ChunkKey) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|s| *s == Some(key))
+            .map(|i| i * self.brick_slot_words())
     }
 
     /// Assigns (or finds) the slot for `key`. Returns `None` when the pool
@@ -105,13 +140,19 @@ impl AtlasPool {
     /// the slot's node offset, tail padded with air leaves.
     pub fn rebased_block(&self, slot: usize, payload: &ChunkPayload) -> Vec<u32> {
         let node_offset = (slot * self.slot_nodes()) as u32;
+        let brick_offset = (slot * self.brick_slot_words()) as u32;
         let mut block = Vec::with_capacity(self.slot_nodes() * 4);
         block.extend_from_slice(&payload.nodes);
         // Internal nodes (type flag 0) store child indices local to the
-        // chunk; shift them into pool space.
+        // chunk, and brick nodes (type flag 2) a word offset into the
+        // chunk's own voxel arena; shift both into pool space. Leaf and
+        // uniform nodes (flag 1) hold values, not pointers, and must not
+        // be touched -- their payload word is a voxel type.
         for i in 0..(payload.nodes.len() / 4) {
-            if block[i * 4] == 0 {
-                block[i * 4 + 1] += node_offset;
+            match block[i * 4] {
+                0 => block[i * 4 + 1] += node_offset,
+                2 => block[i * 4 + 1] += brick_offset,
+                _ => {}
             }
         }
         while block.len() < self.slot_nodes() * 4 {
@@ -140,11 +181,40 @@ impl AtlasPool {
         }
         texels
     }
+
+    /// The whole brick voxel arena as one word stream, laid out on the same
+    /// slots as [`Self::full_texels`]. Unoccupied slots and the tail of each
+    /// occupied one are zero, which decodes as air -- but nothing ever reads
+    /// there, because a voxel is only reachable through a word offset some
+    /// brick node handed out.
+    pub fn full_brick_words<'a>(
+        &self,
+        lookup: impl Fn(ChunkKey) -> Option<&'a ChunkPayload>,
+    ) -> Vec<u32> {
+        let stride = self.brick_slot_words();
+        let mut words = vec![0u32; stride * self.slots.len()];
+        if stride == 0 {
+            return words;
+        }
+        for (slot, occupant) in self.slots.iter().enumerate() {
+            if let Some(payload) = occupant.and_then(&lookup) {
+                let base = slot * stride;
+                words[base..base + payload.brick_voxels.len()]
+                    .copy_from_slice(&payload.brick_voxels);
+            }
+        }
+        words
+    }
 }
 
 /// Rows needed to hold a payload's node array.
 pub fn payload_rows(payload: &ChunkPayload) -> usize {
     (payload.nodes.len() / 4).div_ceil(ROW_TEXELS)
+}
+
+/// Rows needed to hold a payload's brick voxel arena.
+pub fn payload_brick_rows(payload: &ChunkPayload) -> usize {
+    payload.brick_voxels.len().div_ceil(BRICK_ROW_WORDS)
 }
 
 #[cfg(test)]
@@ -156,6 +226,7 @@ mod tests {
         ChunkPayload {
             root,
             nodes: vec![0; node_count * 4],
+            brick_voxels: Vec::new(),
             world_size: 12.8,
             voxel_size: 0.2,
             svo_depth: 6,

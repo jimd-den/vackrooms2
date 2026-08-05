@@ -21,6 +21,18 @@ pub enum ShaderProgram {
 }
 
 impl ShaderProgram {
+    /// Every program, so a caller that must visit all of them (offline
+    /// validation) cannot silently miss one added later.
+    pub const ALL: [Self; 7] = [
+        Self::Surface,
+        Self::SurfaceShadow,
+        Self::Splat,
+        Self::SplatShadow,
+        Self::Raymarch,
+        Self::CpuPresent,
+        Self::SupplyLabels,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Surface => "webgpu.surface",

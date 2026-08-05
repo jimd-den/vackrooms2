@@ -2217,6 +2217,7 @@ dependencies = [
  "fontdue",
  "image",
  "js-sys",
+ "naga",
  "pollster",
  "rayon",
  "vackrooms",

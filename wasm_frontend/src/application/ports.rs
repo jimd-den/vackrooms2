@@ -389,15 +389,29 @@ impl RenderArtifactNeeds {
     const INDEXED_SURFACE_MESH_BIT: u8 = 1 << 0;
     const FACE_SPLATS_BIT: u8 = 1 << 1;
     const SVO_NODES_BIT: u8 = 1 << 2;
-    const KNOWN_BITS: u8 =
-        Self::INDEXED_SURFACE_MESH_BIT | Self::FACE_SPLATS_BIT | Self::SVO_NODES_BIT;
+    /// Bricked hierarchy plus its dense voxel arena. Mutually exclusive with
+    /// [`Self::SVO_NODES_BIT`] in practice: both describe the same volume and
+    /// both land in `ChunkPayload::nodes`, so a renderer asks for one or the
+    /// other and never pays for the volume twice.
+    const BRICKS_BIT: u8 = 1 << 3;
+    const KNOWN_BITS: u8 = Self::INDEXED_SURFACE_MESH_BIT
+        | Self::FACE_SPLATS_BIT
+        | Self::SVO_NODES_BIT
+        | Self::BRICKS_BIT;
 
     pub const NONE: Self = Self(0);
     pub const SURFACE: Self = Self(Self::INDEXED_SURFACE_MESH_BIT);
     pub const SPLAT: Self = Self(Self::FACE_SPLATS_BIT);
     pub const RAYMARCH: Self = Self(Self::SVO_NODES_BIT);
+    /// What a brick-aware ray marcher asks for.
+    pub const BRICKS: Self = Self(Self::BRICKS_BIT);
     pub const CPU: Self = Self(Self::SVO_NODES_BIT);
-    pub const ALL: Self = Self(Self::KNOWN_BITS);
+    /// Every artifact that can coexist. Deliberately *excludes* bricks:
+    /// they and the plain SVO both land in `ChunkPayload::nodes` and only
+    /// one encoding can occupy it, so a blanket request has to name the one
+    /// every consumer can decode. A brick-aware renderer asks for
+    /// [`Self::BRICKS`] explicitly.
+    pub const ALL: Self = Self(Self::KNOWN_BITS & !Self::BRICKS_BIT);
 
     pub const fn from_bits(bits: u8) -> Option<Self> {
         if bits & !Self::KNOWN_BITS == 0 {
@@ -421,6 +435,19 @@ impl RenderArtifactNeeds {
 
     pub const fn svo_nodes(self) -> bool {
         self.0 & Self::SVO_NODES_BIT != 0
+    }
+
+    /// Whether the bricked encoding was asked for. False when the plain SVO
+    /// was also requested: `nodes` holds one encoding, and the SVO is the
+    /// one every consumer -- the WebGL marcher, the CPU splatter, the
+    /// collision walk -- knows how to read.
+    pub const fn bricks(self) -> bool {
+        self.0 & Self::BRICKS_BIT != 0 && self.0 & Self::SVO_NODES_BIT == 0
+    }
+
+    /// Whether some node hierarchy must be built at all, in either encoding.
+    pub const fn needs_node_arena(self) -> bool {
+        self.svo_nodes() || self.bricks()
     }
 
     pub const fn union(self, other: Self) -> Self {
@@ -472,6 +499,11 @@ pub trait RendererPort {
     /// in 1024-node rows; see `OctreeGpuSerializer` in the core).
     fn upload_atlas(&mut self, texels: &[u32]);
 
+    /// Uploads the merged dense voxel arena the brick nodes index into.
+    /// Ships alongside `upload_atlas` and is ignored by back ends that
+    /// requested the plain SVO encoding.
+    fn upload_brick_voxels(&mut self, _words: &[u32]) {}
+
     /// Overwrites whole atlas rows starting at `first_row` (1024 nodes per
     /// row) without reallocating or re-uploading the rest of the atlas.
     /// Returns `false` if the back end can't do partial updates (or has no
@@ -493,8 +525,17 @@ pub trait RendererPort {
 pub struct ChunkPayload {
     /// Root node index local to this chunk's `nodes` array.
     pub root: u32,
-    /// GPU-serialized SVO nodes (row-padded, 4 u32 per node).
+    /// GPU-serialized node hierarchy (row-padded, 4 u32 per node).
+    ///
+    /// Holds the plain SVO encoding under [`RenderArtifactNeeds::RAYMARCH`]
+    /// and the bricked hierarchy under [`RenderArtifactNeeds::BRICKS`]. The
+    /// brick encoding is a strict superset -- internal and leaf nodes are
+    /// bit-identical, and only the brick-pointer kind is new -- so one array
+    /// and one atlas serve both.
     pub nodes: Vec<u32>,
+    /// Dense voxel arena the brick nodes point into, empty unless
+    /// [`RenderArtifactNeeds::BRICKS`] was requested.
+    pub brick_voxels: Vec<u32>,
     /// Side length of the SVO cube in world units.
     pub world_size: f32,
     /// Exact leaf size/depth used to build `nodes`.

@@ -15,7 +15,7 @@ mod route;
 
 pub use crate::application::perf_governor::PerfGovernor;
 
-use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
+use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_brick_rows, payload_rows};
 use crate::application::body::{Body, BodyContext, BodyReadout};
 use crate::application::collision::{CollisionWorld, player_aabb};
 use crate::application::flares::FlareField;
@@ -1181,7 +1181,19 @@ impl Engine {
             .max()
             .unwrap_or(1)
             .max(1);
-        let mut need_full = self.pool.ensure_layout(num_slots, rows);
+        let brick_rows = self
+            .store
+            .iter_ordered()
+            .map(|c| payload_brick_rows(&c.payload))
+            .max()
+            .unwrap_or(0);
+        let mut need_full = self
+            .pool
+            .ensure_layout_with_bricks(num_slots, rows, brick_rows);
+        // The brick arena has no partial-row upload path yet, and a node
+        // block is meaningless without the voxels its brick pointers name.
+        // Re-upload both together rather than let them disagree for a frame.
+        need_full |= brick_rows > 0;
 
         if !need_full {
             for &key in &loaded {
@@ -1214,6 +1226,12 @@ impl Engine {
                 .pool
                 .full_texels(|k| self.store.get(k).map(|c| &c.payload));
             self.renderer.upload_atlas(&texels);
+            if brick_rows > 0 {
+                let words = self
+                    .pool
+                    .full_brick_words(|k| self.store.get(k).map(|c| &c.payload));
+                self.renderer.upload_brick_voxels(&words);
+            }
         }
 
         self.draws.clear();
@@ -1316,6 +1334,7 @@ mod tests {
             ChunkPayload {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024),
+                brick_voxels: Vec::new(),
                 world_size: 12.8,
                 voxel_size: 0.2,
                 svo_depth: 6,
@@ -1571,6 +1590,7 @@ mod tests {
             ChunkPayload {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024),
+                brick_voxels: Vec::new(),
                 world_size: 12.8,
                 voxel_size: 0.2,
                 svo_depth: 6,
@@ -1625,6 +1645,7 @@ mod tests {
             ChunkPayload {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024), // one padded row of air leaves
+                brick_voxels: Vec::new(),
                 world_size: 12.8,
                 voxel_size: 0.2,
                 svo_depth: 6,
@@ -1651,6 +1672,7 @@ mod tests {
             ChunkPayload {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024),
+                brick_voxels: Vec::new(),
                 world_size: 12.8,
                 voxel_size: 0.2,
                 svo_depth: 6,

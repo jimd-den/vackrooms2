@@ -350,8 +350,8 @@ mod tests {
                 for x in 0..extent {
                     // A slab of solid, a void, and a noisy band, so all
                     // three node kinds are exercised.
-                    let solid = y < extent / 4
-                        || (y > extent / 2 && (x * 7 + y * 13 + z * 29) % 5 == 0);
+                    let solid =
+                        y < extent / 4 || (y > extent / 2 && (x * 7 + y * 13 + z * 29) % 5 == 0);
                     if !solid {
                         continue;
                     }

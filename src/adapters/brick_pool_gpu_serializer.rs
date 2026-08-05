@@ -165,7 +165,7 @@ mod tests {
     use super::*;
     use crate::domain::entities::sparse_voxel_octree::SparseVoxelOctree;
     use crate::domain::entities::voxel_grid::{FACE_OCCLUDED_NEGATIVE_X, FACE_OCCLUDED_POSITIVE_Y};
-    use crate::use_cases::build_brick_pool::{build_brick_pool, WORDS_PER_VOXEL};
+    use crate::use_cases::build_brick_pool::{WORDS_PER_VOXEL, build_brick_pool};
 
     /// Walks the serialized arenas exactly as a shader would, with no
     /// access to the Rust types -- if this agrees with the pool, the
@@ -209,7 +209,8 @@ mod tests {
                 }
                 _ => {
                     let bit = depth - 1;
-                    let octant = (((z >> bit) & 1) << 2) | (((y >> bit) & 1) << 1) | ((x >> bit) & 1);
+                    let octant =
+                        (((z >> bit) & 1) << 2) | (((y >> bit) & 1) << 1) | ((x >> bit) & 1);
                     if w[2] & (1 << octant) == 0 {
                         return (0, 0, [0; 3], 0);
                     }

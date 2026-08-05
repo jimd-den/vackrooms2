@@ -365,6 +365,12 @@ impl RendererPort for WebGpuRenderer {
         }
     }
 
+    fn upload_brick_voxels(&mut self, words: &[u32]) {
+        if let Strategy::Raymarch(pipeline) = &mut self.strategy {
+            pipeline.upload_brick_voxels(&self.context.device, words);
+        }
+    }
+
     fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
         match &mut self.strategy {
             Strategy::Raymarch(pipeline) => {

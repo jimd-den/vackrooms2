@@ -362,8 +362,7 @@ fn load_world(seed: u32, radius: i32, policy: LodPolicy) -> LoadedWorld {
             // measure `Engine::chunk_dist2` refines against.
             let centre_x = x + config.chunk_size * 0.5;
             let centre_z = z + config.chunk_size * 0.5;
-            let distance =
-                ((centre_x - spawn.x).powi(2) + (centre_z - spawn.z).powi(2)).sqrt();
+            let distance = ((centre_x - spawn.x).powi(2) + (centre_z - spawn.z).powi(2)).sqrt();
             payloads.push((x, z, source.load(x, z, 0, policy.lod_for(distance))));
         }
     }
@@ -439,9 +438,9 @@ fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
 
 fn size() -> (u32, u32) {
     let raw = std::env::var("SIZE").unwrap_or_default();
-    let parsed = raw.split_once(['x', 'X']).and_then(|(w, h)| {
-        Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
-    });
+    let parsed = raw
+        .split_once(['x', 'X'])
+        .and_then(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)));
     let (width, height) = parsed.unwrap_or((960, 540));
     (width.max(64) & !63, height.max(1))
 }

@@ -65,7 +65,9 @@ impl RendererKind {
         match self {
             Self::Surface => RenderArtifactNeeds::SURFACE,
             Self::Splat => RenderArtifactNeeds::SPLAT,
-            Self::Raymarch => RenderArtifactNeeds::RAYMARCH,
+            // The WebGPU marcher traverses bricks; the WebGL one still
+            // walks the plain SVO and asks for RAYMARCH separately.
+            Self::Raymarch => RenderArtifactNeeds::BRICKS,
             Self::Cpu => RenderArtifactNeeds::CPU,
         }
     }
@@ -919,7 +921,7 @@ mod tests {
         );
         assert_eq!(
             RendererKind::Raymarch.artifact_needs(),
-            RenderArtifactNeeds::RAYMARCH
+            RenderArtifactNeeds::BRICKS
         );
         assert_eq!(RendererKind::Cpu.artifact_needs(), RenderArtifactNeeds::CPU);
 
@@ -928,7 +930,15 @@ mod tests {
             .fold(RenderArtifactNeeds::default(), |needs, renderer| {
                 needs.union(renderer.artifact_needs())
             });
-        assert_eq!(all, RenderArtifactNeeds::ALL);
+        // Not `ALL`: bricks and the plain SVO both occupy `nodes`, so the
+        // union of every renderer's needs is deliberately wider than the
+        // set any one payload can carry. What must hold is that the union
+        // covers ALL and adds nothing beyond the known bits.
+        assert_eq!(all.union(RenderArtifactNeeds::ALL), all);
+        assert!(RenderArtifactNeeds::from_bits(all.bits()).is_some());
+        // And that the exclusion is real: asking for both encodings at once
+        // resolves to the SVO, never to a brick arena nothing can decode.
+        assert!(!all.bricks());
         assert!(RenderArtifactNeeds::SURFACE.needs_surface_extraction());
         assert!(RenderArtifactNeeds::SPLAT.needs_surface_extraction());
         assert!(!RenderArtifactNeeds::RAYMARCH.needs_surface_extraction());

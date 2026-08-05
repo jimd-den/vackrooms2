@@ -16,12 +16,15 @@ use crate::application::ports::{
 use vackrooms::domain::entities::anomaly::{LevelExit, PitHazard, TraversalGate};
 use vackrooms::domain::entities::supplies::SupplyItem;
 
-/// "VKC" + version 6. Version 6 adds supply items and level exits.
-const MAGIC: u32 = 0x564B_4306;
+/// "VKC" + version 7. Version 7 adds the brick voxel arena, which travels
+/// with the node hierarchy that points into it -- a chunk carrying brick
+/// nodes is undecodable without it.
+const MAGIC: u32 = 0x564B_4307;
 
 pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     let mut out = Vec::with_capacity(
         64 + payload.nodes.len() * 4
+            + payload.brick_voxels.len() * 4
             + payload.surface.vertices.len() * 10
             + payload.surface.indices.len() * 4
             + payload.surface.faces.instances.len() * 16
@@ -40,6 +43,11 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     put_u32(&mut out, payload.nodes.len() as u32);
     for &n in &payload.nodes {
         put_u32(&mut out, n);
+    }
+
+    put_u32(&mut out, payload.brick_voxels.len() as u32);
+    for &w in &payload.brick_voxels {
+        put_u32(&mut out, w);
     }
 
     let s = &payload.surface;
@@ -158,6 +166,12 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
         nodes.push(r.u32()?);
     }
 
+    let brick_word_count = r.len(4)?;
+    let mut brick_voxels = Vec::with_capacity(brick_word_count);
+    for _ in 0..brick_word_count {
+        brick_voxels.push(r.u32()?);
+    }
+
     let vertex_count = r.len(10)?;
     let mut vertices = Vec::with_capacity(vertex_count);
     for _ in 0..vertex_count {
@@ -270,6 +284,7 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     Some(ChunkPayload {
         root,
         nodes,
+        brick_voxels,
         world_size,
         voxel_size,
         svo_depth,

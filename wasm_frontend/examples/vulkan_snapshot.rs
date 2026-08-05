@@ -368,7 +368,11 @@ fn fog_override(mut environment: Environment) -> Environment {
     }
     if let Some(color) = std::env::var("FOG_COLOR").ok().and_then(|value| {
         let mut parts = value.split(',').map(|part| part.trim().parse::<f32>());
-        Some([parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?])
+        Some([
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+        ])
     }) {
         environment.fog_color = color;
     }

@@ -290,6 +290,7 @@ mod tests {
         let payload = ChunkPayload {
             root: 0,
             nodes: vec![],
+            brick_voxels: Vec::new(),
             world_size: 10.0,
             voxel_size: 0.2,
             svo_depth: 6,
@@ -335,11 +336,7 @@ mod view_culling_tests {
         let policy = StreamingPolicy::omnidirectional(CHUNK, 2);
         assert_eq!(policy.desired_origins(0.0, 0.0).len(), 25);
         // A view cone must not shrink a policy whose core covers it all.
-        let culled = policy.desired_origins_in_view(
-            0.0,
-            0.0,
-            Some(ViewCone::from_yaw(0.0, 0.5)),
-        );
+        let culled = policy.desired_origins_in_view(0.0, 0.0, Some(ViewCone::from_yaw(0.0, 0.5)));
         assert_eq!(culled.len(), 25);
     }
 
@@ -348,11 +345,7 @@ mod view_culling_tests {
         let policy = visual_policy(4, 1);
         let all = policy.desired_origins(0.0, 0.0);
         // Yaw 0 faces -Z in this basis.
-        let ahead = policy.desired_origins_in_view(
-            0.0,
-            0.0,
-            Some(ViewCone::from_yaw(0.0, 0.8)),
-        );
+        let ahead = policy.desired_origins_in_view(0.0, 0.0, Some(ViewCone::from_yaw(0.0, 0.8)));
         assert!(
             ahead.len() < all.len(),
             "culling must remove something: {} vs {}",
@@ -395,7 +388,10 @@ mod view_culling_tests {
             let mut previous = f32::NEG_INFINITY;
             for (x, z) in desired {
                 let d2 = (x + CHUNK * 0.5 - 5.0).powi(2) + (z + CHUNK * 0.5 - 5.0).powi(2);
-                assert!(d2 >= previous, "streaming order stopped being nearest-first");
+                assert!(
+                    d2 >= previous,
+                    "streaming order stopped being nearest-first"
+                );
                 previous = d2;
             }
         }

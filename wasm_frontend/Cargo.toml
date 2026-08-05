@@ -89,6 +89,8 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 pollster = "1.0"
+# Offline WGSL validation, so a shader edit fails a test rather than a device.
+naga = { version = "30.0", features = ["wgsl-in"] }
 # Parallel pixel loops for the path-traced reference example.
 rayon = "1.10"
 criterion = "0.8"
