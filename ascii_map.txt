@@ -38,24 +38,24 @@ ddddd#dddddd#dddddddddddddddd              ddddd#d#dd#d#dd              # #     
                              d             d                                          d                            d                            #               
      #      #      #         d             #                            # #           #  #      # #                d                            #             # 
                              d             d                                          d                            d                            #             # 
-                             d             d                                          d                            #                            #             # 
-     #             #         d             d                            #             #         #                  #                            #             # 
-                             d             d                                          d                            #                            #             # 
-#dddd#d#dddd#dddd#ddddddddddddddddddddddddd#         # #           #         # #      d    #         #d#ddddddddddd#########   #########ddd##########   ########
-d             d                                                                       d              d             #                            #             # 
-d             d                                                                       d              d             #                            #             # 
-d             d                                                                       d              d             #                            #             # 
-d             d                                                                       d              d             #                            #             # 
-# #           d                            #dddd# #                                 # #  #      # #  #dddd  # #  # #                            #             # 
-d             d                            d                                          d              d             #     **             **      #     **      # 
-#     **      d     ***      #     **      d    #***            ** #          **      #     ***      d     ** #    #     **             **            **      # 
-d             d                            d                                          d              d             #                                            
-d             d                            d                                          d              d             #                                            
-# #         # d                     #      #         # #    # #dddd#dddd# #  # #      d              # #    # #    #                            #               
-d             d                                               d    d                  d              d             #                            #             # 
-#             d                            #         #        d    d    #    #        d              d             #                            #             # 
-d             d                                               d    d                  d              d             #                            #             # 
-##############################################################d    d                  d              d             #                            #             # 
+            ############################   d                                          d                            #                            #             # 
+     #                                 #   d                            #             #         #                  #                            #             # 
+                                       #   d                                          d                            #                            #             # 
+#dddd#d#dddd                           #ddd#         # #           #         # #      d    #         #d#ddddddddddd#########   #########ddd##########   ########
+d                         #        #   #                                              d              d             #                            #             # 
+d                                      #                                              d              d             #                            #             # 
+d                                      #                                              d              d             #                            #             # 
+d                                      #                                              d              d             #                            #             # 
+# #         **       **       **       #   #dddd# #                                 # #  #      # #  #dddd  # #  # #                            #             # 
+d                                      #   d                                          d              d             #     **             **      #     **      # 
+#     **                               #   d    #***            ** #          **      #     ***      d     ** #    #     **             **            **      # 
+d                                      #   d                                          d              d             #                                            
+d                                      #   d                                          d              d             #                                            
+# #                       #        #   #   #         # #    # #dddd#dddd# #  # #      d              # #    # #    #                            #               
+d                                      #                      d    d                  d              d             #                            #             # 
+#                                      #   #         #        d    d    #    #        d              d             #                            #             # 
+d                                      #                      d    d                  d              d             #                            #             # 
+########################dddddddd##############################d    d                  d              d             #                            #             # 
                                                               #         d                            d             #                            #             # 
                                                                #        d                            d             #                            #             # 
                                                                         d    #             #         d             #                            #             d 
@@ -65,33 +65,33 @@ d             d                                               d    d            
                                                            *    **      d     **            ***      d     **      d     #       #      **      #     **      # 
                                                            *    d       d             #         #    d             #     #       #      **      d     **      # 
                                                                 d       d                            d             #     #                      d             # 
-######################################dddddddddd######          d       d    #        #  # #         d             #     #                      d             # 
-                          #                                     d       d                            d             #     #                      #             # 
-                          #                                     d       d                            d             #     #                      #             # 
-                          #                                     d       d                            d             #     #                      #             # 
-                          #                                     d       d                            d             #     #                      #             # 
-# #           #           #**         **         **        *    d  #    d    # #  dddd            #  # #           #######   *    #####   #############ddd##### 
-                          #**         **         **        *    d       d                            d             #     #   *                  #             # 
-#                         #                                     d  #    d    #              #             #              d                      #             # 
-                          #     #      #      #                 d       d                   #    #      # #    #      #  d                      d             # 
-                          #                                     d       d                   #             #              d                      d             # 
-# #                       #                                     d  #    d           #       #   #         #        #     d                      d               
-                          #                  #                  d       d                   #             #              d              **      #     **        
-                    ***   #                                     ** #    d     **            #             #              d              **      #     **        
-                          #                                *    d       d                   #             #              d   *                  #             # 
-                          #                                *    d       d                   #             #              d   *                  #             # 
-                          #                                     d       d                   #             d              d                      #             # 
-                          #**         **         **             d       d                   #             d              d                      #             # 
-     #                    #**   #     *#      #  **             d  #    #             #    ##    #      # d    #      #  d                      #             # 
-                          #                                     d       d                   #             #              d                      #             # 
-            # #dddd#      #                                     dddddddd              dddddd#   #         #        #     d        ####   ########             ##
-              d           #                                     d                     d     #             #              d                      #             # 
-              d           #                                *    d                     d     #             #              d   *                  #               
-              d           #                                *    d                     d     #             #              d   *                  #               
-              d           ############################          d                     d     #             #              d                      #               
-  #         # #dddd                   #    d      #  #          d  #    # #           #  #  #             #              d                                    # 
-              d                            d                    d                     d     #             #              d                                    # 
-              d                            d                    **dddddddddddd**dddddddddddd##################ddddddd#####        ##############dddddd**dddddd#d
+###########################dddddddddd#################          d       d    #        #  # #         d             #     #                      d             # 
+                                                     #          d       d                            d             #     #                      #             # 
+                                                     #          d       d                  ###############################                      #             # 
+                                                     #          d       d                  #                   #         d                      #             # 
+                                                     #          d       d                  #                   #         d                      #             # 
+# #           #            **         **         *** #     *    d  #    d    # #  dddd     #  **          *    #     *   d   *    #####   #############ddd##### 
+                                                     #     *    d       d                  #  **          *    #     *   d   *                  #             # 
+#                                                    #          d  #    d    #             #                   #         d                      #             # 
+                         #      #      #      #      #          d       d                  #     #      #      #      #  d                      d             # 
+                                                     #          d       d                  #                   #         d                      d             # 
+# #                                                  #          d  #    d           #      #                   #         d                      d               
+                      #                      #       #          d       d                  #         #         ##        d              **      #     **        
+                                                     #          ** #    d     **           #                   #         d              **      #     **        
+                                                     #     *    d       d                  #                   d         d   *                  #             # 
+                                                     #     *    d       d                  #                   d         d   *                  #             # 
+                                                     #          d       d                  #                   #         d                      #             # 
+                           **         **         *** #          d       d                  #  **          *    #     *   d                      #             # 
+     #                   # **   #     *#      #  *** #          d  #    #             #    #  ** #      # *    #     *#  d                      #             # 
+                                                     #          d       d                  #                   #         d                      #             # 
+            # #d                                     #          dddddddd              ddddd#                   #         d        ####   ########             ##
+              d                                      #          d                     d    #                   #         d                      #             # 
+              d                                      #     *    d                     d    #                   #         d   *                  #               
+              d                                      #     *    d                     d    #                   #         d   *                  #               
+              d                                      #          d                     d    #                   #         d                      #               
+  #         # #d######################################          d  #    # #           #  # #                   #         d                                    # 
+              d                            d                    d                     d    #                   #         d                                    # 
+              d                            d                    **dddddddddddd**ddddddddddd#######################ddddddd#        ##############dddddd**dddddd#d
               d                            d                                                    d                                                               
               d                            d                                                    d                                                               
 #dddd# #      #  #      # #                #    # #                     dddddddddddddddddddddddd                             *                                  
@@ -101,25 +101,25 @@ d                                          d          d                 d
 d                                          d          d                 d                                                                                       
 # #         #                ddddddd#dddddd#           d                d                                                                                       
                              d                         dd               d                                                                                       
-                             d             #             ddddddddddddddddddddddddddddd#dddd#dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-                             d                                                        d                                                                       d 
-                             d                                                        d                                                                       d 
-                             d                                                        d                                                                       d 
-                             d                                  **            **      d     ***            **            ***            **            **      d 
-#                            d             #         #          **            **      d     *** #          **            *** #          **            **      d 
-                             d                                                        d                                                                       d 
-# #    #                     d      # #  #      # #                     # #           #  # #dddd#dddd                          #      #  #                    d 
-                             d                                                        d    d    d                                                             d 
-                             d                                                        d    d    d                                                             d 
-#                            d                  #                       #             d    d    d                            #        #                       d 
-                             d                                                        d    d    d                                                             d 
-###################ddd############ddd##########ddd#################################################### #                                                      d 
-#             #              #                                          #             #              d                                                        d 
-d             #              d                                                        #              d                                                        d 
-d             #              d                                                        #              d                                                        d 
-d             #              d             #                                          #              d                                                        d 
-#             #              #             #                            #             #              d             #         # #    #      #    # #           # 
-#     **      #      *       #     **      #     **             **      #     **      #      *       d                                                        d 
+                             d             #             dddddddddddddd######ddd####################ddddddddddddddddddddddd#######dd#####################ddddddd
+                             d                                         #                           #                       #                            #     d 
+                             d                                         #                           #                       #                            #     d 
+                             d                                         #                           #                       #                            #     d 
+                             d                                  **     #                           #       **            **#                            #     d 
+#                            d             #         #          **     #                           #       **            **#                            #     d 
+                             d                                         #                           #                       #                            #     d 
+# #    #                     d      # #  #      # #                    #                           #d                      #     **       **        **  #     d 
+                             d                                         #                           #                       #                            #     d 
+                             d                                         #                           #                       #                            #     d 
+#                            d                  #                      #                           #                       #                            #     d 
+                             d                                         #       #        #        # #                       #                            #     d 
+###################ddd############ddd##########ddd######################                           ### #                   # #        #         #       #     d 
+#             #              #                                         #                           # d                     #                            #     d 
+d             #              d                                         #                           # d                     #                            #     d 
+d             #              d                                         #                    *      # d                     #                            #     d 
+d             #              d             #                           #                    *      # d                     #     **       **        **  #     d 
+#             #              #             #                           #                           # d             #       #     **       **        **  #     # 
+#     **      #      *       #     **      #     **             **     ############################# d                     #                            #     d 
 #     **             *       #     **      #     **             **      #     **      #      *       d     **      #                       #                  # 
 #                            #             #                            #             d              d                                                        d 
 #                            #             #                            #             d              d                                                        d 

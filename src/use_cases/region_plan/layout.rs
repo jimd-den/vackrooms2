@@ -22,7 +22,7 @@ use crate::domain::entities::architecture::{
 };
 use crate::domain::entities::position::Position;
 
-use super::suites::place_suite;
+use super::suites::{entrance_faces_route, place_suite};
 use super::territories::Territory;
 
 /// Programs in descending importance, with how many of each a region wants
@@ -77,7 +77,7 @@ const LEG_END_MARGIN: f32 = 4.0;
 /// ceiling fixture lands inside the next room's wall. Rooms in a real plan
 /// either share a wall or stand clear of one another, and sharing is the
 /// connectivity graph's job, not the packer's.
-const ROOM_SEPARATION: f32 = 3.2;
+pub(super) const ROOM_SEPARATION: f32 = 3.2;
 
 /// A horizontal run of corridor that rooms can hang off.
 #[derive(Clone, Copy, Debug)]
@@ -158,7 +158,22 @@ pub(super) fn lay_out_suites(
             let mut best: Option<(f32, AssemblyInstance)> = None;
             for leg in legs {
                 let mut x = leg.x0 + LEG_END_MARGIN;
+                let mut anchor = 0u32;
                 while x <= leg.x1 - LEG_END_MARGIN {
+                    // Size is part of the placement, not a per-program
+                    // constant. Drawing one width for the whole round meant
+                    // every candidate for a program was the same room in a
+                    // different spot: a region whose legs are all short then
+                    // rejected that program everywhere (one region in 81 came
+                    // out with no assemblies at all), and the scorer's area
+                    // term could never prefer anything, because there was
+                    // nothing to prefer between. Advancing the draw per
+                    // anchor by the golden-ratio conjugate spreads sizes
+                    // low-discrepancy across the leg at no extra cost -- the
+                    // same number of candidates, now spanning the program's
+                    // size range.
+                    let aseed = (aseed + 0.618_034 * anchor as f32).fract();
+                    anchor += 1;
                     for side in [1.0f32, -1.0] {
                         let Some(candidate) = place_suite(
                             *next_id,
@@ -177,28 +192,29 @@ pub(super) fn lay_out_suites(
                         ) else {
                             continue;
                         };
-                        // The whole front wall must face corridor, not
-                        // just the anchor. A room hung off the last few
-                        // units of a leg overhangs its end, and the part
-                        // that overhangs faces fabric -- so its entrance
-                        // opens into solid wall. The old cursor walk never
-                        // hit this only because it stopped a room's width
-                        // short of the end.
+                        // The whole front wall must face corridor, not just
+                        // the anchor. A room hung off the last few units of
+                        // a leg overhangs its end, and the part that
+                        // overhangs faces fabric -- so its entrance opens
+                        // into solid wall.
+                        //
+                        // Against the leg's own span, not the anchor margin.
+                        // The margin keeps rooms from *starting* on a
+                        // junction; demanding the far wall clear it too
+                        // costs a room 8 u of leg it does not need, and a
+                        // genome whose rooms run wide then fits nowhere at
+                        // all -- one region in 81 came out empty that way,
+                        // every candidate rejected here rather than for any
+                        // architectural reason. A room flush to the end of a
+                        // leg still faces corridor along its whole front,
+                        // which is the only thing this guards.
                         let b = candidate.footprint.bounds();
-                        if b.0 < leg.x0 + LEG_END_MARGIN || b.2 > leg.x1 - LEG_END_MARGIN {
+                        if b.0 < leg.x0 || b.2 > leg.x1 {
                             continue;
                         }
-                        // Every entrance must land in a corridor's wall
-                        // band -- outside the clear width, inside the band
-                        // beyond it. An entrance sitting *in* the route is
-                        // carved full height by circulation priority and
-                        // loses the lintel that makes it read as a door.
+                        // Every entrance must read as a door onto a route.
                         if !candidate.entrances().all(|e| {
-                            spines.iter().any(|s| {
-                                let d = s.distance(e.center.x, e.center.z);
-                                d >= s.width * 0.5 - 0.05
-                                    && d <= s.width * 0.5 + wall_thickness + 0.05
-                            })
+                            entrance_faces_route(spines, e.center.x, e.center.z, wall_thickness)
                         }) {
                             continue;
                         }

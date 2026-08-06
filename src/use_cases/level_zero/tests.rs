@@ -506,7 +506,19 @@ fn abandoned_expansions_are_unlit() {
                             .corridors
                             .iter()
                             .any(|s| s.distance(probe_x, probe_z) <= s.width * 0.5);
-                        if !in_corridor {
+                        // An anomaly clipping the footprint owns the column
+                        // outright: `compose_column` samples anomalies ahead
+                        // of assemblies, so inside a region-spanning family
+                        // (a pit lattice is ~100 u across) the shell is not
+                        // being lit, it has been replaced. Same reasoning as
+                        // the corridor exemption above — another system owns
+                        // this column, and this test is about the room's own
+                        // fixtures.
+                        let in_anomaly = plan
+                            .anomalies
+                            .iter()
+                            .any(|an| an.contains(probe_x, probe_z));
+                        if !in_corridor && !in_anomaly {
                             let c = BackroomsLevel::plan_column(
                                 plan, &noise, 42, &tuning, probe_x, probe_z,
                             );
@@ -1738,8 +1750,15 @@ fn peripheral_shift_rearranges_fabric_but_never_the_plan() {
             }
             let planned = corridor_interior
                 || plan.assemblies.iter().any(|a| {
+                    // How far an assembly actually reaches: shell hosts run
+                    // *along* the footprint boundary and own points within
+                    // half their thickness of it (`HostSegment::contains_plan`),
+                    // so the outer face is half a wall past the bounds, not
+                    // a whole one. A full-thickness margin claims 0.2 u of
+                    // genuine fabric on every side as "planned" — and that
+                    // strip is fabric, so it drifts, as it should.
                     let b = a.footprint.bounds();
-                    let m = PLAN_WALL_T + 0.05;
+                    let m = PLAN_WALL_T * 0.5 + 0.05;
                     wx >= b.0 - m && wx <= b.2 + m && wz >= b.1 - m && wz <= b.3 + m
                 })
                 || plan

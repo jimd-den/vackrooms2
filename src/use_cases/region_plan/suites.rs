@@ -6,25 +6,6 @@ use crate::domain::entities::position::Position;
 
 use super::{EDGE_MARGIN, PLAN_WALL_T, snap};
 
-/// The suite program palette placed beside main corridors, roughly weighted.
-/// Large, unfinished open-office masses dominate. Small private rooms remain
-/// present only as occasional evidence that this once had an office program.
-#[allow(dead_code)]
-pub(super) const SUITE_PROGRAMS: [SpaceProgram; 12] = [
-    SpaceProgram::OpenOffice,
-    SpaceProgram::OpenOffice,
-    SpaceProgram::OpenOffice,
-    SpaceProgram::OpenOffice,
-    SpaceProgram::OpenOffice,
-    SpaceProgram::ConferenceRoom,
-    SpaceProgram::ConferenceRoom,
-    SpaceProgram::BreakRoom,
-    SpaceProgram::Storage,
-    SpaceProgram::ServerRoom,
-    SpaceProgram::WaitingArea,
-    SpaceProgram::PrivateOffice,
-];
-
 fn ceiling_height_for(program: SpaceProgram, aseed: f32) -> f32 {
     match program {
         SpaceProgram::Atrium => 4.8 + 0.6 * aseed,
@@ -504,6 +485,42 @@ fn evolve_partitions(segments: &[(Position, Position)], density: f32, seed: f32)
 
 pub(super) fn aabb_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32), gap: f32) -> bool {
     a.0 < b.2 + gap && b.0 < a.2 + gap && a.1 < b.3 + gap && b.1 < a.3 + gap
+}
+
+/// Does an opening at `(x, z)` read as a door onto a route?
+///
+/// Two conditions, and the second is the one that is easy to miss: the
+/// opening must sit in *some* corridor's wall band -- outside the clear
+/// width, inside the band beyond it -- and inside *no* corridor's clear
+/// width. Corridors cross, so an entrance correctly banded against the run
+/// its room hangs off can still sit squarely inside a perpendicular one.
+/// There, `compose_column` takes the circulation branch before it ever
+/// reaches the assembly: the column is carved full height and the doorway
+/// loses the lintel that makes it read as a door rather than a gap.
+///
+/// Checking only "is banded against some corridor" is what let that
+/// through; both callers that place doors need the same answer, so they
+/// share this one.
+pub(super) fn entrance_faces_route(
+    spines: &[CirculationSpine],
+    x: f32,
+    z: f32,
+    wall_thickness: f32,
+) -> bool {
+    let mut banded = false;
+    for spine in spines {
+        let d = spine.distance(x, z);
+        let half = spine.width * 0.5;
+        // Matches `compose_column`'s own test for "this column belongs to
+        // circulation", so the two can never disagree about a threshold.
+        if d <= half {
+            return false;
+        }
+        if d <= half + wall_thickness + 0.05 {
+            banded = true;
+        }
+    }
+    banded
 }
 
 /// Places one suite beside a horizontal corridor segment. Returns `None` if

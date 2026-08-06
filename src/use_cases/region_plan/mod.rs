@@ -98,15 +98,8 @@ mod debug;
 mod genome;
 mod suites;
 // Phase 2 steps 2-3: free-space decomposition and scored greedy placement.
-// Built, unit-tested, and proven to lift a region from 2 rooms to 6 with a
-// real program mix -- but still not driving `generate_region_plan`. Wiring
-// it in leaves three failures (`rare_doorways_still_have_lintels`,
-// `red_rooms_are_lit_red_but_never_built_red`, and
-// `peripheral_shift_rearranges_fabric_but_never_the_plan`), down from five.
-// Kept compiled so the remaining diagnosis runs against a green tree.
-#[allow(dead_code)]
+// These drive `generate_region_plan` -- see the placement pass below.
 mod layout;
-#[allow(dead_code)]
 mod territories;
 #[cfg(test)]
 mod tests;
@@ -116,7 +109,6 @@ pub use genome::derive_genome;
 
 use circulation::build_corridors;
 use corruption::corrupt;
-use suites::{SUITE_PROGRAMS, place_suite};
 
 /// Pure, deterministic plan for the region whose lower-left corner is
 /// `region_origin` (must lie on the region lattice).
@@ -149,66 +141,43 @@ pub fn generate_region_plan(
 
     let corridors = build_corridors(seed, rx, rz, &dominant, region_origin, region_size);
 
-    // --- incomplete masses beside the dominant route -----------------------
-    // Only the primary route receives masses. The secondary stubs remain
-    // mostly exposed circulation, which prevents a region from resolving
-    // into a tiled office floorplan.
+    // --- incomplete masses beside circulation -------------------------------
+    // Scored greedy placement over the region's free space: decompose what
+    // circulation leaves, then let each program in the budget simulate every
+    // seat on every leg and commit the best. Every spine offers legs, not
+    // only the dominant one -- a secondary hall with nothing on it is a
+    // corridor to nowhere, which reads as liminal only when authored.
     let mut assemblies: Vec<AssemblyInstance> = Vec::new();
     let mut taken: Vec<(f32, f32, f32, f32)> = Vec::new();
     let mut id = 0u32;
-    let legs: Vec<(f32, f32, f32, f32)> = corridors
-        .iter()
-        .filter(|s| s.spine_kind == SpaceProgram::MainCorridor)
-        .flat_map(|s| {
-            let w = s.width;
-            s.path
-                .windows(2)
-                .filter(|seg| seg[0].z == seg[1].z)
-                .map(move |seg| (seg[0].x.min(seg[1].x), seg[0].x.max(seg[1].x), seg[0].z, w))
-                .collect::<Vec<_>>()
-        })
-        .filter(|(a, b, _, _)| b - a >= 14.0)
-        .collect();
+    let placement_legs = layout::legs_of(&corridors, 14.0);
+    let territories = territories::free_territories(
+        region_origin.x,
+        region_origin.z,
+        region_size,
+        &corridors,
+        &taken,
+        EDGE_MARGIN,
+        PLAN_WALL_T,
+    );
+    assemblies.extend(layout::lay_out_suites(
+        &|k| hash01(seed, &[k, rx, rz]),
+        &dominant,
+        &placement_legs,
+        &territories,
+        region_origin,
+        region_size,
+        PLAN_WALL_T,
+        &corridors,
+        &mut taken,
+        &mut id,
+    ));
 
-    for (li, &(lx0, lx1, lz, lw)) in legs.iter().enumerate() {
-        let mut cursor = lx0 + 4.0;
-        let mut side = if h(40 + li as i64) < 0.5 { 1.0 } else { -1.0 };
-        while cursor < lx1 - 12.0 {
-            let aseed = hash01(seed, &[0x5EA, rx, rz, id as i64]);
-            let threshold_seed = hash01(seed, &[0x7A11, rx, rz, id as i64]);
-            // Leave substantial pieces of the route exposed. When a mass is
-            // placed, the next candidate begins 8--16 u beyond its end.
-            if hash01(seed, &[0x5E8, rx, rz, id as i64]) < 0.62 {
-                let program = SUITE_PROGRAMS[pick_index(aseed, SUITE_PROGRAMS.len())];
-                if let Some(a) = place_suite(
-                    id,
-                    program,
-                    &dominant,
-                    aseed,
-                    threshold_seed,
-                    cursor,
-                    lz,
-                    lw * 0.5 + PLAN_WALL_T * 0.5,
-                    side,
-                    region_origin,
-                    region_size,
-                    &taken,
-                    &corridors,
-                ) {
-                    let b = a.footprint.bounds();
-                    cursor += (b.2 - b.0) + 8.0 + 8.0 * threshold_seed;
-                    taken.push(b);
-                    assemblies.push(a);
-                } else {
-                    cursor += 8.0 + 8.0 * threshold_seed;
-                }
-            } else {
-                cursor += 8.0 + 8.0 * threshold_seed;
-            }
-            side = -side;
-            id += 1;
-        }
-    }
+    // The stair placer wants raw leg spans, not placement candidates.
+    let legs: Vec<(f32, f32, f32, f32)> = placement_legs
+        .iter()
+        .map(|l| (l.x0, l.x1, l.z, l.half_width * 2.0))
+        .collect();
 
     // --- corruption pass ----------------------------------------------------
     corrupt(

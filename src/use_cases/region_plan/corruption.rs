@@ -10,7 +10,7 @@ use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::world_topology::hash01;
 
-use super::suites::{aabb_overlap, place_suite};
+use super::suites::{aabb_overlap, entrance_faces_route, place_suite};
 use super::{EDGE_MARGIN, PLAN_WALL_T, REGION_SIZE, pick_index, region_index, snap, spawn_point};
 
 /// Backrooms corruption: the plan was sane; the building is not. Pure
@@ -38,25 +38,22 @@ pub(super) fn corrupt(
     if h(1) < 0.6 {
         let src = pick_index(h(2), assemblies.len());
         let shift = snap(12.0 + 12.0 * h(3));
-        // Try a spread of offsets rather than exactly one. A single
-        // candidate was enough when a region held two suites and the floor
-        // was mostly empty; against a fully laid-out floor one offset
-        // almost always lands on a neighbour, and duplication -- the most
-        // recognizably Backrooms corruption there is -- silently never
-        // happened. Mirrored and halved offsets first keep the copy near
-        // its source, which is what makes the repetition legible.
-        let dup = [
-            shift,
-            -shift,
-            shift * 0.5,
-            -shift * 0.5,
-            shift * 1.5,
-            -shift * 1.5,
-        ]
-        .into_iter()
-        .find_map(|offset| {
-            duplicate_suite_candidate(assemblies, taken, spines, rx, rz, src, snap(offset))
-        });
+        let dup = duplication_skews(&assemblies[src], spines)
+            .into_iter()
+            .find_map(|skew| {
+                duplication_offsets(shift).into_iter().find_map(|offset| {
+                    duplicate_suite_candidate(
+                        assemblies,
+                        taken,
+                        spines,
+                        rx,
+                        rz,
+                        src,
+                        snap(offset),
+                        skew,
+                    )
+                })
+            });
         if let Some(dup) = dup {
             taken.push(dup.footprint.bounds());
             assemblies.push(dup);
@@ -84,11 +81,94 @@ pub(super) fn corrupt(
     }
 }
 
+/// Longitudinal offsets a duplicate is tried at, in preference order.
+///
+/// The authored distance first, then further down the corridor, then closer
+/// than authored. A fixed ladder of six offsets was enough when a region
+/// held two suites and the floor was mostly empty; against a floor the
+/// placement solver has actually laid out, every one of them lands on a
+/// neighbour, and duplication -- the most recognizably Backrooms corruption
+/// there is -- silently stopped happening in all 36 test regions. Sweeping
+/// finds whatever gap the solver left instead of guessing where one might
+/// be, and keeping the authored distance first means the seed still decides
+/// where the copy *wants* to sit; the sweep only decides where it can.
+fn duplication_offsets(shift: f32) -> Vec<f32> {
+    let authored = shift.abs().max(DUPLICATE_STEP);
+    let mut out = Vec::new();
+    let mut d = authored;
+    while d <= DUPLICATE_MAX_OFFSET {
+        out.push(d);
+        out.push(-d);
+        d += DUPLICATE_STEP;
+    }
+    let mut d = authored - DUPLICATE_STEP;
+    while d >= DUPLICATE_STEP {
+        out.push(d);
+        out.push(-d);
+        d -= DUPLICATE_STEP;
+    }
+    out
+}
+
+/// Sweep pitch for duplicate offsets. Matches the placement solver's anchor
+/// pitch, so a gap the solver could seat a room in is one this can find.
+const DUPLICATE_STEP: f32 = 2.0;
+
+/// Perpendicular offsets a duplicate is tried at: its own corridor first,
+/// then every other parallel run in the region.
+///
+/// Staying on the source's own corridor run is the cleanest repetition, but
+/// it is also where there is least space -- the placement solver has
+/// already seated rooms along that leg, and a copy needs as much clearance
+/// as any other room. The free space is on the *other* runs. Moving the
+/// copy by the centerline distance between two parallel corridors lands it
+/// at the same offset from its new corridor as it had from its old, so the
+/// entrance stays in a wall band and faces a route; `duplicate_suite_candidate`
+/// re-checks that rather than trusting it.
+fn duplication_skews(source: &AssemblyInstance, spines: &[CirculationSpine]) -> Vec<f32> {
+    let mut out = vec![0.0];
+    let Some(entrance) = source.primary_entrance() else {
+        return out;
+    };
+    // The centerline the source's entrance actually sits against.
+    let Some(host_z) = spines
+        .iter()
+        .flat_map(|s| s.path.windows(2))
+        .filter(|seg| (seg[0].z - seg[1].z).abs() <= 1e-4)
+        .map(|seg| seg[0].z)
+        .min_by(|a, b| {
+            (a - entrance.center.z)
+                .abs()
+                .total_cmp(&(b - entrance.center.z).abs())
+        })
+    else {
+        return out;
+    };
+    let mut targets: Vec<f32> = spines
+        .iter()
+        .flat_map(|s| s.path.windows(2))
+        .filter(|seg| (seg[0].z - seg[1].z).abs() <= 1e-4)
+        .map(|seg| seg[0].z - host_z)
+        .filter(|skew| skew.abs() > 1e-4)
+        .collect();
+    // Nearest parallel run first, and deterministic: two queries of this
+    // region must order the candidates identically.
+    targets.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
+    targets.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+    out.extend(targets);
+    out
+}
+
+/// How far down the corridor a copy may sit from its source. Beyond a
+/// region there is no shared corridor to repeat along.
+const DUPLICATE_MAX_OFFSET: f32 = REGION_SIZE;
+
 /// Rule 1: a suite repeats itself further down the corridor, slightly wrong.
 /// Pure — reads the existing plan, returns the candidate duplicate (already
 /// translated, with its misalignment recorded) or `None` if it would fall
 /// outside the region, overlap something already placed, or seal itself
 /// away from every corridor. The caller decides whether to keep it.
+#[allow(clippy::too_many_arguments)]
 fn duplicate_suite_candidate(
     assemblies: &[AssemblyInstance],
     taken: &[(f32, f32, f32, f32)],
@@ -97,11 +177,12 @@ fn duplicate_suite_candidate(
     rz: i64,
     src: usize,
     shift: f32,
+    skew: f32,
 ) -> Option<AssemblyInstance> {
-    // Keep the copied threshold flush with its source corridor. The
-    // repetition is wrong in its longitudinal position, not sealed away
-    // behind an accidental strip of wall.
-    let skew = 0.0;
+    // `skew` moves the copy between parallel corridor runs, never off a
+    // corridor: the repetition is wrong in its position, not sealed away
+    // behind an accidental strip of wall. The `reachable` check below is
+    // what actually enforces that.
     let mut dup = assemblies[src].clone();
     dup.translate(shift, skew);
     dup.id = assemblies.len() as u32 + 1000;
@@ -112,20 +193,20 @@ fn duplicate_suite_candidate(
         && b.2 < (rx + 1) as f32 * REGION_SIZE - EDGE_MARGIN
         && b.1 > rz as f32 * REGION_SIZE + EDGE_MARGIN
         && b.3 < (rz + 1) as f32 * REGION_SIZE - EDGE_MARGIN;
-    // The skewed entrance must still reach a corridor, or the copy would be
-    // a sealed pocket.
-    // The entrance must land in a corridor's *wall band* -- outside the
-    // clear width, inside the band beyond it. Merely being "near enough" to
-    // a corridor also admits an entrance sitting in the middle of the
-    // route, where circulation priority carves the column full height and
-    // the doorway loses the lintel that makes it read as a door.
-    let reachable = dup.entrances().any(|e| {
-        spines.iter().any(|s| {
-            let d = s.distance(e.center.x, e.center.z);
-            d >= s.width * 0.5 - 0.05 && d <= s.width * 0.5 + PLAN_WALL_T + 0.05
-        })
-    });
-    (inside && reachable && !taken.iter().any(|t| aabb_overlap(*t, b, 0.4))).then_some(dup)
+    // The moved entrance must still read as a door onto a route, or the
+    // copy would be a sealed pocket.
+    let reachable = dup
+        .entrances()
+        .any(|e| entrance_faces_route(spines, e.center.x, e.center.z, PLAN_WALL_T));
+    // The same clearance the placement solver keeps between rooms, not a
+    // looser one. A copy squeezed into a 0.4 u gap is close enough that a
+    // neighbour's ceiling fixture samples inside this shell -- which reads
+    // as an abandoned expansion that is somehow still lit. Rooms in a real
+    // plan either share a wall or stand clear; a duplicate is no exception.
+    let clear = !taken
+        .iter()
+        .any(|t| aabb_overlap(*t, b, super::layout::ROOM_SEPARATION));
+    (inside && reachable && clear).then_some(dup)
 }
 
 /// Rule 2: one assembly was built and then never occupied — an empty shell,
@@ -487,7 +568,7 @@ mod tests {
         let assemblies = vec![minimal_assembly(0, 20.0, SUITE_FRONT_Z)];
         let taken = [];
         let spines = [corridor_spine()];
-        let dup = duplicate_suite_candidate(&assemblies, &taken, &spines, 0, 0, 0, 24.0)
+        let dup = duplicate_suite_candidate(&assemblies, &taken, &spines, 0, 0, 0, 24.0, 0.0)
             .expect("an unobstructed duplicate inside the region must be produced");
         assert_eq!(dup.footprint.bounds().0, 44.0, "duplicate was not shifted");
         assert_eq!(dup.corruption.misalignment, (24.0, 0.0));
@@ -504,7 +585,7 @@ mod tests {
         let taken = [(44.0, SUITE_FRONT_Z, 58.0, SUITE_FRONT_Z + 10.0)];
         let spines = [corridor_spine()];
         assert!(
-            duplicate_suite_candidate(&assemblies, &taken, &spines, 0, 0, 0, 24.0).is_none(),
+            duplicate_suite_candidate(&assemblies, &taken, &spines, 0, 0, 0, 24.0, 0.0).is_none(),
             "a duplicate overlapping taken space must be rejected"
         );
     }
@@ -516,7 +597,7 @@ mod tests {
         let spines = [corridor_spine()];
         // A large shift pushes the copy past the region's far edge.
         assert!(
-            duplicate_suite_candidate(&assemblies, &taken, &spines, 0, 0, 0, 40.0).is_none(),
+            duplicate_suite_candidate(&assemblies, &taken, &spines, 0, 0, 0, 40.0, 0.0).is_none(),
             "a duplicate crossing the region boundary must be rejected"
         );
     }

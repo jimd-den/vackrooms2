@@ -53,17 +53,9 @@ impl Territory {
         )
     }
 
-    /// Long side over short side, >= 1. The interior-design literature
-    /// calls habitable proportions somewhere in 1.0..=1.8; a 6:1 slot is a
-    /// leftover gap, not a room.
-    pub fn aspect(&self) -> f32 {
-        let (w, d) = (self.width(), self.depth());
-        if w <= 0.0 || d <= 0.0 {
-            return f32::INFINITY;
-        }
-        w.max(d) / w.min(d)
-    }
-
+    /// Only the overlap assertions need a territory as a raw tuple; the
+    /// solver scores territories through `center`/`width`/`depth`.
+    #[cfg(test)]
     pub fn bounds(&self) -> (f32, f32, f32, f32) {
         (self.min_x, self.min_z, self.max_x, self.max_z)
     }
