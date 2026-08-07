@@ -6,6 +6,9 @@
     "build:wasm": "node scripts/build-wasm.mjs",
     "check:wasm": "node scripts/check-wasm-fresh.mjs",
     "play": "cargo run -p wasm_frontend --bin play --release --",
-    "build:single": "npm run build:wasm && node scripts/build-single-file.mjs"
+    "build:single": "npm run build:wasm && node scripts/build-single-file.mjs",
+    "view": "cargo run -p wasm_frontend --release --example scene_view",
+    "view:plan": "cargo run --release --example plan_view",
+    "view:section": "cargo run --release --example section_view"
   }
 }
