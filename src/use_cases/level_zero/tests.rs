@@ -3,7 +3,7 @@ use super::*;
 use crate::domain::entities::anomaly::{
     AnomalyInstance, AnomalyKind, RealitySnapshot, WorldBounds,
 };
-use crate::domain::entities::architecture::{OpeningRole, SpaceProgram};
+use crate::domain::entities::architecture::{CeilingLanguage, OpeningRole, SpaceProgram};
 use crate::domain::entities::position::Position;
 use crate::domain::entities::voxel_grid::{
     VOXEL_AGED_WALLPAPER, VOXEL_AIR, VOXEL_FLOOR, VOXEL_STAINED_CARPET, VOXEL_STICKY_CARPET,
@@ -682,6 +682,62 @@ fn open_fabric_ceiling_steps_receive_supported_bulkheads() {
     assert!(
         checked > 8,
         "sample did not cross enough ceiling territories"
+    );
+}
+
+/// The authored ceiling band — a room's single contradiction of its own
+/// baseline — must actually reach the voxel columns: sampling at the band's
+/// center must carry the band height, never the base height that shadows it
+/// in a flat zone list. Regression for the lookup whose first-match order
+/// let the whole-footprint base swallow every band.
+#[test]
+fn authored_ceiling_bands_reach_the_columns() {
+    let noise = TestNoise;
+    let tuning = LevelTuning::default();
+    let config = GeneratorConfig::low_spec();
+    let mut checked = 0usize;
+    for seed in [42u32, 7, 99, 1234, 5, 6, 8, 10, 11, 12] {
+        let plans =
+            BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, seed, &config, &noise);
+        let plan = plans.plan_for_region(0, 0).unwrap();
+        for a in &plan.assemblies {
+            let Some(band) = a.ceiling.zones().nth(1) else {
+                continue;
+            };
+            let (bx0, bz0, bx1, bz1) = band.area.bounds();
+            let (bx, bz) = ((bx0 + bx1) * 0.5, (bz0 + bz1) * 0.5);
+            // Circulation beats assemblies by priority: a corridor running
+            // through the band legitimately owns its columns, and an anomaly
+            // replacing the room replaces its ceiling. This test is about
+            // the room's own bands where the room still owns the floor.
+            if plan
+                .corridors
+                .iter()
+                .any(|c| c.distance(bx, bz) <= c.width * 0.5)
+                || plan
+                    .anomalies
+                    .iter()
+                    .any(|an| an.kind != AnomalyKind::RedRoom && an.contains(bx, bz))
+            {
+                continue;
+            }
+            let column = BackroomsLevel::plan_column(plan, &noise, seed, &tuning, bx, bz);
+            if column.solid {
+                continue; // a structural column or partition owns the sample
+            }
+            let soffit = band.language == CeilingLanguage::ExposedSoffit;
+            let expected = band.height_units - if soffit { 0.2 } else { 0.0 };
+            checked += 1;
+            assert!(
+                (column.ceiling_units - expected).abs() < 0.01,
+                "band ceiling not applied at ({bx},{bz}): column {:.3} expected {expected:.3}",
+                column.ceiling_units
+            );
+        }
+    }
+    assert!(
+        checked > 8,
+        "sample did not cross enough banded assemblies"
     );
 }
 

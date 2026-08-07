@@ -391,6 +391,94 @@ pub struct CeilingZone {
     pub height_units: f32,
 }
 
+/// An assembly's ceiling: a base treatment plus authored overrides, with
+/// priority carried by the structure instead of by list order. A flat
+/// `Vec<CeilingZone>` let the whole-footprint base shadow the band that
+/// contradicts it (first-match lookup, insertion-order resolution); here
+/// overrides are consulted before the base by construction, so a ceiling
+/// change can never be unreachable.
+#[derive(Clone, Debug, Default)]
+pub struct CeilingPlan {
+    base: Option<CeilingZone>,
+    overrides: Vec<CeilingZone>,
+}
+
+impl CeilingPlan {
+    /// No authored ceiling; columns fall back to the level's default.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// One flat ceiling over the footprint.
+    pub fn flat(zone: CeilingZone) -> Self {
+        Self {
+            base: Some(zone),
+            overrides: Vec::new(),
+        }
+    }
+
+    /// A base ceiling contradicted by authored bands.
+    pub fn banded(base: CeilingZone, overrides: Vec<CeilingZone>) -> Self {
+        debug_assert!(
+            overrides
+                .iter()
+                .all(|zone| bounds_within(&zone.area, &base.area)),
+            "a ceiling override must stay inside the base zone it contradicts"
+        );
+        Self {
+            base: Some(base),
+            overrides,
+        }
+    }
+
+    /// Every zone, base first, for renderers that draw them all.
+    pub fn zones(&self) -> impl Iterator<Item = &CeilingZone> {
+        self.base.iter().chain(&self.overrides)
+    }
+
+    fn zones_mut(&mut self) -> impl Iterator<Item = &mut CeilingZone> {
+        self.base.iter_mut().chain(&mut self.overrides)
+    }
+
+    /// The zone owning a column: an override containing the point beats the
+    /// base; outside both, the nearest zone owns wall bands that sit a
+    /// fraction outside every authored polygon.
+    pub fn zone_at(&self, x: f32, z: f32) -> Option<&CeilingZone> {
+        if let Some(zone) = self
+            .overrides
+            .iter()
+            .find(|zone| zone.area.contains(x, z))
+        {
+            return Some(zone);
+        }
+        if let Some(base) = &self.base
+            && base.area.contains(x, z)
+        {
+            return Some(base);
+        }
+        self.zones()
+            .min_by(|a, b| distance_to_zone(a, x, z).total_cmp(&distance_to_zone(b, x, z)))
+    }
+
+    /// Finished ceiling height at a column, if this assembly authors one.
+    pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        self.zone_at(x, z).map(|zone| zone.height_units)
+    }
+}
+
+fn bounds_within(inner: &Polygon2, outer: &Polygon2) -> bool {
+    let (ix0, iz0, ix1, iz1) = inner.bounds();
+    let (ox0, oz0, ox1, oz1) = outer.bounds();
+    ix0 >= ox0 - 1e-3 && iz0 >= oz0 - 1e-3 && ix1 <= ox1 + 1e-3 && iz1 <= oz1 + 1e-3
+}
+
+fn distance_to_zone(zone: &CeilingZone, wx: f32, wz: f32) -> f32 {
+    let (x0, z0, x1, z1) = zone.area.bounds();
+    let dx = if wx < x0 { x0 - wx } else if wx > x1 { wx - x1 } else { 0.0 };
+    let dz = if wz < z0 { z0 - wz } else if wz > z1 { wz - z1 } else { 0.0 };
+    dx * dx + dz * dz
+}
+
 /// One light fixture, tied to a ceiling module (not a free grid point).
 #[derive(Clone, Copy, Debug)]
 pub struct Fixture {
@@ -454,7 +542,7 @@ pub struct AssemblyInstance {
     pub door_leaves: Vec<DoorLeaf>,
     pub spaces: Vec<Space>,
     pub structure: StructuralSystemInstance,
-    pub ceiling_zones: Vec<CeilingZone>,
+    pub ceiling: CeilingPlan,
     pub fixtures: Vec<Fixture>,
     pub service_voids: Vec<ServiceVoid>,
     pub corruption: CorruptionProfile,
@@ -489,7 +577,7 @@ impl AssemblyInstance {
         for space in &mut self.spaces {
             translate_polygon(&mut space.footprint);
         }
-        for zone in &mut self.ceiling_zones {
+        for zone in &mut self.ceiling.zones_mut() {
             translate_polygon(&mut zone.area);
         }
         for service_void in &mut self.service_voids {
@@ -713,15 +801,39 @@ mod tests {
                 phase: (0.0, 0.0),
                 column_side: 0.4,
             },
-            ceiling_zones: vec![CeilingZone {
+            ceiling: CeilingPlan::flat(CeilingZone {
                 area: footprint,
                 language: CeilingLanguage::FlatTiles,
                 height_units: 3.4,
-            }],
+            }),
             fixtures: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile::default(),
         }
+    }
+
+    #[test]
+    fn ceiling_overrides_outrank_the_base_they_contradict() {
+        let plan = CeilingPlan::banded(
+            CeilingZone {
+                area: Polygon2::rect(0.0, 0.0, 10.0, 10.0),
+                language: CeilingLanguage::FlatTiles,
+                height_units: 3.6,
+            },
+            vec![CeilingZone {
+                area: Polygon2::rect(4.0, 0.0, 2.0, 10.0),
+                language: CeilingLanguage::Coffered,
+                height_units: 4.4,
+            }],
+        );
+        assert_eq!(plan.height_at(5.0, 5.0), Some(4.4), "band owns its strip");
+        assert_eq!(plan.height_at(1.0, 5.0), Some(3.6), "base owns the rest");
+        assert_eq!(
+            plan.height_at(-0.1, 5.0),
+            Some(3.6),
+            "outside every zone the nearest zone owns the wall band"
+        );
+        assert_eq!(CeilingPlan::none().height_at(5.0, 5.0), None);
     }
 
     #[test]

@@ -39,7 +39,7 @@ fn ceiling_bands_for(
     base: CeilingZone,
     genome: &ArchitectGenome,
     aseed: f32,
-) -> Vec<CeilingZone> {
+) -> CeilingPlan {
     /// Fraction of rooms that get a band at all. Most ceilings stay flat,
     /// so the ones that do not are events.
     const BAND_SHARE: f32 = 0.45;
@@ -49,7 +49,7 @@ fn ceiling_bands_for(
     let (x0, z0, x1, z1) = footprint.bounds();
     let (width, depth) = (x1 - x0, z1 - z0);
     if width.min(depth) < MIN_SIDE || keyed_unit(aseed, 0xBA4D) > BAND_SHARE {
-        return vec![base];
+        return CeilingPlan::flat(base);
     }
 
     // The band crosses the room's *long* axis, so it is something you pass
@@ -60,7 +60,7 @@ fn ceiling_bands_for(
     // Kept off the room's ends, so the band never merges with a wall.
     let free = span - band_width - 2.0 * PLAN_WALL_T;
     if free <= 0.0 {
-        return vec![base];
+        return CeilingPlan::flat(base);
     }
     let offset = snap(PLAN_WALL_T + free * keyed_unit(aseed, 0xBA60));
 
@@ -80,9 +80,9 @@ fn ceiling_bands_for(
         base.height_units + 0.6 + 0.8 * keyed_unit(aseed, 0xBA61)
     };
 
-    vec![
+    CeilingPlan::banded(
         base,
-        CeilingZone {
+        vec![CeilingZone {
             area: band_area,
             language: if compress {
                 CeilingLanguage::ExposedSoffit
@@ -90,8 +90,8 @@ fn ceiling_bands_for(
                 CeilingLanguage::Coffered
             },
             height_units: height,
-        },
-    ]
+        }],
+    )
 }
 
 fn structure_for(genome: &ArchitectGenome, aseed: f32) -> StructuralSystemInstance {
@@ -635,7 +635,7 @@ pub(super) fn place_suite(
         program,
         spaces: layout.spaces,
         structure: structure_for(genome, aseed),
-        ceiling_zones: ceiling_bands_for(&footprint, ceiling, genome, aseed),
+        ceiling: ceiling_bands_for(&footprint, ceiling, genome, aseed),
         fixtures: fixtures_for(genome, &footprint, true, aseed),
         service_voids: Vec::new(),
         corruption: CorruptionProfile::default(),
@@ -840,7 +840,8 @@ mod tests {
             ] {
                 let mut genome = genome_with(0.5, 0.5);
                 genome.ceiling_language = language;
-                let zones = ceiling_bands_for(&footprint, base.clone(), &genome, aseed);
+                let plan = ceiling_bands_for(&footprint, base.clone(), &genome, aseed);
+                let zones: Vec<&CeilingZone> = plan.zones().collect();
                 assert!(zones.len() <= 2, "one contradiction per room, not several");
                 assert_eq!(zones[0].height_units, base.height_units, "baseline kept");
                 let Some(band) = zones.get(1) else { continue };
@@ -882,7 +883,8 @@ mod tests {
         };
         let genome = genome_with(0.5, 0.5);
         for step in 0..32 {
-            let zones = ceiling_bands_for(&footprint, base.clone(), &genome, step as f32 / 32.0);
+            let plan = ceiling_bands_for(&footprint, base.clone(), &genome, step as f32 / 32.0);
+            let zones: Vec<&CeilingZone> = plan.zones().collect();
             assert_eq!(zones.len(), 1, "a small room cannot carry a band");
         }
     }

@@ -26,8 +26,9 @@
 //! * the profile is a pure function of world position and the assembly.
 
 use crate::domain::entities::architecture::{
-    AssemblyInstance, CeilingZone, CorruptionProfile, Fixture, HostId, HostSegment, Opening,
-    OpeningId, OpeningRole, Polygon2, SpaceProgram, StructuralSystem, StructuralSystemInstance,
+    AssemblyInstance, CeilingPlan, CeilingZone, CorruptionProfile, Fixture, HostId, HostSegment,
+    Opening, OpeningId, OpeningRole, Polygon2, SpaceProgram, StructuralSystem,
+    StructuralSystemInstance,
 };
 use crate::domain::entities::position::Position;
 use crate::domain::entities::world_topology::{VerticalLink, VerticalLinkKind};
@@ -164,11 +165,11 @@ pub(crate) fn place_stairwell(
             phase: (0.0, 0.0),
             column_side: 0.4,
         },
-        ceiling_zones: vec![CeilingZone {
+        ceiling: CeilingPlan::flat(CeilingZone {
             area: footprint.clone(),
             language: crate::domain::entities::architecture::CeilingLanguage::ExposedSoffit,
             height_units: STAIR_CEILING_UNITS,
-        }],
+        }),
         fixtures,
         service_voids: Vec::new(),
         corruption: CorruptionProfile::default(),
@@ -259,7 +260,7 @@ mod tests {
                 phase: (0.0, 0.0),
                 column_side: 0.4,
             },
-            ceiling_zones: Vec::new(),
+            ceiling: CeilingPlan::none(),
             fixtures: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile::default(),

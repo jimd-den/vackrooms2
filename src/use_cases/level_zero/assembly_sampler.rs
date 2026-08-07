@@ -3,47 +3,12 @@
 //! contradictory grid), and fixtures on the room's ceiling modules.
 
 use crate::domain::entities::architecture::{
-    AssemblyInstance, CeilingLanguage, CeilingZone, StructuralSystem, StructuralSystemInstance,
+    AssemblyInstance, CeilingLanguage, StructuralSystem, StructuralSystemInstance,
 };
 use crate::use_cases::generate_chunk::LevelTuning;
 
 use super::fixture_plan::{FixtureOwner, fixture_at};
 use super::{BackroomsLevel, ColumnPlan};
-
-fn distance_to_zone(zone: &CeilingZone, wx: f32, wz: f32) -> f32 {
-    let (x0, z0, x1, z1) = zone.area.bounds();
-    let dx = if wx < x0 {
-        x0 - wx
-    } else if wx > x1 {
-        wx - x1
-    } else {
-        0.0
-    };
-    let dz = if wz < z0 {
-        z0 - wz
-    } else if wz > z1 {
-        wz - z1
-    } else {
-        0.0
-    };
-    dx * dx + dz * dz
-}
-
-/// A ceiling zone owns the columns inside its polygon. Wall bands can sit a
-/// fraction outside both adjacent polygons, so they inherit the nearest zone
-/// rather than falling back to whichever zone happened to be stored first.
-fn ceiling_zone_at(assembly: &AssemblyInstance, wx: f32, wz: f32) -> Option<&CeilingZone> {
-    assembly
-        .ceiling_zones
-        .iter()
-        .find(|zone| zone.area.contains(wx, wz))
-        .or_else(|| {
-            assembly
-                .ceiling_zones
-                .iter()
-                .min_by(|a, b| distance_to_zone(a, wx, wz).total_cmp(&distance_to_zone(b, wx, wz)))
-        })
-}
 
 impl BackroomsLevel {
     /// Is (wx, wz) on a structural column of this system?
@@ -74,7 +39,7 @@ impl BackroomsLevel {
         wz: f32,
     ) -> ColumnPlan {
         let walls_on = tuning.walls > 0.0;
-        let zone = ceiling_zone_at(a, wx, wz);
+        let zone = a.ceiling.zone_at(wx, wz);
         let mut ceiling_units = zone.map_or(3.4, |c| c.height_units);
         // Coffered reads as a shading pattern now (see the splat shader),
         // not stepped geometry.
@@ -135,11 +100,12 @@ impl BackroomsLevel {
         }
 
         // Fixtures follow the assembly's ceiling zones and structural grid.
-        if !plan.solid && tuning.lights > 0.0 {
-            if let Some(zone) = ceiling_zone_at(a, wx, wz) {
-                plan.fixture =
-                    fixture_at(seed, FixtureOwner::Assembly { assembly: a, zone }, wx, wz);
-            }
+        if !plan.solid
+            && tuning.lights > 0.0
+            && let Some(zone) = a.ceiling.zone_at(wx, wz)
+        {
+            plan.fixture =
+                fixture_at(seed, FixtureOwner::Assembly { assembly: a, zone }, wx, wz);
         }
         plan
     }
@@ -149,8 +115,8 @@ impl BackroomsLevel {
 mod tests {
     use super::*;
     use crate::domain::entities::architecture::{
-        AssemblyInstance, CeilingZone, CorruptionProfile, HostSegment, Polygon2, SpaceProgram,
-        StructuralSystem,
+        AssemblyInstance, CeilingPlan, CeilingZone, CorruptionProfile, HostSegment, Polygon2,
+        SpaceProgram, StructuralSystem,
     };
 
     fn zoned_assembly() -> AssemblyInstance {
@@ -170,18 +136,18 @@ mod tests {
                 phase: (0.0, 0.0),
                 column_side: 0.4,
             },
-            ceiling_zones: vec![
+            ceiling: CeilingPlan::banded(
                 CeilingZone {
-                    area: Polygon2::rect(0.0, 0.0, 5.0, 4.0),
+                    area: footprint,
                     language: CeilingLanguage::FlatTiles,
                     height_units: 3.2,
                 },
-                CeilingZone {
+                vec![CeilingZone {
                     area: Polygon2::rect(5.0, 0.0, 5.0, 4.0),
                     language: CeilingLanguage::FlatTiles,
                     height_units: 4.8,
-                },
-            ],
+                }],
+            ),
             fixtures: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile::default(),

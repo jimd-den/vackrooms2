@@ -455,7 +455,7 @@ pub fn render_chunk_voxel_blueprint_svg(
             }
 
             // Ceiling zones (dashed gold).
-            for cz in &asm.ceiling_zones {
+            for cz in asm.ceiling.zones() {
                 let (zx0, zz0, zx1, zz1) = cz.area.bounds();
                 let clabel = format!("VAULT · {:.1}m", cz.height_units);
                 emit_box!(

@@ -598,7 +598,7 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
         for space in &assembly.spaces {
             box_out("space", "SUB-ROOM", space.footprint.bounds(), 0);
         }
-        for ceiling in &assembly.ceiling_zones {
+        for ceiling in assembly.ceiling.zones() {
             box_out("ceiling", "CEILING ZONE", ceiling.area.bounds(), 0);
         }
         let s = &assembly.structure;

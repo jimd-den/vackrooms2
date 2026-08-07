@@ -150,8 +150,8 @@ pub(crate) fn plan_red_rooms(
 mod tests {
     use super::*;
     use crate::domain::entities::architecture::{
-        CorruptionProfile, HostId, HostSegment, Opening, OpeningId, OpeningRole, Polygon2,
-        SpaceProgram, StructuralSystem, StructuralSystemInstance,
+        CeilingPlan, CorruptionProfile, HostId, HostSegment, Opening, OpeningId, OpeningRole,
+        Polygon2, SpaceProgram, StructuralSystem, StructuralSystemInstance,
     };
 
     fn red_assembly(entrance_z: f32) -> AssemblyInstance {
@@ -184,7 +184,7 @@ mod tests {
                 phase: (0.0, 0.0),
                 column_side: 0.4,
             },
-            ceiling_zones: Vec::new(),
+            ceiling: CeilingPlan::none(),
             fixtures: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile {

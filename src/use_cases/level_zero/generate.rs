@@ -191,10 +191,8 @@ fn decide_runtime_lights(
                         && cz <= config.chunk_size + 15.0
                     {
                         let ceiling_units = a
-                            .ceiling_zones
-                            .iter()
-                            .find(|z| z.area.contains(f.at.x, f.at.z))
-                            .map(|z| z.height_units)
+                            .ceiling
+                            .height_at(f.at.x, f.at.z)
                             .unwrap_or(4.0);
                         let is_atrium = matches!(
                             a.program,

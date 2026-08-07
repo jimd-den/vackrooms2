@@ -398,11 +398,11 @@ mod tests {
                 phase: (0.0, 0.0),
                 column_side: 0.4,
             },
-            ceiling_zones: vec![CeilingZone {
+            ceiling: CeilingPlan::flat(CeilingZone {
                 area: footprint.clone(),
                 language: CeilingLanguage::FlatTiles,
                 height_units: 3.4,
-            }],
+            }),
             fixtures: vec![Fixture {
                 at: Position::new(x0 + 7.0, z0 + 5.0),
                 half_x: 0.4,
