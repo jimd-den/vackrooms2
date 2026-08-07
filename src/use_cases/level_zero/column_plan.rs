@@ -43,9 +43,16 @@ pub(crate) struct ColumnPlan {
     pub prop: Option<PropBand>,
 }
 
-/// A solid object standing on the floor of a column.
+/// A solid slice of an object standing on the floor of a column.
+///
+/// A band rather than a height: furniture is not a plinth. A desk is a
+/// worktop with air under it and legs at its corners, so the same piece
+/// contributes a different band depending on which column of it you sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PropBand {
+    /// Bottom of the solid slice above the floor slab, world units. Zero for
+    /// a leg or a solid mass; the underside of the worktop elsewhere.
+    pub base_units: f32,
     /// Top of the object above the floor slab, world units.
     pub top_units: f32,
     pub material: u8,

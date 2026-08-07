@@ -127,11 +127,15 @@ impl BackroomsLevel {
         // and furniture standing in it would be the only thing left.
         if !plan.solid
             && walls_on
-            && let Some(furniture) = a.furniture.iter().find(|piece| piece.contains_plan(wx, wz))
+            && let Some((piece, (base, top))) = a
+                .furniture
+                .iter()
+                .find_map(|piece| piece.band_at(wx, wz).map(|band| (piece, band)))
         {
             plan.prop = Some(PropBand {
-                top_units: furniture.kind.top_units(),
-                material: furniture_material(furniture.kind),
+                base_units: base,
+                top_units: top,
+                material: furniture_material(piece.kind),
             });
         }
         plan

@@ -66,8 +66,12 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
             if let Some(prop) = plan.prop
                 && plan.floor
             {
+                // The band, not the whole column: a worktop leaves the space
+                // under it open, which is the difference between a desk and
+                // a crate the size of a desk.
+                let base = ((prop.base_units / voxel_size).round() as usize).max(1);
                 let top = to_voxel(prop.top_units);
-                for y in 1..=top {
+                for y in base..=top {
                     grid.set(x, y, z, prop.material);
                 }
             }

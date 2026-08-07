@@ -130,7 +130,10 @@ fn piece(x: f32, z: f32, half_x: f32, half_z: f32, kind: FurnitureKind) -> Furni
 /// an aisle down the room's long axis.
 fn desk_banks(room: &Room, density: f32) -> Vec<FurniturePiece> {
     let mut out = Vec::new();
-    let (dx, dz) = (0.8f32, 0.6f32); // half-extents: a 1.6 x 1.2 workstation
+    // Half-extents of a 1.6 x 0.8 desk — the ordinary commercial size. It
+    // was 1.6 x 1.2, which is a conference table's depth on a desk's
+    // footprint and read as a block from inside the room.
+    let (dx, dz) = (0.8f32, 0.4f32);
     let pitch_along = dx * 2.0 + PIECE_GAP;
     let pitch_across = dz * 2.0 + AISLE;
     let (cx, cz) = room.center();

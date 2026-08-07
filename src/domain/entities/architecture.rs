@@ -543,8 +543,22 @@ pub enum FurnitureKind {
     Fixture,
 }
 
+/// How a piece occupies its volume.
+///
+/// The distinction is the whole difference between furniture and freight. A
+/// filing cabinet really is a solid box; a desk is a thin top held up at its
+/// corners, and modelling it as a filled block gives you a plinth the size
+/// of a desk — which reads as a crate, not as something anyone sat at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FurnitureForm {
+    /// Filled from the floor up: casework, racking, plant.
+    Mass,
+    /// A worktop carried on corner legs, open underneath.
+    Surface,
+}
+
 impl FurnitureKind {
-    /// Finished height above the floor slab, world units. These are ordinary
+    /// Finished height above the floor slab, world units. Ordinary
     /// commercial dimensions (desk 0.73 m, table 0.75 m, chair seat 0.45 m,
     /// cabinet 1.0 m, racking 1.8 m), rounded to the 0.2 u voxel Level 0
     /// actually quantizes to — authoring a 0.73 that renders as 0.8 would be
@@ -557,6 +571,31 @@ impl FurnitureKind {
             FurnitureKind::Cabinet => 1.0,
             FurnitureKind::Shelving => 1.8,
         }
+    }
+
+    pub fn form(self) -> FurnitureForm {
+        match self {
+            FurnitureKind::Desk | FurnitureKind::Table | FurnitureKind::Chair => {
+                FurnitureForm::Surface
+            }
+            FurnitureKind::Cabinet | FurnitureKind::Shelving | FurnitureKind::Fixture => {
+                FurnitureForm::Mass
+            }
+        }
+    }
+
+    /// Thickness of the worktop itself, world units. One voxel: a 25 mm
+    /// desk top cannot be drawn thinner than the grid, and drawing it
+    /// thicker turns the top back into the slab this is trying to avoid.
+    pub fn worktop_units(self) -> f32 {
+        0.2
+    }
+
+    /// How far in from the piece's edge a leg stands. Legs are at the
+    /// corners, so a column is a leg only when it is within this of the
+    /// edge on *both* axes.
+    pub fn leg_inset(self) -> f32 {
+        0.2
     }
 }
 
@@ -583,6 +622,34 @@ impl FurniturePiece {
 
     pub fn contains_plan(&self, x: f32, z: f32) -> bool {
         (x - self.at.x).abs() <= self.half_x && (z - self.at.z).abs() <= self.half_z
+    }
+
+    /// The solid vertical band this piece occupies at one column, as
+    /// `(base_units, top_units)`, or `None` where the piece is open.
+    ///
+    /// A `Mass` piece fills from the floor. A `Surface` piece is its worktop
+    /// everywhere, plus a leg where the column is within the leg inset of
+    /// the edge on both axes — so you see a top with daylight under it and
+    /// four legs, instead of a block.
+    pub fn band_at(&self, x: f32, z: f32) -> Option<(f32, f32)> {
+        if !self.contains_plan(x, z) {
+            return None;
+        }
+        let top = self.kind.top_units();
+        match self.kind.form() {
+            FurnitureForm::Mass => Some((0.0, top)),
+            FurnitureForm::Surface => {
+                let inset = self.kind.leg_inset();
+                let edge_x = self.half_x - (x - self.at.x).abs() <= inset;
+                let edge_z = self.half_z - (z - self.at.z).abs() <= inset;
+                if edge_x && edge_z {
+                    // A corner leg carries the top down to the floor.
+                    Some((0.0, top))
+                } else {
+                    Some(((top - self.kind.worktop_units()).max(0.0), top))
+                }
+            }
+        }
     }
 }
 
