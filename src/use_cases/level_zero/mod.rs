@@ -32,6 +32,7 @@ mod column_field;
 mod column_plan;
 mod compose_column;
 mod fabric;
+mod fabric_ca;
 mod fixture_maintenance;
 mod fixture_plan;
 mod generate;

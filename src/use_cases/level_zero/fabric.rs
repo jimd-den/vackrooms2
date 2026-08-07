@@ -271,11 +271,25 @@ impl BackroomsLevel {
                 // rearranges into another broken-open neighborhood.
                 let porosity =
                     (Self::n(noise, seed, 0x9010, wx, wz, 0.11) * 0.5 + 0.5).clamp(0.0, 1.0);
-                let opens_west = Self::cell_hash(noise, seed, drift(0x9200), cx, cz) < 0.5;
-                let (wall_salt, door_salt, opens_here) = if in_w {
-                    (drift(0x9300u32), drift(0x9500u32), opens_west)
+                // Walls are grown, not rolled. `fabric_ca` evolves the
+                // wall lattice with a Life-like rule, so neighbouring cells
+                // agree and the warren comes out in coherent runs and clumps
+                // instead of a statistically uniform grid of independent
+                // flips — which is what made every 7.2 u cell look like
+                // every other one. The drift epoch is the generation count,
+                // so the Peripheral Shift is that growth continuing rather
+                // than a fresh deal of the same deck.
+                let ca = super::fabric_ca::walls_at(noise, seed, cx, cz, epoch, tier as u8);
+                let opens_west = ca.opens_west;
+                let (ca_wall, door_salt, opens_here) = if in_w {
+                    (ca.west, drift(0x9500u32), opens_west)
                 } else {
-                    (drift(0x9400u32), drift(0x9600u32), !opens_west)
+                    (ca.north, drift(0x9600u32), !opens_west)
+                };
+                let wall_salt = if in_w {
+                    drift(0x9300u32)
+                } else {
+                    drift(0x9400u32)
                 };
                 // Under strain the binary-tree guarantee itself erodes: a
                 // cell's guaranteed doorway can be found bricked over, and
@@ -285,24 +299,21 @@ impl BackroomsLevel {
                 let sealed = tier > 0
                     && Self::cell_hash(noise, seed, strain(0x9800), cx, cz) < 0.10 * tier as f32;
                 let opens_here = opens_here && !sealed;
-                // Whole-wall dropout merges rooms into larger wrong shapes.
-                // Porosity varies along a run, so drops end ragged rather
-                // than on clean cell boundaries. The walls knob scales
-                // survival: 0 empties the fabric, 2 approaches a full grid.
-                //
-                // A Peripheral Shift is not a reshuffle of the same maze: an
-                // epoch-salted neighborhood field biases wall survival ±0.16
-                // (smooth like porosity, zero at epoch 0), so a returning
-                // wanderer finds warren where they remember openness and
-                // openness where they remember warren — a different tree of
-                // a map, still inside the porosity climate's character.
-                let shift_bias = if epoch == 0 {
-                    0.0
+                // The automaton decides the shape; the walls knob decides how
+                // much of it is built. Below 1 it thins the grown warren, at
+                // 1 it is exactly what grew, above 1 it thickens back toward
+                // a full grid — so a debug world can still be emptied or
+                // filled without the knob having to reproduce the rule.
+                let knob = tuning.walls.clamp(0.0, 1.5);
+                let roll = Self::cell_hash(noise, seed, wall_salt, cx, cz);
+                let stands = if knob <= 0.0 {
+                    false
+                } else if knob >= 1.0 {
+                    ca_wall || roll < knob - 1.0
                 } else {
-                    0.16 * Self::n(noise, seed, drift(0x9700), wx, wz, 0.07)
+                    ca_wall && roll < knob
                 };
-                let survive = (0.92 - 0.42 * porosity + shift_bias) * tuning.walls.clamp(0.0, 1.5);
-                if Self::cell_hash(noise, seed, wall_salt, cx, cz) < survive {
+                if stands {
                     let along = if in_w { fz } else { fx };
                     // The binary-tree wall usually gets its doorway; porous
                     // neighborhoods often cut a second one. Strain thins the
