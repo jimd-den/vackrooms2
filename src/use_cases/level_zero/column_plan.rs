@@ -33,6 +33,55 @@ pub(crate) struct ColumnPlan {
     pub floor_material: u8,
     /// Material of the fixture voxel when the fixture is lit.
     pub light_material: u8,
+    /// The fit-out layers this column carries above bare structure.
+    pub assembly: AssemblyStack,
+}
+
+/// The construction layers of one column, over and above "solid or not".
+///
+/// A wall in a real building is an assembly — base, core, finish — and a
+/// dropped ceiling is a grid carrying tiles with a plenum above. Modelling
+/// a wall as one material floor-to-ceiling is what makes voxel architecture
+/// read as terrain: real walls have a visible bottom edge, and real ceilings
+/// have a module. This is the per-column slice of that assembly, the
+/// voxel equivalent of an `IfcMaterialLayerSet`.
+///
+/// Kept as plain `Copy` data on `ColumnPlan` so sampling stays a pure
+/// function of position with no allocation — the same contract the rest of
+/// the column vocabulary keeps.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AssemblyStack {
+    /// Height of the base course at the foot of a solid column, world
+    /// units. Zero leaves the wall bare, which is correct for raw shells
+    /// (Level 1) and for anything that was never fitted out.
+    pub baseboard_units: f32,
+    /// This ceiling column is a grid runner rather than a tile.
+    pub ceiling_grid: bool,
+    /// The tile here is gone: the ceiling plane opens and the plenum above
+    /// becomes visible. The signature Backrooms ceiling motif, and the
+    /// architectural seam to Level 1.
+    pub tile_missing: bool,
+    /// Depth of the plenum above the finished ceiling, world units. Zero
+    /// means this column has no room for one — a vault ceiling can reach
+    /// the slab, and then there is nothing to hide.
+    pub plenum_units: f32,
+    /// What occupies the plenum at this column, seen through a missing
+    /// tile. `None` is empty plenum air.
+    pub plenum_content: Option<u8>,
+}
+
+impl AssemblyStack {
+    /// Bare structure: no base, no ceiling system, no plenum. The correct
+    /// default for fabric and for anything not deliberately fitted out.
+    pub(crate) const fn bare() -> Self {
+        Self {
+            baseboard_units: 0.0,
+            ceiling_grid: false,
+            tile_missing: false,
+            plenum_units: 0.0,
+            plenum_content: None,
+        }
+    }
 }
 
 impl ColumnPlan {
@@ -49,6 +98,7 @@ impl ColumnPlan {
             wall_material: VOXEL_WALL,
             floor_material: VOXEL_FLOOR,
             light_material: VOXEL_LIGHT,
+            assembly: AssemblyStack::bare(),
         }
     }
 

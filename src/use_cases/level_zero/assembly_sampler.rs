@@ -47,6 +47,18 @@ impl BackroomsLevel {
             ceiling_units -= 0.2;
         }
         let mut plan = ColumnPlan::open(ceiling_units);
+        // A planned room is a fitted-out room: base at the wall foot, real
+        // ceiling grid overhead. An abandoned expansion was built and never
+        // occupied, so nobody has replaced a tile in it — it ages the
+        // ceiling directly rather than waiting on the institution field,
+        // because abandonment is a fact about *this room*, not its district.
+        plan.assembly = super::ceiling_system::fitted_stack(
+            seed,
+            wx,
+            wz,
+            ceiling_units,
+            if a.corruption.abandoned { 0.9 } else { 0.15 },
+        );
 
         // Hosts own wall geometry; openings cut only their referenced host.
         // This remains stable when a grammar moves, removes, or duplicates a

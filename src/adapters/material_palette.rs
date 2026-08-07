@@ -45,6 +45,14 @@ pub const MATERIAL_VISUALS: [MaterialVisual; VOXEL_MATERIAL_COUNT] = [
     visual("almondwater", 0xEDE6D0),
     visual("agedwallpaper", 0xA69456),
     visual("stainedcarpet", 0x746021),
+    // Fit-out layers. The base reads dark against Level 0's yellow so the
+    // bottom of a wall is legible as a built edge; grid sits just off the
+    // tile it separates, because a T-bar you cannot distinguish from its
+    // tile is not a ceiling grid.
+    visual("baseboard", 0x4A4232),
+    visual("ceilinggrid", 0x9E9C94),
+    visual("duct", 0x8C9196),
+    visual("slab", 0x5A5852),
 ];
 
 const UNKNOWN_VISUAL: MaterialVisual = MaterialVisual {

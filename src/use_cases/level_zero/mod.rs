@@ -26,6 +26,7 @@
 //! * [`generate`] — voxelization, semantic exports, and runtime lights.
 
 mod assembly_sampler;
+mod ceiling_system;
 mod circulation_sampler;
 mod column_field;
 mod column_plan;

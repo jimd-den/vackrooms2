@@ -80,12 +80,35 @@ pub const VOXEL_AGED_WALLPAPER: u8 = 24;
 /// `VOXEL_AGED_WALLPAPER`. Walkable, like FLOOR.
 pub const VOXEL_STAINED_CARPET: u8 = 25;
 
+// -- fit-out assembly layers -------------------------------------------------
+// A wall in a real building is not one material floor-to-ceiling, and a
+// dropped ceiling is not one plane. These are the layers a construction
+// section would draw: the base at the bottom of a partition, the suspended
+// ceiling's grid and tile, and what the grid hides above it.
+
+/// Vinyl/rubber base at the foot of a partition, ~0.1 u tall. The single
+/// most legible "this is a fitted-out building, not a maze" detail: every
+/// finished wall in an office has one, and its absence is why bare voxel
+/// walls read as terrain.
+pub const VOXEL_BASEBOARD: u8 = 26;
+/// Exposed T-bar of a suspended ceiling grid — the aluminium runners that
+/// carry the tiles. Reads as the ceiling module line in a reflected ceiling
+/// plan.
+pub const VOXEL_CEILING_GRID: u8 = 27;
+/// Galvanized supply duct in the plenum, seen through a missing tile.
+/// Distinct from `VOXEL_PIPE`: duct is broad and rectangular, pipe is a run.
+pub const VOXEL_DUCT: u8 = 28;
+/// The structural slab over the plenum — the underside of the floor above.
+/// This is the surface Level 1 exposes directly; here it is what a missing
+/// ceiling tile reveals.
+pub const VOXEL_SLAB: u8 = 29;
+
 /// Number of voxel material ids (the palette table length).
-pub const VOXEL_MATERIAL_COUNT: usize = 26;
+pub const VOXEL_MATERIAL_COUNT: usize = 30;
 
 /// Materials that block the player and produce collision boxes. Everything
 /// else is walkable or decorative.
-pub const SOLID_MATERIALS: [u8; 9] = [
+pub const SOLID_MATERIALS: [u8; 10] = [
     VOXEL_WALL,
     VOXEL_TREE,
     VOXEL_RED_WALL,
@@ -95,7 +118,42 @@ pub const SOLID_MATERIALS: [u8; 9] = [
     VOXEL_CRATE,
     VOXEL_PIPE,
     VOXEL_AGED_WALLPAPER,
+    // The base is the bottom course of a partition: it must block exactly
+    // like the wall it belongs to, or the player walks through the foot of
+    // every finished wall in the level.
+    VOXEL_BASEBOARD,
 ];
+
+/// Materials that make up a vertical wall surface, whatever their finish.
+///
+/// A wall is an *assembly*, not a material: the same partition is aged
+/// wallpaper where the institution has decayed, crimson inside a red room,
+/// and base at its bottom course. Code asking "is there a wall here" —
+/// LOD correspondence, corridor probes, blueprint tracing — means the
+/// assembly, not one finish, and every time that was written as an equality
+/// against `VOXEL_WALL` it broke the next time a finish was added. Ask
+/// [`is_wall_surface`] instead.
+pub const WALL_SURFACE_MATERIALS: [u8; 7] = [
+    VOXEL_WALL,
+    VOXEL_AGED_WALLPAPER,
+    VOXEL_PALE_WALL,
+    VOXEL_DAMAGED_WALL,
+    VOXEL_RED_WALL,
+    VOXEL_CONCRETE_WALL,
+    VOXEL_BASEBOARD,
+];
+
+/// Is this material part of a wall assembly, in any finish?
+pub const fn is_wall_surface(material: u8) -> bool {
+    let mut i = 0;
+    while i < WALL_SURFACE_MATERIALS.len() {
+        if WALL_SURFACE_MATERIALS[i] == material {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
 
 /// Materials that emit light in the baked flood fill and render emissive.
 pub const EMISSIVE_MATERIALS: [u8; 4] = [

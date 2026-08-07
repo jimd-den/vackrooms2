@@ -88,6 +88,16 @@ impl BackroomsLevel {
             let mut column = ColumnPlan {
                 ..ColumnPlan::open(corridor_ceiling)
             };
+            // Circulation is the most maintained surface in the building —
+            // it is what the institution kept up longest — so its ceiling
+            // ages on the shared field rather than being written off.
+            column.assembly = super::ceiling_system::fitted_stack(
+                seed,
+                wx,
+                wz,
+                corridor_ceiling,
+                crate::use_cases::world_topology::institution_age_at(noise, seed, wx, wz),
+            );
             if tuning.lights > 0.0 {
                 column.fixture = corridor_fixture_sample;
             }

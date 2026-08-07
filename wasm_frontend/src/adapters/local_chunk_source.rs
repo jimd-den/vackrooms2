@@ -46,9 +46,11 @@ use crate::application::ports::{
 
 /// Voxel types that block the player. FLOOR/CEILING/LIGHT/GRASS/WATER and
 /// the carpet/fluid classes are visual-only: including them would make the
-/// player collide with the floor they stand on. Shared with the core so a
-/// new wall class can never render solid but collide hollow.
-const SOLID_TYPES: [u8; 9] = vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS;
+/// player collide with the floor they stand on. Aliased rather than
+/// re-declared with its own length: restating the arity here meant every
+/// new solid material broke this file, which is exactly the coupling the
+/// "shared with the core" note was trying to avoid.
+use vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS as SOLID_TYPES;
 
 pub struct LocalChunkSource<N: NoiseProvider> {
     noise: N,

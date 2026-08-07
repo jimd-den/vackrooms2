@@ -410,6 +410,18 @@ impl BackroomsLevel {
             wall_material: env.wall_voxel(),
             floor_material: env.floor_voxel(),
             light_material: env.light_voxel(),
+            // The fabric is fitted-out building, not raw shell: this is the
+            // tenant floor of a commercial interior that happens to go on
+            // forever. Its walls carry a base and its ceiling is a real
+            // suspended grid, ageing on the same `institution_age` field
+            // that already drives the wallpaper and carpet.
+            assembly: super::ceiling_system::fitted_stack(
+                seed,
+                wx,
+                wz,
+                ceiling_units,
+                crate::use_cases::world_topology::institution_age_at(noise, seed, wx, wz),
+            ),
         }
     }
 }

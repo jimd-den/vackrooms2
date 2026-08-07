@@ -1,7 +1,8 @@
 //! Materialize sampled Level 0 columns at the requested voxel size.
 
 use crate::domain::entities::voxel_grid::{
-    VOXEL_CEILING, VOXEL_LIGHT, VOXEL_METAL_DOOR, VOXEL_RED_LIGHT, VoxelGrid,
+    VOXEL_AIR, VOXEL_BASEBOARD, VOXEL_CEILING, VOXEL_CEILING_GRID, VOXEL_LIGHT, VOXEL_METAL_DOOR,
+    VOXEL_RED_LIGHT, VOXEL_SLAB, VoxelGrid,
 };
 use crate::use_cases::level_zero::ColumnField;
 use crate::use_cases::level_zero::{FixtureKind, FixtureState};
@@ -61,6 +62,13 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
                 for y in 1..ceiling_y {
                     grid.set(x, y, z, plan.wall_material);
                 }
+                // The base course, written over the wall's own material.
+                // Only on genuinely solid wall — a lintel is a header over
+                // an opening and has no foot to trim.
+                let base_top = (plan.assembly.baseboard_units / voxel_size).round() as usize;
+                for y in 1..=base_top.min(ceiling_y.saturating_sub(1)) {
+                    grid.set(x, y, z, VOXEL_BASEBOARD);
+                }
             } else if let Some(lintel_height) = plan.lintel_from_units {
                 for y in to_voxel(lintel_height)..ceiling_y {
                     grid.set(x, y, z, plan.wall_material);
@@ -100,13 +108,39 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
             } else {
                 ceiling_y
             };
+            // The finished ceiling plane. Over open floor it is the fit-out
+            // surface — grid runner or tile — rather than one flat material;
+            // over a wall or header it stays wall, because that is masonry
+            // rising past the ceiling, not a suspended tile.
             let cap_material = if has_wall_support {
                 plan.wall_material
+            } else if plan.assembly.ceiling_grid {
+                VOXEL_CEILING_GRID
             } else {
                 VOXEL_CEILING
             };
             for y in ceiling_y..=cap_top {
                 grid.set(x, y, z, cap_material);
+            }
+
+            // A missing tile opens the ceiling plane and shows what the grid
+            // was hiding. Only over open floor and only where the room left
+            // headroom for a plenum: a vault whose ceiling nearly reaches the
+            // slab has nothing above it to reveal.
+            if plan.assembly.tile_missing && !has_wall_support && plan.assembly.plenum_units > 0.0 {
+                let slab_y = to_voxel(plan.ceiling_units + plan.assembly.plenum_units);
+                if slab_y > ceiling_y {
+                    // Clear the tile away, including the cap written above.
+                    for y in ceiling_y..slab_y {
+                        grid.set(x, y, z, VOXEL_AIR);
+                    }
+                    // Services run through the void, then the slab closes it.
+                    if let Some(content) = plan.assembly.plenum_content {
+                        let run_y = ceiling_y + (slab_y - ceiling_y) / 2;
+                        grid.set(x, run_y, z, content);
+                    }
+                    grid.set(x, slab_y, z, VOXEL_SLAB);
+                }
             }
 
             if let Some(fixture) = plan.fixture

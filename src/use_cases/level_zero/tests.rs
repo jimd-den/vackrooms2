@@ -961,10 +961,11 @@ fn lods_of_the_same_chunk_correspond() {
         GeneratorConfig::low_spec().at_lod(1),
         &noise,
     );
-    // Ordinary fabric walls now voxelize as either the fresh or the aged
-    // wallpaper material depending on `institution_age`, both equally solid.
+    // A wall is an assembly, not a finish: at y=1 the bottom course is the
+    // base, and elsewhere the fresh or aged wallpaper depending on
+    // `institution_age`. All of them are the same wall.
     let solid = |g: &VoxelGrid, x: usize, z: usize| {
-        matches!(g.get(x, 1, z), VOXEL_WALL | VOXEL_AGED_WALLPAPER)
+        crate::domain::entities::voxel_grid::is_wall_surface(g.get(x, 1, z))
     };
     let (mut matches, mut total) = (0usize, 0usize);
     for z in 0..coarse.depth() {
