@@ -1,6 +1,7 @@
 pub mod anomalies;
 pub mod anomaly_plan;
 
+pub mod authoring;
 pub mod bake_voxel_lighting;
 pub mod build_brick_pool;
 pub mod build_octree;

@@ -433,8 +433,8 @@ fn blocks_opening(opening: &Opening, candidate: &FurniturePiece) -> bool {
 mod tests {
     use super::*;
     use crate::domain::entities::architecture::{
-        CeilingLanguage, CeilingPlan, CeilingZone, CorruptionProfile, HostRole, HostSegment,
-        OpeningId, OpeningRole, StructuralSystem, StructuralSystemInstance,
+        CeilingLanguage, CeilingPlan, CeilingZone, CorruptionProfile, HostSegment, OpeningId,
+        OpeningRole, StructuralSystem, StructuralSystemInstance,
     };
 
     fn room_assembly(program: SpaceProgram, w: f32, d: f32) -> AssemblyInstance {
