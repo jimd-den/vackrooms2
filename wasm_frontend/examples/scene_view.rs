@@ -157,6 +157,10 @@ fn main() {
 
     let mut meshes: Vec<(i32, i32, SurfaceMeshPayload)> = Vec::new();
     let mut scene_lights = Vec::new();
+    let mut world = World {
+        voxel: config.voxel_scale,
+        grids: Vec::new(),
+    };
     for dz in -radius..=radius {
         for dx in -radius..=radius {
             let (cx, cz) = (base_cx + dx, base_cz + dz);
@@ -186,6 +190,9 @@ fn main() {
                 RenderArtifactNeeds::SURFACE,
             );
             meshes.push((cx, cz, mesh));
+            world
+                .grids
+                .push((halo_origin[0], halo_origin[2], halo.grid));
         }
     }
     let quads: usize = meshes.iter().map(|(_, _, m)| m.indices.len() / 6).sum();
@@ -195,6 +202,32 @@ fn main() {
         quads,
         scene_lights.len()
     );
+
+    // Stand somewhere you can actually see from.
+    //
+    // Typing a coordinate and hoping is how a survey burns five shots on the
+    // inside of a wall — which is exactly what happened at (95, 25), and it
+    // cost an investigation into lighting that was really a camera in a
+    // partition. The search asks the voxels instead: a spot must have head
+    // room and floor, and among those it takes the one you can see furthest
+    // from, which is also the one worth photographing.
+    let (cam_x, cam_z) = if env_or("AUTOSPOT", 1) != 0 {
+        match world.best_viewpoint(cam_x, cam_z, eye, env_or("SEARCH", 14.0f32)) {
+            Some(found) => {
+                println!(
+                    "autospot: ({:.1}, {:.1}) -> ({:.1}, {:.1}), {:.1} u of open sight",
+                    cam_x, cam_z, found.x, found.z, found.openness
+                );
+                (found.x, found.z)
+            }
+            None => {
+                println!("autospot: found nothing standable near ({cam_x}, {cam_z}); keeping it");
+                (cam_x, cam_z)
+            }
+        }
+    } else {
+        (cam_x, cam_z)
+    };
 
     let toggles = RenderToggles::default();
     let chunks: Vec<SurfaceChunk> = meshes
@@ -269,6 +302,124 @@ fn main() {
     }
 }
 
+/// The streamed voxels, so the harness can ask the world questions instead
+/// of trusting a typed coordinate.
+struct World {
+    voxel: f32,
+    /// (halo origin x, halo origin z, grid) per streamed chunk.
+    grids: Vec<(f32, f32, vackrooms::domain::entities::voxel_grid::VoxelGrid)>,
+}
+
+/// A standable spot and how far you can see from it.
+struct Viewpoint {
+    x: f32,
+    z: f32,
+    openness: f32,
+}
+
+impl World {
+    /// Material at a world point, or `None` outside everything streamed.
+    fn material_at(&self, x: f32, y: f32, z: f32) -> Option<u8> {
+        for (ox, oz, grid) in &self.grids {
+            let (ix, iy, iz) = (
+                ((x - ox) / self.voxel).floor(),
+                (y / self.voxel).floor(),
+                ((z - oz) / self.voxel).floor(),
+            );
+            if ix < 0.0 || iy < 0.0 || iz < 0.0 {
+                continue;
+            }
+            let (ix, iy, iz) = (ix as usize, iy as usize, iz as usize);
+            if ix >= grid.width() || iy >= grid.height() || iz >= grid.depth() {
+                continue;
+            }
+            return Some(grid.get(ix, iy, iz));
+        }
+        None
+    }
+
+    /// Does something block a body here?
+    ///
+    /// Outside everything streamed counts as blocked, so the search never
+    /// walks the camera off the edge of what was generated.
+    fn solid_at(&self, x: f32, y: f32, z: f32) -> bool {
+        use vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS;
+        match self.material_at(x, y, z) {
+            Some(material) => SOLID_MATERIALS.contains(&material),
+            None => true,
+        }
+    }
+
+    /// Can a person stand here — floor under foot, body and head clear?
+    fn standable(&self, x: f32, z: f32, eye: f32) -> bool {
+        use vackrooms::domain::entities::voxel_grid::VOXEL_AIR;
+        // Floor is *present*, not *solid*: carpet and slab are walkable, so
+        // they are deliberately absent from SOLID_MATERIALS. Testing the
+        // floor for solidity rejected every ordinary room in the level.
+        if self.material_at(x, 0.0, z).unwrap_or(VOXEL_AIR) == VOXEL_AIR {
+            return false;
+        }
+        let mut y = self.voxel;
+        while y <= eye + 0.2 {
+            if self.solid_at(x, y, z) {
+                return false;
+            }
+            y += self.voxel;
+        }
+        true
+    }
+
+    /// Clear horizontal distance, averaged over eight directions.
+    ///
+    /// Averaged rather than maximised: a slot between two walls has one long
+    /// sight line and photographs as a corridor seen end-on. The average
+    /// rewards places that are open *around* you, which is what "wide area"
+    /// means and what makes a frame legible.
+    fn openness(&self, x: f32, z: f32, eye: f32) -> f32 {
+        const REACH: f32 = 24.0;
+        let mut total = 0.0;
+        for k in 0..8 {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            let (dx, dz) = (a.cos(), a.sin());
+            let mut d = self.voxel;
+            while d < REACH {
+                if self.solid_at(x + dx * d, eye, z + dz * d) {
+                    break;
+                }
+                d += self.voxel * 2.0;
+            }
+            total += d;
+        }
+        total / 8.0
+    }
+
+    /// The most open standable spot within `search` of the request.
+    fn best_viewpoint(&self, x: f32, z: f32, eye: f32, search: f32) -> Option<Viewpoint> {
+        let step = 1.2f32;
+        let mut best: Option<Viewpoint> = None;
+        let mut oz = -search;
+        while oz <= search {
+            let mut ox = -search;
+            while ox <= search {
+                let (cx, cz) = (x + ox, z + oz);
+                if self.standable(cx, cz, eye) {
+                    let openness = self.openness(cx, cz, eye);
+                    if best.as_ref().is_none_or(|b| openness > b.openness) {
+                        best = Some(Viewpoint {
+                            x: cx,
+                            z: cz,
+                            openness,
+                        });
+                    }
+                }
+                ox += step;
+            }
+            oz += step;
+        }
+        best
+    }
+}
+
 /// One camera in a batch.
 struct Shot {
     label: String,
@@ -280,8 +431,13 @@ struct Shot {
 
 /// The batch to render.
 ///
-/// `SHOTS` is `label:x,z,yaw,pitch` entries separated by `;`. With no
-/// `SHOTS`, the default is a panorama at `AT` — four cardinal yaws plus one
+/// `SHOTS` is `label:dx,dz,yaw,pitch` entries separated by `;`, where
+/// `dx,dz` are offsets *from the camera* — which, with autospot on, is a
+/// standable place rather than wherever the coordinate landed. Absolute
+/// coordinates would silently undo the search that just found open ground,
+/// and a batch aimed at world origin renders five pictures of nothing.
+///
+/// With no `SHOTS`, the default is a panorama — four cardinal yaws plus one
 /// looking up — because a single frame cannot distinguish "this place is
 /// dark" from "the camera happened to face a wall", and that ambiguity is
 /// exactly what wastes time when a render comes back black.
@@ -303,8 +459,8 @@ fn shots(cam_x: f32, cam_z: f32, yaw: f32, pitch: f32) -> Vec<Shot> {
                     } else {
                         label.trim().into()
                     },
-                    x: v.first().copied().unwrap_or(cam_x),
-                    z: v.get(1).copied().unwrap_or(cam_z),
+                    x: cam_x + v.first().copied().unwrap_or(0.0),
+                    z: cam_z + v.get(1).copied().unwrap_or(0.0),
                     yaw: v.get(2).copied().unwrap_or(yaw),
                     pitch: v.get(3).copied().unwrap_or(pitch),
                 }
