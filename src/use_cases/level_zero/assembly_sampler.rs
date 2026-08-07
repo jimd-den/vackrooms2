@@ -3,29 +3,32 @@
 //! contradictory grid), and fixtures on the room's ceiling modules.
 
 use crate::domain::entities::architecture::{
-    AssemblyInstance, CeilingLanguage, StructuralSystem, StructuralSystemInstance,
+    AssemblyInstance, CeilingLanguage, FurnitureKind, StructuralSystemInstance,
 };
+use crate::domain::entities::voxel_grid::{VOXEL_FURNITURE, VOXEL_SEAT, VOXEL_SHELVING};
 use crate::use_cases::generate_chunk::LevelTuning;
 
+use super::column_plan::PropBand;
 use super::fixture_plan::{FixtureOwner, fixture_at};
 use super::{BackroomsLevel, ColumnPlan};
+
+/// Which voxel a furniture kind is built from. Casework and seating are
+/// separated so a desk and the chair at it do not merge into one block.
+fn furniture_material(kind: FurnitureKind) -> u8 {
+    match kind {
+        FurnitureKind::Chair => VOXEL_SEAT,
+        FurnitureKind::Shelving => VOXEL_SHELVING,
+        FurnitureKind::Desk
+        | FurnitureKind::Table
+        | FurnitureKind::Cabinet
+        | FurnitureKind::Fixture => VOXEL_FURNITURE,
+    }
+}
 
 impl BackroomsLevel {
     /// Is (wx, wz) on a structural column of this system?
     pub(super) fn on_column(st: &StructuralSystemInstance, wx: f32, wz: f32) -> bool {
-        if st.system == StructuralSystem::CoreAndShell {
-            // Core-and-shell designers hide columns in walls; none inside.
-            return false;
-        }
-        let mut mx = (wx - st.phase.0).rem_euclid(st.bay_x);
-        let mz = (wz - st.phase.1).rem_euclid(st.bay_z);
-        if st.system == StructuralSystem::OffsetGrid {
-            let row = ((wz - st.phase.1) / st.bay_z).floor() as i64;
-            if row.rem_euclid(2) == 1 {
-                mx = (wx - st.phase.0 + st.bay_x * 0.5).rem_euclid(st.bay_x);
-            }
-        }
-        mx < st.column_side && mz < st.column_side
+        st.has_column_at(wx, wz)
     }
 
     /// Column plan for a point inside an assembly footprint or its
@@ -116,8 +119,20 @@ impl BackroomsLevel {
             && tuning.lights > 0.0
             && let Some(zone) = a.ceiling.zone_at(wx, wz)
         {
-            plan.fixture =
-                fixture_at(seed, FixtureOwner::Assembly { assembly: a, zone }, wx, wz);
+            plan.fixture = fixture_at(seed, FixtureOwner::Assembly { assembly: a, zone }, wx, wz);
+        }
+
+        // The fit-out on the floor. Behind the same `walls` knob as the rest
+        // of the architecture: a debug world with walls off is a bare plane,
+        // and furniture standing in it would be the only thing left.
+        if !plan.solid
+            && walls_on
+            && let Some(furniture) = a.furniture.iter().find(|piece| piece.contains_plan(wx, wz))
+        {
+            plan.prop = Some(PropBand {
+                top_units: furniture.kind.top_units(),
+                material: furniture_material(furniture.kind),
+            });
         }
         plan
     }
@@ -161,6 +176,7 @@ mod tests {
                 }],
             ),
             fixtures: Vec::new(),
+            furniture: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile::default(),
         }

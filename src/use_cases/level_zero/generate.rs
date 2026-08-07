@@ -190,10 +190,7 @@ fn decide_runtime_lights(
                         && cz >= -15.0
                         && cz <= config.chunk_size + 15.0
                     {
-                        let ceiling_units = a
-                            .ceiling
-                            .height_at(f.at.x, f.at.z)
-                            .unwrap_or(4.0);
+                        let ceiling_units = a.ceiling.height_at(f.at.x, f.at.z).unwrap_or(4.0);
                         let is_atrium = matches!(
                             a.program,
                             crate::domain::entities::architecture::SpaceProgram::Atrium

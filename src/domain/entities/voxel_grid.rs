@@ -103,12 +103,23 @@ pub const VOXEL_DUCT: u8 = 28;
 /// ceiling tile reveals.
 pub const VOXEL_SLAB: u8 = 29;
 
+// -- fit-out on the floor ----------------------------------------------------
+
+/// Work surfaces and casework: desks, tables, cabinets. Office laminate.
+pub const VOXEL_FURNITURE: u8 = 30;
+/// Seating. Separated from casework only because a room of one flat colour
+/// reads as extruded blocks; the chair beside a desk is what makes both
+/// legible as objects.
+pub const VOXEL_SEAT: u8 = 31;
+/// Shelving and racking — storage and server rooms.
+pub const VOXEL_SHELVING: u8 = 32;
+
 /// Number of voxel material ids (the palette table length).
-pub const VOXEL_MATERIAL_COUNT: usize = 30;
+pub const VOXEL_MATERIAL_COUNT: usize = 33;
 
 /// Materials that block the player and produce collision boxes. Everything
 /// else is walkable or decorative.
-pub const SOLID_MATERIALS: [u8; 10] = [
+pub const SOLID_MATERIALS: [u8; 13] = [
     VOXEL_WALL,
     VOXEL_TREE,
     VOXEL_RED_WALL,
@@ -122,6 +133,10 @@ pub const SOLID_MATERIALS: [u8; 10] = [
     // like the wall it belongs to, or the player walks through the foot of
     // every finished wall in the level.
     VOXEL_BASEBOARD,
+    // Furniture is furniture: you walk around a desk, not through it.
+    VOXEL_FURNITURE,
+    VOXEL_SEAT,
+    VOXEL_SHELVING,
 ];
 
 /// Materials that make up a vertical wall surface, whatever their finish.

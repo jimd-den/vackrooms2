@@ -637,6 +637,7 @@ pub(super) fn place_suite(
         structure: structure_for(genome, aseed),
         ceiling: ceiling_bands_for(&footprint, ceiling, genome, aseed),
         fixtures: fixtures_for(genome, &footprint, true, aseed),
+        furniture: Vec::new(),
         service_voids: Vec::new(),
         corruption: CorruptionProfile::default(),
         hosts,

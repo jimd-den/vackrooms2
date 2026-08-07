@@ -85,6 +85,9 @@ fn glyph(material: u8) -> char {
         "light" | "redlight" => '*',
         "metaldoor" => 'd',
         "crate" => 'c',
+        "furniture" => 'F',
+        "seat" => 'h',
+        "shelving" => 'S',
         "tilefloor" => ':',
         _ => '?',
     }
@@ -94,11 +97,13 @@ fn print_ascii_section(grid: &VoxelGrid, z: usize, voxel: f32) {
     println!("\n--- section at z index {z} (looking +z), y up ---");
     // Top row first so the print reads the way a section drawing does.
     for y in (0..grid.height()).rev() {
-        let row: String = (0..grid.width()).map(|x| glyph(grid.get(x, y, z))).collect();
+        let row: String = (0..grid.width())
+            .map(|x| glyph(grid.get(x, y, z)))
+            .collect();
         println!("{:>5.1}u |{row}", y as f32 * voxel);
     }
     println!(
-        "       legend: _ floor  b base  # wall  T grid  - tile  = slab  D duct  p pipe  * light  d door  . air"
+        "       legend: _ floor  b base  # wall  T grid  - tile  = slab  D duct  p pipe  * light  d door  F desk  h seat  S racking  . air"
     );
 }
 

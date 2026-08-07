@@ -156,6 +156,8 @@ pub(crate) fn place_stairwell(
         id,
         program: SpaceProgram::Stair,
         spaces: Vec::new(),
+        // A stair core is circulation: nothing stands on a flight.
+        furniture: Vec::new(),
         // Core-and-shell: the stair core carries itself; no interior columns
         // may interrupt a flight.
         structure: StructuralSystemInstance {
@@ -262,6 +264,7 @@ mod tests {
             },
             ceiling: CeilingPlan::none(),
             fixtures: Vec::new(),
+            furniture: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile::default(),
         }

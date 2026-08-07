@@ -58,6 +58,20 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
                 }
             }
 
+            // Furniture stands on the slab. Written before walls and lintels
+            // so architecture always wins a contested column: a desk that
+            // overlapped a partition would otherwise punch a hole in it, and
+            // the plan pass that placed the desk already guarantees it does
+            // not — this is the belt to that braces.
+            if let Some(prop) = plan.prop
+                && plan.floor
+            {
+                let top = to_voxel(prop.top_units);
+                for y in 1..=top {
+                    grid.set(x, y, z, prop.material);
+                }
+            }
+
             if plan.solid {
                 for y in 1..ceiling_y {
                     grid.set(x, y, z, plan.wall_material);

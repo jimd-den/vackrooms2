@@ -54,10 +54,7 @@ const MISSING_SHARE_AGED: f32 = 0.10;
 
 /// Which tile of the ceiling grid a world point falls in.
 fn tile_of(wx: f32, wz: f32) -> (i64, i64) {
-    (
-        (wx / TILE_X).floor() as i64,
-        (wz / TILE_Z).floor() as i64,
-    )
+    ((wx / TILE_X).floor() as i64, (wz / TILE_Z).floor() as i64)
 }
 
 /// Is this column on a grid runner rather than inside a tile?
@@ -125,14 +122,16 @@ pub(crate) fn fitted_stack(
     // *tile-shaped* gap rather than an amorphous void.
     let tile_missing = plenum_units > 0.0
         && !on_runner(wx, wz)
-        && fixture_hash(seed, 0x717_1E, tile.0, tile.1) < share;
+        && fixture_hash(seed, 0x0007_171E, tile.0, tile.1) < share;
 
     AssemblyStack {
         baseboard_units: BASEBOARD_UNITS,
         ceiling_grid: on_runner(wx, wz),
         tile_missing,
         plenum_units,
-        plenum_content: tile_missing.then(|| plenum_content_at(seed, tile)).flatten(),
+        plenum_content: tile_missing
+            .then(|| plenum_content_at(seed, tile))
+            .flatten(),
     }
 }
 

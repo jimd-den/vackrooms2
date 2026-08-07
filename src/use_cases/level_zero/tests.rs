@@ -735,10 +735,7 @@ fn authored_ceiling_bands_reach_the_columns() {
             );
         }
     }
-    assert!(
-        checked > 8,
-        "sample did not cross enough banded assemblies"
-    );
+    assert!(checked > 8, "sample did not cross enough banded assemblies");
 }
 
 #[test]

@@ -53,6 +53,11 @@ pub const MATERIAL_VISUALS: [MaterialVisual; VOXEL_MATERIAL_COUNT] = [
     visual("ceilinggrid", 0x9E9C94),
     visual("duct", 0x8C9196),
     visual("slab", 0x5A5852),
+    // Fit-out on the floor. Office laminate and upholstery, muted enough to
+    // sit inside Level 0's yellow without becoming the subject.
+    visual("furniture", 0x9A8C6E),
+    visual("seat", 0x5C5A52),
+    visual("shelving", 0x6E6350),
 ];
 
 const UNKNOWN_VISUAL: MaterialVisual = MaterialVisual {

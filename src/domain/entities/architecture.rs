@@ -382,6 +382,30 @@ pub struct StructuralSystemInstance {
     pub column_side: f32,
 }
 
+impl StructuralSystemInstance {
+    /// Does a structural column stand at this plan point?
+    ///
+    /// On the domain type rather than in the voxel sampler because it is a
+    /// pure question about the grid, and two very different callers need the
+    /// same answer: the sampler, deciding whether a column is solid, and the
+    /// furnish pass, which must not park a desk inside a building column.
+    pub fn has_column_at(&self, x: f32, z: f32) -> bool {
+        if self.system == StructuralSystem::CoreAndShell {
+            // Core-and-shell designers hide columns in walls; none inside.
+            return false;
+        }
+        let mut mx = (x - self.phase.0).rem_euclid(self.bay_x);
+        let mz = (z - self.phase.1).rem_euclid(self.bay_z);
+        if self.system == StructuralSystem::OffsetGrid {
+            let row = ((z - self.phase.1) / self.bay_z).floor() as i64;
+            if row.rem_euclid(2) == 1 {
+                mx = (x - self.phase.0 + self.bay_x * 0.5).rem_euclid(self.bay_x);
+            }
+        }
+        mx < self.column_side && mz < self.column_side
+    }
+}
+
 /// A ceiling treatment over a sub-area of an assembly.
 #[derive(Clone, Debug)]
 pub struct CeilingZone {
@@ -444,11 +468,7 @@ impl CeilingPlan {
     /// base; outside both, the nearest zone owns wall bands that sit a
     /// fraction outside every authored polygon.
     pub fn zone_at(&self, x: f32, z: f32) -> Option<&CeilingZone> {
-        if let Some(zone) = self
-            .overrides
-            .iter()
-            .find(|zone| zone.area.contains(x, z))
-        {
+        if let Some(zone) = self.overrides.iter().find(|zone| zone.area.contains(x, z)) {
             return Some(zone);
         }
         if let Some(base) = &self.base
@@ -474,8 +494,20 @@ fn bounds_within(inner: &Polygon2, outer: &Polygon2) -> bool {
 
 fn distance_to_zone(zone: &CeilingZone, wx: f32, wz: f32) -> f32 {
     let (x0, z0, x1, z1) = zone.area.bounds();
-    let dx = if wx < x0 { x0 - wx } else if wx > x1 { wx - x1 } else { 0.0 };
-    let dz = if wz < z0 { z0 - wz } else if wz > z1 { wz - z1 } else { 0.0 };
+    let dx = if wx < x0 {
+        x0 - wx
+    } else if wx > x1 {
+        wx - x1
+    } else {
+        0.0
+    };
+    let dz = if wz < z0 {
+        z0 - wz
+    } else if wz > z1 {
+        wz - z1
+    } else {
+        0.0
+    };
     dx * dx + dz * dz
 }
 
@@ -487,6 +519,71 @@ pub struct Fixture {
     pub half_x: f32,
     pub half_z: f32,
     pub lit: bool,
+}
+
+/// What a piece of furniture *is*. Kind decides height and material; the
+/// piece decides where and how big.
+///
+/// Deliberately a small closed set of ordinary commercial objects. The canon
+/// describes rooms with desks and chairs and tables in them, not a props
+/// library, and every kind here has to survive being seen a thousand times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FurnitureKind {
+    /// Work surface: desk or workstation run.
+    Desk,
+    /// Meeting or break table.
+    Table,
+    /// Seating. Low enough to read as a chair beside a taller surface.
+    Chair,
+    /// Filing cabinet or credenza — waist height, against a wall.
+    Cabinet,
+    /// Shelving or racking, tall enough to divide sightlines.
+    Shelving,
+    /// Restroom fittings and the like: low, hard, against a wall.
+    Fixture,
+}
+
+impl FurnitureKind {
+    /// Finished height above the floor slab, world units. These are ordinary
+    /// commercial dimensions (desk 0.73 m, table 0.75 m, chair seat 0.45 m,
+    /// cabinet 1.0 m, racking 1.8 m), rounded to the 0.2 u voxel Level 0
+    /// actually quantizes to — authoring a 0.73 that renders as 0.8 would be
+    /// a dimension the grid cannot express.
+    pub fn top_units(self) -> f32 {
+        match self {
+            FurnitureKind::Chair => 0.4,
+            FurnitureKind::Desk | FurnitureKind::Table => 0.8,
+            FurnitureKind::Fixture => 0.6,
+            FurnitureKind::Cabinet => 1.0,
+            FurnitureKind::Shelving => 1.8,
+        }
+    }
+}
+
+/// One placed object on the floor of an assembly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FurniturePiece {
+    pub at: Position,
+    /// Half-extent along X / Z.
+    pub half_x: f32,
+    pub half_z: f32,
+    pub kind: FurnitureKind,
+}
+
+impl FurniturePiece {
+    /// Plan bounds: (min_x, min_z, max_x, max_z).
+    pub fn bounds(&self) -> (f32, f32, f32, f32) {
+        (
+            self.at.x - self.half_x,
+            self.at.z - self.half_z,
+            self.at.x + self.half_x,
+            self.at.z + self.half_z,
+        )
+    }
+
+    pub fn contains_plan(&self, x: f32, z: f32) -> bool {
+        (x - self.at.x).abs() <= self.half_x && (z - self.at.z).abs() <= self.half_z
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -544,6 +641,10 @@ pub struct AssemblyInstance {
     pub structure: StructuralSystemInstance,
     pub ceiling: CeilingPlan,
     pub fixtures: Vec<Fixture>,
+    /// The fit-out on the floor: what the room is furnished with. Empty is
+    /// a legitimate answer — a shell that was never occupied, or a program
+    /// (circulation, mechanical) that carries no furniture.
+    pub furniture: Vec<FurniturePiece>,
     pub service_voids: Vec<ServiceVoid>,
     pub corruption: CorruptionProfile,
 }
@@ -593,6 +694,10 @@ impl AssemblyInstance {
         for fixture in &mut self.fixtures {
             fixture.at.x += dx;
             fixture.at.z += dz;
+        }
+        for piece in &mut self.furniture {
+            piece.at.x += dx;
+            piece.at.z += dz;
         }
         self.structure.phase.0 += dx;
         self.structure.phase.1 += dz;
@@ -807,6 +912,7 @@ mod tests {
                 height_units: 3.4,
             }),
             fixtures: Vec::new(),
+            furniture: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile::default(),
         }
