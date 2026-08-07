@@ -125,6 +125,25 @@ impl BackroomsLevel {
             FabricCeilingBand::Expanse => (4.1 + 0.3 * detail, 3.8, 4.4),
             FabricCeilingBand::Vault => (4.95 + 0.45 * detail, 4.5, 5.4),
         };
+        // Span decides height, because structure does.
+        //
+        // The band is *climate* -- which part of the building this is. How
+        // tall the ceiling actually sits inside that climate is a fact about
+        // the room: you cannot span a hall at a closet's height without
+        // beams in the way, and nobody builds a closet as tall as a hall.
+        // Reading the two from independent fields gave broom closets with
+        // vaults and halls with soffits -- each locally plausible, together
+        // describing no building at all. Now the ceiling rides its own room:
+        // one fabric cell sits at the bottom of the band, the largest hall
+        // at the top.
+        let cx = (wx / FABRIC_CELL).floor() as i64;
+        let cz = (wz / FABRIC_CELL).floor() as i64;
+        let porosity = (Self::n(noise, seed, 0x9010, wx, wz, 0.11) * 0.5 + 0.5).clamp(0.0, 1.0);
+        let room = super::fabric_ca::room_at(noise, seed, cx, cz, 0, porosity);
+        // Log span, so each doubling lifts the ceiling by an equal step --
+        // the way a structural depth chart reads, not linear in area.
+        let reach = (room.span() / FABRIC_CELL).log2() / super::fabric_ca::LEVELS as f32;
+        let height = height + (hi - height) * reach.clamp(0.0, 1.0);
         // Snap to the fine voxel lattice, then clamp last: 21 * 0.2 is
         // 4.2000003 in f32 and must not escape the band's range.
         ((height / 0.2).round() * 0.2).clamp(lo, hi)

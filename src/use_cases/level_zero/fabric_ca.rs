@@ -154,6 +154,53 @@ fn sheet_for(
     })
 }
 
+/// The block a point actually stands in: the smallest one that declined to
+/// split, which is the room the grammar drew.
+///
+/// This is the parti made queryable. Every architectural property that
+/// depends on *how big the room is* -- ceiling height above all, but also
+/// wall mass, lighting pitch, how much furniture belongs -- should read it
+/// from here rather than from a field of its own. Two independent fields
+/// laid over the same floor is exactly how you get a broom closet with a
+/// vaulted ceiling and a hall with a soffit: each field is locally
+/// plausible and together they describe no building.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Room {
+    /// Subdivision level: 0 is one fabric cell, `LEVELS` the largest hall.
+    pub level: u32,
+}
+
+impl Room {
+    /// Clear span across the room, world units.
+    pub fn span(self) -> f32 {
+        (1i64 << self.level) as f32 * FABRIC_CELL
+    }
+}
+
+/// The room containing a fabric cell.
+///
+/// Walks down from the coarsest block until one splits; the level above that
+/// split is the room. Pure in its inputs, like everything else here.
+pub(super) fn room_at(
+    noise: &dyn NoiseProvider,
+    seed: u32,
+    cx: i64,
+    cz: i64,
+    epoch: u32,
+    porosity: f32,
+) -> Room {
+    for level in (1..=LEVELS).rev() {
+        // A block that refused to divide is the room, unless something
+        // coarser already refused -- hence walking down, not up.
+        let splits_x = splits(noise, seed, cx, cz, Axis::West, level, porosity, epoch);
+        let splits_z = splits(noise, seed, cx, cz, Axis::North, level, porosity, epoch);
+        if !splits_x && !splits_z {
+            return Room { level };
+        }
+    }
+    Room { level: 0 }
+}
+
 /// Which wall of a cell an edge belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Axis {
@@ -167,7 +214,7 @@ enum Axis {
 /// blocks. That top block is a hall you can see across, and its existence is
 /// the point — a world where every room is 7.2 u has no scale, because scale
 /// is only legible as *contrast* between sizes.
-const LEVELS: u32 = 4;
+pub(super) const LEVELS: u32 = 4;
 
 /// Hierarchy levels the Peripheral Shift is allowed to redraw.
 ///
