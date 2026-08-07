@@ -290,25 +290,55 @@ pub(crate) fn generate_fabric_cell_fixture_layouts(
 
     let district_id = ((cell_x >> 2) as u64) ^ (((cell_z >> 2) as u64) << 32);
     let district = electrical_condition_for_district(seed, district_id, age);
-    let hval = fixture_hash(seed, 0xF1A7, cell_x, cell_z);
-    let state = fixture_maintenance_state(district, kind, hval);
 
-    let id = ((cell_x as u64).wrapping_mul(0x9E37_79B9)
-        ^ (cell_z as u64).rotate_left(19)
-        ^ (seed as u64).rotate_left(37))
-        & 0x7FFF_FFFF_FFFF_FFFF;
-
-    layouts.push(FixtureLayout {
-        id,
-        kind,
-        state,
-        center_x: cx,
-        center_z: cz,
-        half_x,
-        half_z,
-        ceiling_units,
-        red_room: false,
-    });
+    // Troffers sit on the ceiling module, not one per room.
+    //
+    // A fabric cell used to carry a single panel at its centre: one light
+    // per 52 m^2, before maintenance killed any of them. Planned rooms light
+    // themselves nine times as densely, so the fabric — which is most of the
+    // world — came out roughly half as bright as anywhere anyone designed,
+    // and canon Level 0 is the opposite of that: uniformly, oppressively
+    // lit, humming. A reflected ceiling plan is *the* drawing that
+    // coordinates lights to the ceiling grid; now that Level 0 has a real
+    // tile module overhead, the fixtures belong on it.
+    //
+    // Spaced on the world lattice rather than the cell's own, so a run of
+    // troffers reads as continuous down a corridor instead of restarting at
+    // every 7.2 u cell boundary — the same reason the grid itself is world
+    // aligned.
+    const TROFFER_PITCH: f32 = 3.6;
+    let mut sx = ((cx - cell_size * 0.5) / TROFFER_PITCH).ceil() * TROFFER_PITCH;
+    while sx < cx + cell_size * 0.5 {
+        let mut sz = ((cz - cell_size * 0.5) / TROFFER_PITCH).ceil() * TROFFER_PITCH;
+        while sz < cz + cell_size * 0.5 {
+            let (kx, kz) = (
+                (sx / TROFFER_PITCH).round() as i64,
+                (sz / TROFFER_PITCH).round() as i64,
+            );
+            // Each troffer fails on its own: the flicker and the dead patch
+            // are the character, and they only read as decay when their
+            // neighbours are still working.
+            let hval = fixture_hash(seed, 0xF1A7, kx, kz);
+            let state = fixture_maintenance_state(district, kind, hval);
+            let id = ((kx as u64).wrapping_mul(0x9E37_79B9)
+                ^ (kz as u64).rotate_left(19)
+                ^ (seed as u64).rotate_left(37))
+                & 0x7FFF_FFFF_FFFF_FFFF;
+            layouts.push(FixtureLayout {
+                id,
+                kind,
+                state,
+                center_x: sx,
+                center_z: sz,
+                half_x,
+                half_z,
+                ceiling_units,
+                red_room: false,
+            });
+            sz += TROFFER_PITCH;
+        }
+        sx += TROFFER_PITCH;
+    }
 
     layouts
 }

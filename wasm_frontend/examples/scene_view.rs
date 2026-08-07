@@ -196,16 +196,7 @@ fn main() {
         scene_lights.len()
     );
 
-    let frame = FrameParams {
-        camera_pos: [cam_x, eye, cam_z],
-        yaw,
-        pitch,
-        scene_lights,
-        environment: Environment::interior(),
-        ..FrameParams::default()
-    };
     let toggles = RenderToggles::default();
-
     let chunks: Vec<SurfaceChunk> = meshes
         .iter()
         .map(|(cx, cz, mesh)| SurfaceChunk {
@@ -216,50 +207,159 @@ fn main() {
         .collect();
     surface.upload(&gpu.device, &chunks);
 
-    let lights = collect_frame_lights(&frame);
-    let uniforms = GpuFrameUniforms::from_frame(
-        &frame,
-        width,
-        height,
-        FOV_TAN,
-        chunk,
-        512,
-        lights.len(),
-        toggles,
+    // One streamed world, many cameras. Re-generating chunks per shot made a
+    // survey cost minutes and discouraged taking one, which is how a
+    // generator change goes unlooked-at.
+    println!(
+        "\n{:<14} {:>7} {:>7} {:>7} {:>7}  {}",
+        "shot", "mean", "p05", "p95", "black%", "file"
     );
-    frame_resources.write(&gpu.device, &gpu.queue, &uniforms, &lights);
-
-    let pixels = gpu.render(width, height, |encoder, color, depth| {
-        surface.draw(
-            &gpu.queue,
-            encoder,
-            color,
-            depth,
-            &frame_resources,
+    for shot in shots(cam_x, cam_z, yaw, pitch) {
+        let frame = FrameParams {
+            camera_pos: [shot.x, eye, shot.z],
+            yaw: shot.yaw,
+            pitch: shot.pitch,
+            scene_lights: scene_lights.clone(),
+            environment: Environment::interior(),
+            ..FrameParams::default()
+        };
+        let lights = collect_frame_lights(&frame);
+        let uniforms = GpuFrameUniforms::from_frame(
             &frame,
-            toggles,
-            frame.scene_lights.len() as u32,
+            width,
+            height,
             FOV_TAN,
-            width as f32 / height as f32,
+            chunk,
+            512,
+            lights.len(),
+            toggles,
         );
-    });
+        frame_resources.write(&gpu.device, &gpu.queue, &uniforms, &lights);
 
-    let view_path = out_dir.join(format!("{name}.view.png"));
-    image::save_buffer(&view_path, &pixels, width, height, image::ColorType::Rgba8)
-        .expect("write view png");
-    println!("wrote {}", view_path.display());
+        let pixels = gpu.render(width, height, |encoder, color, depth| {
+            surface.draw(
+                &gpu.queue,
+                encoder,
+                color,
+                depth,
+                &frame_resources,
+                &frame,
+                toggles,
+                frame.scene_lights.len() as u32,
+                FOV_TAN,
+                width as f32 / height as f32,
+            );
+        });
 
-    // A frame that is one flat colour means the camera is inside solid
-    // matter or looking at nothing — say so rather than shipping a blank.
-    let first = &pixels[0..3];
-    if pixels
-        .chunks_exact(4)
-        .all(|p| p[0] == first[0] && p[1] == first[1] && p[2] == first[2])
-    {
+        let file = format!("{name}.{}.png", shot.label);
+        let path = out_dir.join(&file);
+        image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8)
+            .expect("write view png");
+
+        let stats = Luminance::of(&pixels);
         println!(
-            "WARNING: the frame is a single flat colour. The camera is probably \
-             inside geometry; move AT or raise EYE."
+            "{:<14} {:>7.1} {:>7.1} {:>7.1} {:>6.1}%  {}",
+            shot.label,
+            stats.mean,
+            stats.p05,
+            stats.p95,
+            stats.black_share * 100.0,
+            file
         );
+    }
+}
+
+/// One camera in a batch.
+struct Shot {
+    label: String,
+    x: f32,
+    z: f32,
+    yaw: f32,
+    pitch: f32,
+}
+
+/// The batch to render.
+///
+/// `SHOTS` is `label:x,z,yaw,pitch` entries separated by `;`. With no
+/// `SHOTS`, the default is a panorama at `AT` — four cardinal yaws plus one
+/// looking up — because a single frame cannot distinguish "this place is
+/// dark" from "the camera happened to face a wall", and that ambiguity is
+/// exactly what wastes time when a render comes back black.
+fn shots(cam_x: f32, cam_z: f32, yaw: f32, pitch: f32) -> Vec<Shot> {
+    if let Ok(raw) = std::env::var("SHOTS") {
+        return raw
+            .split(';')
+            .filter(|s| !s.trim().is_empty())
+            .enumerate()
+            .map(|(i, entry)| {
+                let (label, values) = entry.split_once(':').unwrap_or(("shot", entry));
+                let v: Vec<f32> = values
+                    .split(',')
+                    .filter_map(|p| p.trim().parse().ok())
+                    .collect();
+                Shot {
+                    label: if label == "shot" {
+                        format!("shot{i}")
+                    } else {
+                        label.trim().into()
+                    },
+                    x: v.first().copied().unwrap_or(cam_x),
+                    z: v.get(1).copied().unwrap_or(cam_z),
+                    yaw: v.get(2).copied().unwrap_or(yaw),
+                    pitch: v.get(3).copied().unwrap_or(pitch),
+                }
+            })
+            .collect();
+    }
+    let quarter = std::f32::consts::FRAC_PI_2;
+    let mut out: Vec<Shot> = (0..4)
+        .map(|k| Shot {
+            label: ["east", "south", "west", "north"][k].into(),
+            x: cam_x,
+            z: cam_z,
+            yaw: yaw + k as f32 * quarter,
+            pitch,
+        })
+        .collect();
+    out.push(Shot {
+        label: "up".into(),
+        x: cam_x,
+        z: cam_z,
+        yaw,
+        pitch: 0.8,
+    });
+    out
+}
+
+/// Brightness of a rendered frame, so "the light is gone" is a measurement.
+///
+/// The mean alone hides the two failures that matter: a frame that is
+/// uniformly dim reads the same as one that is mostly black with a bright
+/// fixture in it. The percentiles and the black share separate them.
+struct Luminance {
+    mean: f32,
+    p05: f32,
+    p95: f32,
+    black_share: f32,
+}
+
+impl Luminance {
+    fn of(pixels: &[u8]) -> Self {
+        let mut values: Vec<f32> = pixels
+            .chunks_exact(4)
+            .map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
+            .collect();
+        let mean = values.iter().sum::<f32>() / values.len().max(1) as f32;
+        let black_share =
+            values.iter().filter(|v| **v < 8.0).count() as f32 / values.len().max(1) as f32;
+        values.sort_by(f32::total_cmp);
+        let at = |q: f32| values[((values.len() as f32 - 1.0) * q) as usize];
+        Self {
+            mean,
+            p05: at(0.05),
+            p95: at(0.95),
+            black_share,
+        }
     }
 }
 
