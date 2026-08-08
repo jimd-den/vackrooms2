@@ -1,7 +1,9 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const boot_world: () => void;
 export const start: () => void;
+export const set_fov: (a: number) => void;
 export const get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -23,7 +25,6 @@ export const set_cpu_quality_preset: (a: number) => void;
 export const set_cpu_mip_occupancy: (a: number) => void;
 export const set_cpu_scale: (a: number) => void;
 export const set_mouse_sensitivity: (a: number) => void;
-export const set_fov: (a: number) => void;
 export const set_cpu_virtual_depth: (a: number) => void;
 export const set_cpu_max_draw_distance: (a: number) => void;
 export const set_render_scale: (a: number) => void;

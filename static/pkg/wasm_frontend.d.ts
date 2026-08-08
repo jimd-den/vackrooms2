@@ -1,6 +1,20 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * Starts the engine against whatever world the URL now describes.
+ *
+ * The setup screen writes its seed and sliders into `location.search`
+ * and then calls this. Everything downstream — the composition root and
+ * every generation worker — reads that same query string, so choosing a
+ * world costs no new configuration plumbing and the resulting URL is a
+ * shareable reproduction for free.
+ *
+ * Safe to call more than once only in the sense that it will not panic;
+ * the caller is expected to invoke it once, when the player commits.
+ */
+export function boot_world(): void;
+
 export function get_blueprint_svg(seed: number, rx: number, rz: number, voxel_scale: number, size_world: number): string;
 
 export function get_chunk_blueprint_svg(seed: number, chunk_x: number, chunk_z: number, voxel_scale: number, layer: string): string;
@@ -123,7 +137,9 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly boot_world: () => void;
     readonly start: () => void;
+    readonly set_fov: (a: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -145,7 +161,6 @@ export interface InitOutput {
     readonly set_cpu_mip_occupancy: (a: number) => void;
     readonly set_cpu_scale: (a: number) => void;
     readonly set_mouse_sensitivity: (a: number) => void;
-    readonly set_fov: (a: number) => void;
     readonly set_cpu_virtual_depth: (a: number) => void;
     readonly set_cpu_max_draw_distance: (a: number) => void;
     readonly set_render_scale: (a: number) => void;

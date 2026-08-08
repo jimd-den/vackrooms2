@@ -382,6 +382,117 @@
         }
         #settings-btn:hover { border-color: var(--ink); color: var(--critical); }
 
+        /* ---- Survey requisition: choosing a world before it exists ------ */
+        /* Same reading surface as the settings menu — this is a dense form,
+           not a title card, so it uses the UI face rather than the pixel
+           one. */
+        #world-setup,
+        #world-setup * { font-family: var(--ui); font-size: var(--fs-ui); }
+        #world-setup {
+            position: fixed;
+            inset: 0;
+            z-index: 20;
+            box-sizing: border-box;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            background: var(--panel-solid);
+            color: var(--ink);
+            padding: max(28px, env(safe-area-inset-top)) 20px
+                     max(28px, env(safe-area-inset-bottom));
+        }
+        #world-setup[hidden] { display: none; }
+        #world-setup > * {
+            max-width: 560px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        #world-setup h2 {
+            font-size: var(--fs-small);
+            font-weight: normal;
+            letter-spacing: 0.3em;
+            color: var(--route);
+            margin: 0 0 10px;
+        }
+        .setup-note, .setup-hint {
+            color: var(--quiet);
+            line-height: 1.6;
+            margin: 0 0 22px;
+        }
+        .setup-hint { margin: 6px 0 0; opacity: 0.8; }
+        .setup-row { margin-bottom: 24px; }
+        .setup-row > label {
+            display: block;
+            margin-bottom: 7px;
+            color: var(--system);
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+        }
+        .setup-seed-line { display: flex; gap: 8px; }
+        #setup-seed, #setup-quality {
+            flex: 1;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--hairline);
+            border-radius: 0;
+            color: var(--ink);
+            font-family: var(--ui);
+        }
+        #setup-seed:focus, #setup-quality:focus {
+            outline: none;
+            border-color: var(--system);
+        }
+        #world-setup button {
+            background: transparent;
+            border: 1px solid var(--hairline);
+            color: var(--ink);
+            padding: 10px 18px;
+            cursor: pointer;
+            letter-spacing: 0.16em;
+            font-family: var(--ui);
+            transition: border-color 0.15s, color 0.15s;
+        }
+        #world-setup button:hover { border-color: var(--ink); color: var(--critical); }
+        .setup-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+        .setup-presets button[aria-pressed="true"] {
+            border-color: var(--route);
+            color: var(--route);
+        }
+        /* One knob: name, live value, range. Mirrors .setting-row so the two
+           surfaces read identically. */
+        .setup-knob { margin-bottom: 12px; }
+        .setup-knob label {
+            display: block;
+            margin-bottom: 3px;
+            color: var(--quiet);
+        }
+        .setup-knob .value { float: right; color: var(--critical); }
+        .setup-knob input[type="range"] {
+            width: 100%;
+            accent-color: var(--system);
+        }
+        .setup-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            padding-top: 4px;
+        }
+        #setup-enter {
+            border-color: var(--route) !important;
+            color: var(--route) !important;
+        }
+        #setup-enter:hover {
+            border-color: var(--critical) !important;
+            color: var(--critical) !important;
+        }
+        #setup-enter[disabled] { opacity: 0.5; cursor: progress; }
+        @media (pointer: coarse) {
+            #world-setup button { min-height: 48px; }
+            #setup-seed, #setup-quality { min-height: 48px; padding: 14px; }
+            .setup-knob input[type="range"] { height: 44px; }
+        }
+
         /* ---- Settings: maintenance parameters --------------------------- */
         #settings-menu,
         #settings-menu * {
@@ -641,6 +752,62 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
         <button id="btn-drink" aria-label="Drink almond water">AW</button>
         <button id="btn-eat" aria-label="Eat ration">MRE</button>
         <div id="touch-hint">left: move &middot; right: look</div>
+    </div>
+
+    <!--
+        Survey requisition. Shown before any world exists, on a fresh visit
+        only: a shared link already names its world and boots straight into
+        it. Every control here writes to the URL, so committing produces a
+        reproduction others can open.
+    -->
+    <div id="world-setup" class="bracket" hidden>
+        <h2>SURVEY REQUISITION &mdash; LEVEL 0</h2>
+        <p class="setup-note">
+            Designate a survey seed and the parameters of the fabric.
+            The full site is planned before entry; expect a wait, then hours of
+            uninterrupted traversal.
+        </p>
+
+        <div class="setup-row">
+            <label for="setup-seed">Survey seed</label>
+            <div class="setup-seed-line">
+                <input type="text" id="setup-seed" inputmode="text" autocomplete="off"
+                       spellcheck="false" placeholder="42 or any word">
+                <button type="button" id="setup-roll" title="Roll a new seed">ROLL</button>
+            </div>
+            <p class="setup-hint">
+                Numbers are used as-is; words are hashed. The same seed always
+                rebuilds the same site.
+            </p>
+        </div>
+
+        <div class="setup-row">
+            <label>Standing orders</label>
+            <div id="setup-presets" class="setup-presets"></div>
+            <p class="setup-hint" id="setup-preset-note">Balanced survey conditions.</p>
+        </div>
+
+        <div class="setup-row">
+            <label>Fabric parameters</label>
+            <div id="setup-knobs"></div>
+        </div>
+
+        <div class="setup-row">
+            <label for="setup-quality">Instrument profile</label>
+            <select id="setup-quality">
+                <option value="low">Low spec &mdash; 10u chunks, 0.2u voxels</option>
+                <option value="high">High spec &mdash; 20u chunks, 0.1u voxels</option>
+            </select>
+            <p class="setup-hint">
+                High spec resolves finer detail and costs more per chunk. Everything
+                here is changeable later in Settings.
+            </p>
+        </div>
+
+        <div class="setup-actions">
+            <button type="button" id="setup-reset">RESET</button>
+            <button type="button" id="setup-enter">BEGIN SURVEY</button>
+        </div>
     </div>
 
     <div id="overlay">
@@ -966,6 +1133,7 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             set_anomaly_debug,
             set_assisted_consumption,
             set_render_toggle,
+            boot_world,
         } from './pkg/wasm_frontend.js';
 
         const $ = (id) => document.getElementById(id);
@@ -1110,13 +1278,35 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
                 `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`,
             );
         }
+        // Does this load already name a world, or must the player choose one?
+        //
+        // "The URL is non-empty" cannot answer that: a bare visit stamps a
+        // rolled seed into the URL below, so by the time anything looks, every
+        // load carries a query. The real question is whether this is a
+        // *reproduction* — a link someone shared, an automated capture, or an
+        // explicit opt-out — because only a fresh visit has a choice left to
+        // make. `auto_seed=1` is precisely the marker for "nobody chose this".
+        const sharedWorld = urlParams.has('seed') && urlParams.get('auto_seed') !== '1';
+        const showSetup = !sharedWorld
+            && urlParams.get('skip_setup') !== '1'
+            && !urlParams.has('capture');
+        // Read by the wasm start hook. Set before `init()` — the module boots
+        // the moment it is instantiated unless told to wait, and booting now
+        // would build a world against a query the setup screen has not
+        // written yet, leaving the main thread and its generation workers
+        // disagreeing about which world this is.
+        globalThis.__VACKROOMS_DEFER_BOOT__ = showSetup;
+
         // Every start explores a fresh world — including plain reloads. The
         // rolled seed must still be stamped into the URL before `init()` so
         // the Rust composition root and every generation worker agree on one
         // world; `auto_seed=1` marks it as rolled, so the next load rerolls
         // instead of revisiting. An explicit ?seed= (typed or from a copied
         // link, which never includes auto_seed) stays an exact reproduction.
-        if (!urlParams.has('seed') || urlParams.get('auto_seed') === '1') {
+        //
+        // Skipped while the setup screen is up: the player is about to name a
+        // seed, and rolling one here would be overwritten a moment later.
+        if (!showSetup && (!urlParams.has('seed') || urlParams.get('auto_seed') === '1')) {
             const rolled = crypto.getRandomValues(new Uint32Array(1))[0];
             urlParams.set('seed', String(rolled));
             urlParams.set('auto_seed', '1');
@@ -1456,7 +1646,12 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             else document.documentElement.requestFullscreen?.();
         });
 
-        $('apply-settings-btn').addEventListener('click', () => {
+        // The single serializer for "what world is this". Both the setup
+        // screen and Apply & Reload go through it, so a link produced by one
+        // can never mean something different from a link produced by the
+        // other. Reads the settings-menu controls; the setup screen copies
+        // its own values across before calling it.
+        const buildWorldQuery = () => {
             const params = new URLSearchParams();
             const seed = $('setting-seed').value.trim();
             if (seed) params.set('seed', seed);
@@ -1497,14 +1692,203 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
                 params.set(`rt_${name}`, enabled ? '1' : '0');
             }
 
-            window.location.search = params.toString();
+            return params;
+        };
+
+        $('apply-settings-btn').addEventListener('click', () => {
+            window.location.search = buildWorldQuery().toString();
         });
 
+        // ---- Survey requisition ---------------------------------------------
+        // Named parameter sets, not arbitrary numbers. Each one is a stance on
+        // what the fabric is: how much of it is wall, how far it opens up, how
+        // often it stops behaving. Anything unnamed stays at 1.0.
+        const SETUP_KNOBS = Object.freeze([
+            { knob: 'walls', label: 'Wall density', hint: '0 = open plan' },
+            { knob: 'pillars', label: 'Structural columns' },
+            { knob: 'atria', label: 'Atria / vaulting', hint: 'how much vaults into tall space' },
+            { knob: 'lights', label: 'Ceiling fixtures' },
+            { knob: 'anomalies', label: 'Anomaly frequency' },
+            { knob: 'redrooms', label: 'Red rooms' },
+            { knob: 'almondwater', label: 'Almond water' },
+            { knob: 'rations', label: 'Rations' },
+            { knob: 'leveldoors', label: 'Level doors' },
+        ]);
+        const SETUP_PRESETS = Object.freeze({
+            standard: {
+                label: 'STANDARD',
+                note: 'Balanced survey conditions — the level as documented.',
+                values: {},
+            },
+            warren: {
+                label: 'WARREN',
+                note: 'Dense partitioning, low ceilings, little relief. Navigation is the hazard.',
+                values: { walls: 2.2, atria: 0.2, pillars: 0.6, lights: 0.8 },
+            },
+            expanse: {
+                label: 'EXPANSE',
+                note: 'Few walls, heavy structure, vast vaulting. Scale is the hazard.',
+                values: { walls: 0.3, atria: 2.6, pillars: 2.2, lights: 0.7 },
+            },
+            blackout: {
+                label: 'BLACKOUT',
+                note: 'Barely lit and poorly provisioned. Bring flares.',
+                values: { lights: 0.2, almondwater: 0.4, rations: 0.4, anomalies: 1.6 },
+            },
+            unstable: {
+                label: 'UNSTABLE',
+                note: 'Anomalous throughout. Not representative of the level.',
+                values: { anomalies: 3.2, redrooms: 2.5, atria: 1.8, leveldoors: 2.0 },
+            },
+        });
+
+        const setupKnobInput = (knob) => $(`setup-${knob}`);
+        const readSetupKnobs = () => Object.fromEntries(
+            SETUP_KNOBS.map(({ knob }) => [knob, Number(setupKnobInput(knob).value)]),
+        );
+        const writeSetupKnob = (knob, value) => {
+            const input = setupKnobInput(knob);
+            input.value = String(value);
+            $(`setup-${knob}-value`).textContent = Number(value).toFixed(1);
+        };
+
+        const buildSetupScreen = () => {
+            const knobHost = $('setup-knobs');
+            for (const { knob, label, hint } of SETUP_KNOBS) {
+                const row = document.createElement('div');
+                row.className = 'setup-knob';
+                // Built from the same knob names the settings menu and the URL
+                // use, so a control can never exist here under a name the
+                // generator does not answer to.
+                row.innerHTML = `
+                    <label for="setup-${knob}">${label}
+                        <span class="value" id="setup-${knob}-value">1.0</span>
+                    </label>
+                    <input type="range" id="setup-${knob}" min="0" max="4" step="0.1" value="1.0"
+                           aria-label="${label}${hint ? ` — ${hint}` : ''}">`;
+                knobHost.appendChild(row);
+                row.querySelector('input').addEventListener('input', (e) => {
+                    $(`setup-${knob}-value`).textContent = Number(e.target.value).toFixed(1);
+                    markPresetCustom();
+                });
+            }
+
+            const presetHost = $('setup-presets');
+            for (const [name, preset] of Object.entries(SETUP_PRESETS)) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = preset.label;
+                button.dataset.preset = name;
+                button.setAttribute('aria-pressed', String(name === 'standard'));
+                button.addEventListener('click', () => applyPreset(name));
+                presetHost.appendChild(button);
+            }
+        };
+
+        const markPresetCustom = () => {
+            for (const button of $('setup-presets').querySelectorAll('button')) {
+                button.setAttribute('aria-pressed', 'false');
+            }
+            $('setup-preset-note').textContent = 'Custom parameters.';
+        };
+
+        const applyPreset = (name) => {
+            const preset = SETUP_PRESETS[name];
+            if (!preset) return;
+            for (const { knob } of SETUP_KNOBS) {
+                writeSetupKnob(knob, preset.values[knob] ?? 1.0);
+            }
+            for (const button of $('setup-presets').querySelectorAll('button')) {
+                button.setAttribute('aria-pressed', String(button.dataset.preset === name));
+            }
+            $('setup-preset-note').textContent = preset.note;
+        };
+
+        const rollSeed = () => {
+            $('setup-seed').value = String(crypto.getRandomValues(new Uint32Array(1))[0]);
+        };
+
+        // Commit: copy the requisition into the settings controls, let the one
+        // serializer turn them into a URL, publish it, and only then boot. The
+        // engine and every generation worker read that URL, so this is also
+        // what makes the address bar a shareable reproduction.
+        // Resolved once the wasm module is instantiated. The setup screen is
+        // interactive immediately — it is plain DOM — so a fast click can
+        // reach `beginSurvey` before the module exists; committing must wait
+        // for it rather than calling into an uninstantiated import.
+        let engineReady = null;
+        let entering = false;
+        const beginSurvey = async () => {
+            if (entering) return;
+            entering = true;
+            $('setup-enter').disabled = true;
+
+            const seed = $('setup-seed').value.trim();
+            $('setting-seed').value = seed;
+            for (const [knob, value] of Object.entries(readSetupKnobs())) {
+                $(`setting-${knob}`).value = String(value);
+                $(`${knob}-value`).textContent = value.toFixed(1);
+            }
+            $('setting-quality').value = $('setup-quality').value;
+
+            const params = buildWorldQuery();
+            if (!seed) {
+                // An empty field means "surprise me". Mark it rolled so a
+                // later plain reload rerolls rather than revisiting.
+                params.set('seed', String(crypto.getRandomValues(new Uint32Array(1))[0]));
+                params.set('auto_seed', '1');
+            }
+            history.replaceState(
+                null,
+                '',
+                `${window.location.pathname}?${params.toString()}${window.location.hash}`,
+            );
+
+            $('world-setup').hidden = true;
+            $('status-msg').textContent =
+                'Planning the site — this happens once, then never again…';
+            try {
+                await engineReady;
+                boot_world();
+            } catch (err) {
+                $('status-msg').textContent = 'Failed to start engine: ' + err;
+            }
+        };
+
+        if (showSetup) {
+            buildSetupScreen();
+            // Prefill from the URL so a half-configured link stays editable
+            // rather than being silently discarded.
+            for (const { knob } of SETUP_KNOBS) {
+                const urlKey = WORLD_KNOBS[knob];
+                if (urlParams.has(urlKey)) {
+                    const value = Number(urlParams.get(urlKey));
+                    if (Number.isFinite(value)) writeSetupKnob(knob, Math.min(4, Math.max(0, value)));
+                }
+            }
+            if (urlParams.has('seed')) $('setup-seed').value = urlParams.get('seed');
+            $('setup-quality').value = urlParams.get('spec') === 'high' ? 'high' : 'low';
+            $('setup-roll').addEventListener('click', rollSeed);
+            $('setup-reset').addEventListener('click', () => {
+                applyPreset('standard');
+                $('setup-seed').value = '';
+                $('setup-quality').value = 'low';
+            });
+            $('setup-enter').addEventListener('click', beginSurvey);
+            $('setup-seed').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') beginSurvey();
+            });
+            $('world-setup').hidden = false;
+        }
+
         // ---- Boot -----------------------------------------------------------
-        init().then(() => {
+        // `init()` instantiates the module; the engine starts inside it unless
+        // `__VACKROOMS_DEFER_BOOT__` told it to wait for `boot_world()` above.
+        engineReady = init().then(() => {
             $('settings-btn').style.display = 'block';
             applyLivePrefs();
-        }).catch((err) => {
+        });
+        engineReady.catch((err) => {
             $('status-msg').textContent = 'Failed to start engine: ' + err;
         });
     </script>
