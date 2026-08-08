@@ -24,4 +24,5 @@ pub mod red_rooms;
 pub mod region_plan;
 pub(crate) mod vertical_circulation;
 pub mod wfc3d;
+pub mod world_block;
 pub mod world_topology;
