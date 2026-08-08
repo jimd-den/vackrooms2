@@ -8,6 +8,7 @@
 use std::collections::VecDeque;
 
 use crate::application::ports::ChunkRequest;
+use crate::application::streaming::ChunkKey;
 
 #[derive(Debug)]
 struct WorkerRequests {
@@ -36,6 +37,33 @@ impl GenerationWorkerRequests {
                 })
                 .collect(),
         }
+    }
+
+    /// Which worker owns a chunk.
+    ///
+    /// Deliberately not round-robin. Each worker keeps its own archive of
+    /// what it has generated, and an archive only pays off if the chunk comes
+    /// back to the worker holding it — round-robin would scatter a chunk
+    /// across the pool and turn a 0.46 ms read into a 42 ms regeneration on
+    /// (n-1)/n of re-requests.
+    ///
+    /// Hashing the coordinates rather than slicing the world into contiguous
+    /// blocks is what keeps the pool balanced: a player standing anywhere has
+    /// their surrounding chunks spread evenly across workers, where a
+    /// block-per-worker split would leave one worker generating everything
+    /// while the rest idled.
+    pub(crate) fn preferred_worker(chunk: ChunkKey, worker_count: usize) -> usize {
+        if worker_count <= 1 {
+            return 0;
+        }
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for word in [chunk.0 as u64, chunk.1 as u64] {
+            for byte in word.to_le_bytes() {
+                h ^= byte as u64;
+                h = h.wrapping_mul(0x1000_0000_01b3);
+            }
+        }
+        (h % worker_count as u64) as usize
     }
 
     /// Finds the next healthy worker, wrapping once from `start`.
@@ -95,6 +123,48 @@ mod tests {
     use super::*;
     use crate::application::ports::RenderArtifactNeeds;
     use vackrooms::domain::entities::anomaly::RealitySnapshot;
+
+    #[test]
+    fn a_chunk_always_goes_to_the_same_worker() {
+        // The property the per-worker archive depends on: an evicted chunk
+        // coming back into range must be routed to the worker that already
+        // has it, or the archive never hits.
+        for count in [1usize, 2, 3, 4, 8, 32] {
+            for chunk in [(0i64, 0i64), (10, -40), (-1234, 5678), (i64::MIN, i64::MAX)] {
+                let first = GenerationWorkerRequests::preferred_worker(chunk, count);
+                assert_eq!(
+                    first,
+                    GenerationWorkerRequests::preferred_worker(chunk, count),
+                    "routing for {chunk:?} across {count} workers was not stable"
+                );
+                assert!(first < count, "worker {first} is outside a pool of {count}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_neighbourhood_spreads_across_the_whole_pool() {
+        // Affinity must not become a contiguous split: one worker owning the
+        // area around the player would generate everything while the rest
+        // idled, which is worse than round-robin.
+        let count = 4;
+        let mut used = [0usize; 4];
+        for z in -6..6i64 {
+            for x in -6..6i64 {
+                used[GenerationWorkerRequests::preferred_worker((x, z), count)] += 1;
+            }
+        }
+        let total: usize = used.iter().sum();
+        assert_eq!(total, 144);
+        for (worker, &share) in used.iter().enumerate() {
+            // An even split is 36; allow a wide band so this tests balance,
+            // not a particular hash.
+            assert!(
+                (14..=64).contains(&share),
+                "worker {worker} got {share} of {total} chunks"
+            );
+        }
+    }
 
     fn request(id: u32, x: f32) -> ChunkRequest {
         ChunkRequest {

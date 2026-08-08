@@ -1087,29 +1087,65 @@ mod worker_entry {
 
     use wasm_bindgen::prelude::*;
 
+    use crate::adapters::archived_chunk_source::ArchivedChunkSource;
     use crate::adapters::chunk_codec::encode_chunk_payload;
-    use crate::adapters::local_chunk_source::LocalChunkSource;
     use crate::adapters::query_config::generator_setup_from_query;
+    use crate::application::chunk_archive::MemoryStorage;
     use crate::application::ports::{ChunkSourcePort, RenderArtifactNeeds};
     use vackrooms::domain::entities::anomaly::RealitySnapshot;
     use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
     thread_local! {
-        static SOURCE: RefCell<Option<LocalChunkSource<SimpleNoiseProvider>>> =
+        static SOURCE: RefCell<Option<ArchivedChunkSource<SimpleNoiseProvider>>> =
             const { RefCell::new(None) };
     }
+
+    /// Per-worker archive ceiling, bytes.
+    ///
+    /// The pool shards the world by chunk affinity, so each worker archives
+    /// roughly `1/n` of what the player visits and the pool's total stays near
+    /// this figure however many workers there are. 32 MB is a few thousand
+    /// coarse chunks — comfortably more than a rolling window holds, so
+    /// pacing an area never empties it.
+    const WORKER_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
 
     /// `default_seed` must match the main thread's `WORLD_SEED`.
     #[wasm_bindgen]
     pub fn worker_init(query: &str, default_seed: u32) {
         let (seed, config) = generator_setup_from_query(query, default_seed);
+        // In-memory for now: OPFS would make this outlive the tab, but even
+        // held in the worker's own heap the archive is what makes the rolling
+        // window cheap. A chunk evicted when the player turned away and
+        // wanted again a moment later is a 0.46 ms decode instead of a 42 ms
+        // regeneration, and the worker it comes back to is the one holding it
+        // because the pool routes by chunk affinity.
+        //
+        // `generator_id` is the query string's own hash: it changes whenever
+        // any world parameter does, which is exactly when archived geometry
+        // stops being valid. It does *not* change when the generator's code
+        // changes — a worker is rebuilt with the wasm module, so a code change
+        // replaces the archive along with everything else. A persistent
+        // archive would have to fold in a build hash.
+        let generator_id = fnv64(query.as_bytes());
         SOURCE.with(|s| {
-            *s.borrow_mut() = Some(LocalChunkSource::new(
+            *s.borrow_mut() = Some(ArchivedChunkSource::with_budget(
                 SimpleNoiseProvider::new(),
                 seed,
                 config,
+                Box::new(MemoryStorage::new()),
+                generator_id,
+                WORKER_ARCHIVE_BYTES,
             ));
         });
+    }
+
+    fn fnv64(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &byte in bytes {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        h
     }
 
     #[wasm_bindgen]

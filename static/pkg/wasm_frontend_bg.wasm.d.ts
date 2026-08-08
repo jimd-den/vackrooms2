@@ -1,7 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
-export const set_fov: (a: number) => void;
 export const get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -29,6 +28,7 @@ export const set_render_scale: (a: number) => void;
 export const set_cpu_shadows: (a: number) => void;
 export const boot_world: () => void;
 export const start: () => void;
+export const set_fov: (a: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__h537f5492ae6045f0: (a: number, b: number, c: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__h2e918718a0f885a1: (a: number, b: number, c: any) => [number, number];
 export const wasm_bindgen__convert__closures_____invoke__h0d9e5b7dd5e62e9d: (a: number, b: number, c: any) => [number, number];

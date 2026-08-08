@@ -337,6 +337,27 @@ impl ChunkArchive {
     pub fn note_miss(&mut self) {
         self.misses += 1;
     }
+
+    /// Bytes the archive currently occupies.
+    pub fn bytes(&self) -> u64 {
+        self.end
+    }
+
+    /// Drops every record and starts the log again.
+    ///
+    /// An append-only log cannot free one record, so a bounded archive
+    /// discards all of them at once. That is crude — it throws away chunks
+    /// the player is standing next to along with ones they left an hour ago —
+    /// but it is correct, it is O(1), and the cost of being wrong is one
+    /// regeneration. A reuse-ordered eviction would need either a rewritten
+    /// log or an index of holes, which is the complexity this format exists
+    /// to avoid.
+    pub fn clear(&mut self, storage: &mut dyn ArchiveStorage) {
+        storage.reset();
+        storage.append(&self.identity.to_bytes());
+        self.index.clear();
+        self.end = HEADER_BYTES as u64;
+    }
 }
 
 /// An in-memory [`ArchiveStorage`], for tests and for a browser session that
@@ -597,6 +618,28 @@ mod tests {
         archive.put(&mut storage, key(0, 0, 0), b"never lands");
         assert!(archive.is_empty());
         assert_eq!(archive.get(&storage, key(0, 0, 0)), None);
+    }
+
+    #[test]
+    fn clearing_frees_the_log_but_keeps_it_usable() {
+        let mut storage = MemoryStorage::new();
+        let mut archive = ChunkArchive::open(&mut storage, identity());
+        archive.put(&mut storage, key(0, 0, 0), b"old geometry");
+        let grown = archive.bytes();
+
+        archive.clear(&mut storage);
+        assert!(archive.is_empty());
+        assert_eq!(archive.get(&storage, key(0, 0, 0)), None);
+        assert!(archive.bytes() < grown);
+
+        archive.put(&mut storage, key(1, 1, 0), b"new geometry");
+        let mut reopened = ChunkArchive::open(&mut storage, identity());
+        assert_eq!(
+            reopened.get(&storage, key(1, 1, 0)).as_deref(),
+            Some(b"new geometry".as_slice()),
+            "a cleared archive must still be a valid log"
+        );
+        assert_eq!(reopened.len(), 1, "the cleared records came back");
     }
 
     #[test]

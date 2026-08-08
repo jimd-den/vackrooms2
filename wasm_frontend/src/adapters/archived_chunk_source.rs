@@ -42,6 +42,15 @@ use crate::application::ports::{
 };
 use crate::application::streaming::chunk_key;
 
+/// Default ceiling on one archive, bytes.
+///
+/// 64 MB holds roughly 500 full-resolution 10 u chunks or 2000 at the
+/// ladder's mid rung — far more than the rolling window ever has resident, so
+/// a player pacing an area never sees a clear. A worker pool multiplies this,
+/// which is why the pool shards the world rather than each worker archiving
+/// all of it.
+pub const DEFAULT_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+
 pub struct ArchivedChunkSource<N: NoiseProvider> {
     inner: LocalChunkSource<N>,
     // `RefCell` because the port loads through `&self`: reading an archive
@@ -49,6 +58,8 @@ pub struct ArchivedChunkSource<N: NoiseProvider> {
     // caller can observe.
     archive: RefCell<ChunkArchive>,
     storage: RefCell<Box<dyn ArchiveStorage>>,
+    max_bytes: u64,
+    clears: RefCell<u64>,
 }
 
 impl<N: NoiseProvider> ArchivedChunkSource<N> {
@@ -62,8 +73,27 @@ impl<N: NoiseProvider> ArchivedChunkSource<N> {
         noise: N,
         seed: u32,
         config: GeneratorConfig,
+        storage: Box<dyn ArchiveStorage>,
+        generator_id: u64,
+    ) -> Self {
+        Self::with_budget(
+            noise,
+            seed,
+            config,
+            storage,
+            generator_id,
+            DEFAULT_ARCHIVE_BYTES,
+        )
+    }
+
+    /// As [`new`](Self::new), with an explicit ceiling on the archive.
+    pub fn with_budget(
+        noise: N,
+        seed: u32,
+        config: GeneratorConfig,
         mut storage: Box<dyn ArchiveStorage>,
         generator_id: u64,
+        max_bytes: u64,
     ) -> Self {
         let identity = ArchiveIdentity::new(
             seed,
@@ -77,7 +107,15 @@ impl<N: NoiseProvider> ArchivedChunkSource<N> {
             inner: LocalChunkSource::new(noise, seed, config),
             archive: RefCell::new(archive),
             storage: RefCell::new(storage),
+            max_bytes,
+            clears: RefCell::new(0),
         }
+    }
+
+    /// How many times the archive has been emptied to stay inside its budget.
+    /// A session that keeps climbing is thrashing and wants a larger budget.
+    pub fn clears(&self) -> u64 {
+        *self.clears.borrow()
     }
 
     /// (hits, misses, stored) since opening.
@@ -122,9 +160,16 @@ impl<N: NoiseProvider> ArchivedChunkSource<N> {
             .load_with_artifacts(origin_x, origin_z, level, lod, reality, artifacts);
         let encoded = encode_chunk_payload(&payload);
         let mut storage = self.storage.borrow_mut();
-        self.archive
-            .borrow_mut()
-            .put(storage.as_mut(), key, &encoded);
+        let mut archive = self.archive.borrow_mut();
+        // Bound the log before growing it. An append-only file cannot free
+        // one record, so staying inside a budget means emptying it — see
+        // `ChunkArchive::clear` for why that trade is the right one here.
+        if archive.bytes() + encoded.len() as u64 > self.max_bytes {
+            archive.clear(storage.as_mut());
+            *self.clears.borrow_mut() += 1;
+        }
+        archive.put(storage.as_mut(), key, &encoded);
+        drop(archive);
         payload
     }
 }
@@ -320,6 +365,72 @@ mod tests {
         assert_eq!(stored, 0, "the second session generated something it had");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_chunk_that_leaves_the_window_and_returns_is_not_regenerated() {
+        // The rolling window: the engine evicts whatever the player cannot
+        // see and reloads it on return. Without an archive that return costs
+        // a full generation, so turning around in a corridor rebuilds the
+        // corridor. With one it is a decode.
+        let archived = source(Box::new(MemoryStorage::new()));
+        let reality = RealitySnapshot::default();
+        let mut visit = |ox: f32| {
+            archived.load_with_artifacts(ox, 0.0, 0, 1, &reality, RenderArtifactNeeds::SURFACE)
+        };
+
+        // Walk out along a row...
+        for i in 0..6 {
+            visit(i as f32 * 10.0);
+        }
+        let (_, _, stored_after_walk) = archived.stats();
+        assert_eq!(stored_after_walk, 6);
+
+        // ...and walk back over the same ground, as an evicted window would.
+        for i in (0..6).rev() {
+            visit(i as f32 * 10.0);
+        }
+        let (hits, _, stored) = archived.stats();
+        assert_eq!(
+            stored, 6,
+            "walking back over known ground generated {} new chunks",
+            stored - 6
+        );
+        assert_eq!(hits, 6, "the return trip was not served from the archive");
+    }
+
+    #[test]
+    fn the_archive_stays_inside_its_budget() {
+        // An append-only log grows forever unless something bounds it. A
+        // worker that archived every chunk of an hour-long session would end
+        // the session as the reason the tab died.
+        let archived = ArchivedChunkSource::with_budget(
+            SimpleNoiseProvider::new(),
+            42,
+            GeneratorConfig::low_spec(),
+            Box::new(MemoryStorage::new()),
+            1,
+            256 * 1024,
+        );
+        let reality = RealitySnapshot::default();
+        for i in 0..12 {
+            archived.load_with_artifacts(
+                i as f32 * 10.0,
+                0.0,
+                0,
+                1,
+                &reality,
+                RenderArtifactNeeds::SURFACE,
+            );
+        }
+        assert!(
+            archived.clears() > 0,
+            "a 256 KB budget was never enforced across 12 chunks"
+        );
+        assert!(
+            archived.storage.borrow().len() <= 256 * 1024 + (128 * 1024),
+            "the archive overran its budget by more than one record"
+        );
     }
 
     #[test]

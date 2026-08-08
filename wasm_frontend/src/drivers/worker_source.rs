@@ -28,13 +28,13 @@ use crate::application::generation_worker_policy::MAX_GENERATION_WORKERS;
 use crate::application::ports::{
     ChunkPayload, ChunkRequest, ChunkSourcePort, CompletedChunk, RenderArtifactNeeds,
 };
+use crate::application::streaming::chunk_key;
 use crate::drivers::generation_worker_requests::GenerationWorkerRequests;
 use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
 pub struct WorkerChunkSource {
     workers: Vec<Worker>,
-    next_worker: usize,
     completed: Rc<RefCell<Vec<CompletedChunk>>>,
     failed: Rc<RefCell<Vec<ChunkRequest>>>,
     requests: Rc<RefCell<GenerationWorkerRequests>>,
@@ -144,7 +144,6 @@ impl WorkerChunkSource {
             crate::adapters::query_config::generator_setup_from_query(query, default_seed);
         Ok(Self {
             workers,
-            next_worker: 0,
             completed,
             failed,
             requests,
@@ -199,7 +198,17 @@ impl ChunkSourcePort for WorkerChunkSource {
     }
 
     fn request(&mut self, request: ChunkRequest) {
-        let worker_index = self.requests.borrow().next_accepting(self.next_worker);
+        // Route by chunk, not round-robin: each worker archives what it
+        // generates, so a chunk evicted from the rolling window and later
+        // wanted again must come back to the worker already holding it.
+        // `next_accepting` still falls through to any healthy worker, so
+        // affinity is a preference and never a way to strand a request on a
+        // dead worker.
+        let preferred = GenerationWorkerRequests::preferred_worker(
+            chunk_key(request.origin_x, request.origin_z),
+            self.workers.len(),
+        );
+        let worker_index = self.requests.borrow().next_accepting(preferred);
         let Some(worker_index) = worker_index else {
             // Fatal worker startup/runtime failures must not strand streaming.
             // This path is deliberately exceptional: the healthy path always
@@ -240,7 +249,6 @@ impl ChunkSourcePort for WorkerChunkSource {
         let reality = js_sys::Uint32Array::from(reality_words.as_slice());
         set("reality", reality.into());
         let worker = &self.workers[worker_index];
-        self.next_worker = (worker_index + 1) % self.workers.len();
         self.requests
             .borrow_mut()
             .assign(worker_index, request.clone());
