@@ -20,6 +20,8 @@
 //! prove large uniform regions cheaply without touching a dense array —
 //! this pipeline's grid is already dense by the time it reaches here.
 
+use std::cell::RefCell;
+
 use vackrooms::adapters::brick_pool_gpu_serializer::BrickPoolGpuSerializer;
 use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
@@ -36,6 +38,9 @@ use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::use_cases::compress_svdag::compress_svdag;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 use vackrooms::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
+use vackrooms::use_cases::world_block::BlockCoord;
+
+use crate::adapters::block_cache::{BlockCache, DEFAULT_BLOCK_CAPACITY};
 
 use crate::adapters::collect_emissive_lights::collect_emissive_lights;
 use crate::adapters::surface_mesh::build_surface_artifacts;
@@ -57,16 +62,15 @@ pub struct LocalChunkSource<N: NoiseProvider> {
     telemetry: &'static dyn TelemetryPort,
     seed: u32,
     config: GeneratorConfig,
+    /// Planned blocks feeding the voxel path. `RefCell` because
+    /// [`ChunkSourcePort`] loads through `&self` — the source is logically
+    /// immutable and this is a memo, not state the caller can observe.
+    blocks: RefCell<BlockCache>,
 }
 
 impl<N: NoiseProvider> LocalChunkSource<N> {
     pub fn new(noise: N, seed: u32, config: GeneratorConfig) -> Self {
-        Self {
-            noise,
-            telemetry: &NULL_TELEMETRY,
-            seed,
-            config,
-        }
+        Self::with_telemetry(noise, seed, config, &NULL_TELEMETRY)
     }
 
     pub fn with_telemetry(
@@ -80,7 +84,61 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             telemetry,
             seed,
             config,
+            blocks: RefCell::new(BlockCache::new(seed, DEFAULT_BLOCK_CAPACITY)),
         }
+    }
+
+    /// How many blocks this source has planned. Diagnostics only — a number
+    /// that keeps climbing while the player stays put means the cache is
+    /// thrashing.
+    pub fn blocks_planned(&self) -> u64 {
+        self.blocks.borrow().planned_count()
+    }
+
+    /// Blocks that should be planned now, given where the player is.
+    ///
+    /// Empty in the interior of a block, which is almost always. The caller
+    /// decides whether it has somewhere to do the work — this only answers
+    /// what the work would be.
+    pub fn preload_targets(&self, world: Position, level: u32) -> Vec<BlockCoord> {
+        let coord = BlockCoord::of(world);
+        let mut cache = self.blocks.borrow_mut();
+        if !cache.holds(level, coord) {
+            // The block underfoot is not planned yet. It outranks every
+            // neighbour: planning a neighbour first would spend most of a
+            // second on somewhere the player is not standing.
+            return vec![coord];
+        }
+        let targets = cache
+            .get_or_plan(
+                level,
+                coord,
+                &self.config.with_level(level),
+                &self.noise,
+                &mut |_, _| {},
+            )
+            .preload_targets(world);
+        targets
+            .into_iter()
+            .filter(|target| !cache.holds(level, *target))
+            .collect()
+    }
+
+    /// Plans one block if it is not already held, reporting progress. This is
+    /// the call a loading screen drives.
+    pub fn ensure_block(
+        &self,
+        level: u32,
+        coord: BlockCoord,
+        progress: &mut dyn FnMut(usize, usize),
+    ) {
+        self.blocks.borrow_mut().get_or_plan(
+            level,
+            coord,
+            &self.config.with_level(level),
+            &self.noise,
+            progress,
+        );
     }
 
     fn generate_payload(
@@ -109,12 +167,35 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             0.0,
             origin_z - config.voxel_scale,
         ];
-        let halo_grid = generator.execute_with_reality(
-            Position::new(halo_world_origin[0], halo_world_origin[2]),
+        // Voxelize from the plans of the block this chunk sits in. The block
+        // carries a one-region halo, which comfortably covers this chunk's
+        // one-voxel halo even for a chunk flush against a block edge, so the
+        // sampler never asks about a region the block cannot answer for.
+        //
+        // `BlockCoord::of` is given the chunk's *centre*, not its origin: a
+        // chunk whose origin lands exactly on a block boundary would
+        // otherwise be attributed to the block behind it.
+        let halo_origin = Position::new(halo_world_origin[0], halo_world_origin[2]);
+        let centre = Position::new(
+            origin_x + config.chunk_size * 0.5,
+            origin_z + config.chunk_size * 0.5,
+        );
+        let mut blocks = self.blocks.borrow_mut();
+        let block = blocks.get_or_plan(
+            level,
+            BlockCoord::of(centre),
+            &config,
+            &self.noise,
+            &mut |_, _| {},
+        );
+        let halo_grid = generator.execute_from_plans(
+            halo_origin,
             self.seed,
             halo_config,
             reality,
+            Some(block.plans()),
         );
+        drop(blocks);
         let grid = crop_lateral_halo(&halo_grid, 1);
         let lights = collect_emissive_lights(&halo_grid, config.voxel_scale, halo_world_origin, 1);
         let surface = if artifacts.needs_surface_extraction() {
@@ -375,6 +456,137 @@ mod tests {
         FACE_OCCLUDED_POSITIVE_Y, VOXEL_FLOOR, VOXEL_WALL, VoxelGrid,
     };
     use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
+    use vackrooms::use_cases::world_block::BLOCK_SIZE;
+
+    /// Regenerates a chunk the pre-block way — plans derived for this chunk
+    /// alone — and reduces it to the same collision set the payload carries.
+    /// Any difference in the voxels shows up here as a different box set.
+    fn streamed_collision(seed: u32, origin_x: f32, origin_z: f32, lod: u8) -> Vec<Aabb> {
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec().with_level(0).at_lod(lod);
+        let halo_config = GeneratorConfig {
+            chunk_size: config.chunk_size + config.voxel_scale * 2.0,
+            ..config
+        };
+        let halo = GenerateChunkArchitectureUseCase::new(&noise).execute_with_reality(
+            Position::new(origin_x - config.voxel_scale, origin_z - config.voxel_scale),
+            seed,
+            halo_config,
+            &RealitySnapshot::default(),
+        );
+        let grid = crop_lateral_halo(&halo, 1);
+        let svo = BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE).execute(
+            &grid,
+            config.svo_depth(),
+            config.svo_world_size(),
+        );
+        extract_collision_boxes(&svo, origin_x, origin_z, config.voxel_scale)
+    }
+
+    #[test]
+    fn a_block_backed_chunk_is_identical_to_the_streamed_one() {
+        // The load-bearing property of bulk loading: planning a whole block
+        // up front is allowed to change *when* the world was decided and
+        // nothing whatsoever about *what it is*. If this fails, every
+        // screenshot, save file and shared seed predating the change is void.
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        for (ox, oz) in [(0.0, 30.0), (10.0, 10.0), (-40.0, 80.0)] {
+            let from_block = source.load(ox, oz, 0, 0).collision;
+            let streamed = streamed_collision(42, ox, oz, 0);
+            assert_eq!(
+                from_block, streamed,
+                "chunk ({ox}, {oz}) differs when cut from block plans"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chunk_flush_against_a_block_edge_still_matches() {
+        // The boundary is where this design dies if the block's halo ring is
+        // too thin: the sampler asks about the region across the seam and
+        // gets a different answer than the streaming path would have given.
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 7, GeneratorConfig::low_spec());
+        let chunk = GeneratorConfig::low_spec().chunk_size;
+        for origin in [0.0, BLOCK_SIZE - chunk, BLOCK_SIZE, -chunk] {
+            assert_eq!(
+                source.load(origin, origin, 0, 0).collision,
+                streamed_collision(7, origin, origin, 0),
+                "chunk at the block seam ({origin}) differs"
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_serves_every_lod_of_the_same_chunk() {
+        // Why the cache is not keyed by LOD. A region plan never reads
+        // `voxel_scale`, so one block is the right answer for a coarse
+        // distant chunk and the fine chunk that later replaces it — and they
+        // must agree, or geometry would pop into a different building.
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        for lod in [0u8, 1, 2] {
+            assert_eq!(
+                source.load(0.0, 30.0, 0, lod).collision,
+                streamed_collision(42, 0.0, 30.0, lod),
+                "lod {lod} differs when cut from block plans"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_a_neighbourhood_plans_one_block_not_one_per_chunk() {
+        // The economy the whole path exists for. Before this, every chunk
+        // re-derived its own region plans.
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let chunk = GeneratorConfig::low_spec().chunk_size;
+        for cz in 0..4 {
+            for cx in 0..4 {
+                source.load(cx as f32 * chunk, cz as f32 * chunk, 0, 0);
+            }
+        }
+        assert_eq!(
+            source.blocks_planned(),
+            1,
+            "16 chunks of one block should have planned it once"
+        );
+    }
+
+    #[test]
+    fn the_block_underfoot_is_asked_for_before_any_neighbour() {
+        // A cold source standing anywhere must name exactly the block it is
+        // standing in. Preloading a neighbour first would spend most of a
+        // second planning somewhere the player is not.
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let corner = Position::new(BLOCK_SIZE - 4.0, BLOCK_SIZE - 4.0);
+        assert_eq!(
+            source.preload_targets(corner, 0),
+            vec![BlockCoord::of(corner)]
+        );
+
+        source.ensure_block(0, BlockCoord::of(corner), &mut |_, _| {});
+        let targets = source.preload_targets(corner, 0);
+        assert!(
+            !targets.contains(&BlockCoord::of(corner)),
+            "a planned block was asked for again"
+        );
+        assert!(
+            targets.contains(&BlockCoord { x: 1, z: 1 }),
+            "the diagonal a corner-bound player arrives in was not requested: {targets:?}"
+        );
+    }
+
+    #[test]
+    fn the_interior_of_a_planned_block_asks_for_no_background_work() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let middle = Position::new(BLOCK_SIZE * 0.5, BLOCK_SIZE * 0.5);
+        source.ensure_block(0, BlockCoord::of(middle), &mut |_, _| {});
+        assert!(source.preload_targets(middle, 0).is_empty());
+    }
 
     #[test]
     fn wall_leaf_becomes_world_space_box_and_floor_does_not() {

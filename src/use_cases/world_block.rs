@@ -102,14 +102,22 @@ impl WorldBlock {
         noise: &dyn NoiseProvider,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Self {
-        let total = (REGIONS_PER_BLOCK * REGIONS_PER_BLOCK) as usize;
-        progress(0, total);
         // One halo region beyond the block, so a chunk sampled at the very
         // edge still finds the plan of the region across the boundary and
         // the two blocks agree about what is built there.
-        let window =
-            InfiniteRegionWindow::covering(coord.bounds(), REGION_SIZE, seed, config, noise);
-        progress(total, total);
+        //
+        // The halo is why the reported total is larger than
+        // `REGIONS_PER_BLOCK^2`: the window really does plan the surrounding
+        // ring, and a bar that hid that work would stall at 100% while it
+        // finished.
+        let window = InfiniteRegionWindow::covering_with_progress(
+            coord.bounds(),
+            REGION_SIZE,
+            seed,
+            config,
+            noise,
+            progress,
+        );
         Self { coord, window }
     }
 
@@ -224,6 +232,48 @@ mod tests {
                 "({x}, {z}) fell outside its own block {coord:?}"
             );
         }
+    }
+
+    #[test]
+    fn progress_is_reported_in_units_someone_is_waiting_on() {
+        // A loading bar may only ever move forward, must finish exactly at
+        // its own total, and must count the work actually being done. The
+        // old implementation satisfied none of that: it announced 0 and then
+        // `total`, so the bar sat still through the entire wait — and the
+        // `total` it announced was the block's 256 interior regions while it
+        // went on to plan the surrounding halo ring too, so even an honest
+        // bar built on it would have stalled at 100%.
+        let noise = SimpleNoiseProvider::new();
+        let mut samples = Vec::new();
+        let mut progress = |done, total| samples.push((done, total));
+        WorldBlock::load(
+            42,
+            BlockCoord { x: 0, z: 0 },
+            &config(),
+            &noise,
+            &mut progress,
+        );
+
+        let (_, total) = samples[0];
+        assert!(
+            samples.iter().all(|&(_, t)| t == total),
+            "the total moved under the bar"
+        );
+        assert!(
+            total >= (REGIONS_PER_BLOCK * REGIONS_PER_BLOCK) as usize,
+            "a block reported less work than it has regions: {total}"
+        );
+        assert_eq!(samples.first().map(|&(done, _)| done), Some(0));
+        assert_eq!(samples.last(), Some(&(total, total)));
+        assert_eq!(
+            samples.len(),
+            total + 1,
+            "progress should be reported once per region planned, plus the opening zero"
+        );
+        assert!(
+            samples.windows(2).all(|w| w[1].0 >= w[0].0),
+            "progress went backwards"
+        );
     }
 
     #[test]
@@ -399,25 +449,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn progress_is_reported_in_units_someone_is_waiting_on() {
-        let noise = SimpleNoiseProvider::new();
-        let mut seen: Vec<(usize, usize)> = Vec::new();
-        let mut progress = |done, total| seen.push((done, total));
-        WorldBlock::load(
-            1,
-            BlockCoord { x: 0, z: 0 },
-            &config(),
-            &noise,
-            &mut progress,
-        );
-        assert!(!seen.is_empty(), "loading reported no progress at all");
-        let (done, total) = *seen.last().expect("a final progress report");
-        assert_eq!(done, total, "loading finished without reaching 100%");
-        assert_eq!(
-            total,
-            (REGIONS_PER_BLOCK * REGIONS_PER_BLOCK) as usize,
-            "progress counted something other than the regions being planned"
-        );
-    }
 }

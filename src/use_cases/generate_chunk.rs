@@ -1,6 +1,7 @@
 use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::position::Position;
 use crate::use_cases::generated_chunk::GeneratedChunk;
+use crate::use_cases::infinite_level::InfiniteRegionWindow;
 use crate::use_cases::legacy_blueprint;
 use crate::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
@@ -341,6 +342,32 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         config: GeneratorConfig,
         reality: &RealitySnapshot,
     ) -> GeneratedChunk {
+        self.execute_from_plans(chunk_pos, seed, config, reality, None)
+    }
+
+    /// [`execute_with_reality`](Self::execute_with_reality), voxelizing from
+    /// region plans that have already been made instead of deriving them for
+    /// this chunk alone.
+    ///
+    /// This is the bulk-loading seam. A [`WorldBlock`] plans a 1280 u square
+    /// once and every chunk inside it is cut from those plans, which is both
+    /// far cheaper than re-deriving per chunk and the only way a decision
+    /// spanning more than one chunk can exist at all.
+    ///
+    /// Passing `None` derives per chunk exactly as before — that arm is the
+    /// original streaming path, untouched. Plans are honoured only by level
+    /// 0, the one level that has them; every other level ignores the argument
+    /// because there is nothing it could mean.
+    ///
+    /// [`WorldBlock`]: crate::use_cases::world_block::WorldBlock
+    pub fn execute_from_plans(
+        &self,
+        chunk_pos: Position,
+        seed: u32,
+        config: GeneratorConfig,
+        reality: &RealitySnapshot,
+        plans: Option<&InfiniteRegionWindow>,
+    ) -> GeneratedChunk {
         // Pluggable levels: everything except the legacy office blueprint
         // (level 90, kept inline below) goes through the LevelGenerator port.
         // Level 0 is the architecturally *planned* Backrooms: region plans
@@ -357,13 +384,23 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                 1 => &HabitableLevel,
                 _ => &GrasslandLevel,
             };
-            let mut grid = generator.generate_with_reality(
-                chunk_pos,
-                seed,
-                config,
-                self.noise_provider,
-                reality,
-            );
+            let mut grid = match (config.level, plans) {
+                (0, Some(plans)) => BackroomsLevel::generate_from_plans(
+                    chunk_pos,
+                    seed,
+                    config,
+                    self.noise_provider,
+                    reality,
+                    Some(plans),
+                ),
+                _ => generator.generate_with_reality(
+                    chunk_pos,
+                    seed,
+                    config,
+                    self.noise_provider,
+                    reality,
+                ),
+            };
             let lighting =
                 crate::use_cases::bake_voxel_lighting::VoxelLightingSettings::with_default_range(
                     config.voxel_scale,

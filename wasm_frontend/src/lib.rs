@@ -1014,9 +1014,50 @@ mod entry {
         if web_sys::window().is_none() {
             return Ok(());
         }
-        // Adapter/device acquisition is asynchronous in WebGPU. Keep the
-        // wasm start hook synchronous and let the composition root own the
-        // future; failures are surfaced both in the console and loading HUD.
+        // A page that wants to choose its world before one is built sets
+        // `__VACKROOMS_DEFER_BOOT__` before importing this module, then calls
+        // `boot_world()` once the player has picked a seed. Booting here
+        // regardless would generate one world and immediately throw it away —
+        // and, worse, would read a `location.search` the setup screen has not
+        // written yet, so the main thread and its generation workers could
+        // disagree about which world this is.
+        //
+        // The flag is opt-in so every other entry point (the debug map, a
+        // shared link, the capture harness) keeps booting on load exactly as
+        // before.
+        if boot_deferred() {
+            return Ok(());
+        }
+        spawn_boot();
+        Ok(())
+    }
+
+    fn boot_deferred() -> bool {
+        js_sys::Reflect::get(&js_sys::global(), &"__VACKROOMS_DEFER_BOOT__".into())
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Starts the engine against whatever world the URL now describes.
+    ///
+    /// The setup screen writes its seed and sliders into `location.search`
+    /// and then calls this. Everything downstream — the composition root and
+    /// every generation worker — reads that same query string, so choosing a
+    /// world costs no new configuration plumbing and the resulting URL is a
+    /// shareable reproduction for free.
+    ///
+    /// Safe to call more than once only in the sense that it will not panic;
+    /// the caller is expected to invoke it once, when the player commits.
+    #[wasm_bindgen]
+    pub fn boot_world() {
+        spawn_boot();
+    }
+
+    /// Adapter/device acquisition is asynchronous in WebGPU. Keep the callers
+    /// synchronous and let the composition root own the future; failures are
+    /// surfaced both in the console and the loading HUD.
+    fn spawn_boot() {
         wasm_bindgen_futures::spawn_local(async {
             if let Err(error) = crate::drivers::browser::boot().await {
                 web_sys::console::error_2(&"Failed to start WebGPU engine:".into(), &error);
@@ -1030,7 +1071,6 @@ mod entry {
                 }
             }
         });
-        Ok(())
     }
 }
 

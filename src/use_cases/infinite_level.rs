@@ -40,6 +40,25 @@ impl InfiniteRegionWindow {
         config: &GeneratorConfig,
         noise: &dyn NoiseProvider,
     ) -> Self {
+        Self::covering_with_progress(area, halo, seed, config, noise, &mut |_, _| {})
+    }
+
+    /// [`covering`](Self::covering), reporting `(regions_done, regions_total)`
+    /// after each region is planned.
+    ///
+    /// A window over one chunk is a handful of regions and nobody waits for
+    /// it; a window over a whole block is hundreds and somebody is watching a
+    /// loading screen. The callback is what lets that screen advance in the
+    /// unit the time is actually spent in, rather than jumping from 0 to 100
+    /// around a silent second.
+    pub fn covering_with_progress(
+        area: WorldBounds,
+        halo: f32,
+        seed: u32,
+        config: &GeneratorConfig,
+        noise: &dyn NoiseProvider,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Self {
         assert!(
             halo.is_finite() && halo >= 0.0,
             "region-window halo must be a finite, non-negative world distance"
@@ -63,6 +82,7 @@ impl InfiniteRegionWindow {
             .expect("requested region window is too large to address");
         let mut plans = Vec::with_capacity(capacity);
 
+        progress(0, capacity);
         for region_z in min_region_z..=max_region_z {
             for region_x in min_region_x..=max_region_x {
                 plans.push(generate_region_plan(
@@ -72,6 +92,7 @@ impl InfiniteRegionWindow {
                     config,
                     noise,
                 ));
+                progress(plans.len(), capacity);
             }
         }
 
