@@ -284,6 +284,21 @@ impl LevelGenerator for BackroomsLevel {
         noise: &dyn NoiseProvider,
         reality: &RealitySnapshot,
     ) -> GeneratedChunk {
+        BackroomsLevel::generate_from_plans(chunk_pos, seed, config, noise, reality, None)
+    }
+}
+
+impl BackroomsLevel {
+    /// Voxelizes one chunk, optionally from plans somebody else already
+    /// made. `None` derives them per chunk, exactly as streaming always has.
+    pub fn generate_from_plans(
+        chunk_pos: Position,
+        seed: u32,
+        config: GeneratorConfig,
+        noise: &dyn NoiseProvider,
+        reality: &RealitySnapshot,
+        provided_plans: Option<&InfiniteRegionWindow>,
+    ) -> GeneratedChunk {
         let s = config.voxel_scale;
         let width = (config.chunk_size / s).round() as usize;
         let depth = (config.chunk_size / s).round() as usize;
@@ -294,8 +309,25 @@ impl LevelGenerator for BackroomsLevel {
         // ordinary reality. A committed Red Room adds a second, explicitly
         // addressed Level 0 window instead of smuggling offsets and seeds
         // through the voxel loop.
-        let plans =
-            BackroomsLevel::region_plans_for(chunk_pos, config.chunk_size, seed, &config, noise);
+        // Plans come from outside when a `WorldBlock` has already planned
+        // this area, and are derived per chunk otherwise. Injecting rather
+        // than always deriving is what lets a bulk-planned block feed the
+        // voxel path: same plans, one derivation, and any block-scale pass
+        // run over them is visible to every chunk inside it.
+        let derived;
+        let plans = match provided_plans {
+            Some(plans) => plans,
+            None => {
+                derived = BackroomsLevel::region_plans_for(
+                    chunk_pos,
+                    config.chunk_size,
+                    seed,
+                    &config,
+                    noise,
+                );
+                &derived
+            }
+        };
         let recursive_level = RecursiveLevelWindow::around_chunk(
             chunk_pos,
             config.chunk_size,

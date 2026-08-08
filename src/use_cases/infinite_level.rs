@@ -20,7 +20,7 @@ use crate::use_cases::region_plan::{REGION_SIZE, generate_region_plan, region_in
 /// independent of hash maps and request timing, so planning the same area is
 /// replayable on the main thread, in a worker, or during a test.
 #[derive(Debug)]
-pub(crate) struct InfiniteRegionWindow {
+pub struct InfiniteRegionWindow {
     min_region_x: i64,
     min_region_z: i64,
     max_region_x: i64,
@@ -33,7 +33,7 @@ impl InfiniteRegionWindow {
     /// units.  Boundary-touching regions are included intentionally: a voxel
     /// sampler may ask about the exact far edge while constructing skirts,
     /// meshes, or collision data.
-    pub(crate) fn covering(
+    pub fn covering(
         area: WorldBounds,
         halo: f32,
         seed: u32,
@@ -113,11 +113,11 @@ impl InfiniteRegionWindow {
 
     /// Returns the authoritative plan for a world point, or `None` when the
     /// caller sampled beyond the area/halo declared at construction time.
-    pub(crate) fn plan_at(&self, world: Position) -> Option<&RegionPlan> {
+    pub fn plan_at(&self, world: Position) -> Option<&RegionPlan> {
         self.plan_for_region(region_index(world.x), region_index(world.z))
     }
 
-    pub(crate) fn plan_for_region(&self, region_x: i64, region_z: i64) -> Option<&RegionPlan> {
+    pub fn plan_for_region(&self, region_x: i64, region_z: i64) -> Option<&RegionPlan> {
         if region_x < self.min_region_x
             || region_x > self.max_region_x
             || region_z < self.min_region_z

@@ -113,6 +113,16 @@ impl WorldBlock {
         Self { coord, window }
     }
 
+    /// The planned regions, for feeding straight into chunk generation.
+    ///
+    /// Handing the window over rather than copying plans out is the whole
+    /// economy of the block: one derivation serves every chunk inside it,
+    /// and any block-scale pass run over these plans is automatically seen
+    /// by all of them.
+    pub fn plans(&self) -> &InfiniteRegionWindow {
+        &self.window
+    }
+
     pub fn coord(&self) -> BlockCoord {
         self.coord
     }
@@ -340,6 +350,53 @@ mod tests {
             compared += 1;
         }
         assert!(compared > 0, "the seam was never actually sampled");
+    }
+
+    /// The load-bearing equivalence: a chunk voxelized from a block's plans
+    /// must be byte-identical to the same chunk streamed the old way. If
+    /// this ever fails, bulk loading has changed the world rather than
+    /// merely deciding when it was planned.
+    #[test]
+    fn a_chunk_from_block_plans_matches_the_streamed_chunk() {
+        use crate::domain::entities::anomaly::RealitySnapshot;
+        use crate::use_cases::level_generator::LevelGenerator;
+        use crate::use_cases::level_zero::BackroomsLevel;
+
+        let noise = SimpleNoiseProvider::new();
+        let config = config();
+        let mut progress = |_, _| {};
+        let coord = BlockCoord { x: 0, z: 0 };
+        let block = WorldBlock::load(42, coord, &config, &noise, &mut progress);
+        let reality = RealitySnapshot::empty();
+
+        for (ox, oz) in [(120.0, 200.0), (640.0, 640.0), (30.0, 1000.0)] {
+            let at = Position::new(ox, oz);
+            let streamed =
+                BackroomsLevel.generate_with_reality(at, 42, config.clone(), &noise, &reality);
+            let from_block = BackroomsLevel::generate_from_plans(
+                at,
+                42,
+                config.clone(),
+                &noise,
+                &reality,
+                Some(block.plans()),
+            );
+            let mut differences = 0usize;
+            for z in 0..streamed.grid.depth() {
+                for y in 0..streamed.grid.height() {
+                    for x in 0..streamed.grid.width() {
+                        if streamed.grid.get(x, y, z) != from_block.grid.get(x, y, z) {
+                            differences += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                differences, 0,
+                "block-planned chunk at ({ox}, {oz}) differs from the streamed one \
+                 in {differences} voxels"
+            );
+        }
     }
 
     #[test]
