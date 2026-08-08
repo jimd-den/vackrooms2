@@ -211,22 +211,35 @@ fn main() {
     // partition. The search asks the voxels instead: a spot must have head
     // room and floor, and among those it takes the one you can see furthest
     // from, which is also the one worth photographing.
-    let (cam_x, cam_z) = if env_or("AUTOSPOT", 1) != 0 {
-        match world.best_viewpoint(cam_x, cam_z, eye, env_or("SEARCH", 14.0f32)) {
+    let want = Want::parse(&std::env::var("WANT").unwrap_or_else(|_| "hall".into()));
+    let aimed = std::env::var("YAW").is_ok();
+    let (cam_x, cam_z, yaw) = if env_or("AUTOSPOT", 1) != 0 {
+        match world.best_viewpoint(cam_x, cam_z, eye, env_or("SEARCH", 14.0f32), want) {
             Some(found) => {
                 println!(
-                    "autospot: ({:.1}, {:.1}) -> ({:.1}, {:.1}), {:.1} u of open sight",
-                    cam_x, cam_z, found.x, found.z, found.openness
+                    "autospot: ({:.1}, {:.1}) -> ({:.1}, {:.1})  reach {:.1} u, breadth {:.1} u, \
+                     elongation {:.2}",
+                    cam_x,
+                    cam_z,
+                    found.x,
+                    found.z,
+                    found.open.reach,
+                    found.open.breadth,
+                    found.open.elongation()
                 );
-                (found.x, found.z)
+                // An explicit YAW is an instruction; otherwise face the long
+                // axis, because a shot that does not face what made the spot
+                // interesting is a wasted shot.
+                let yaw = if aimed { yaw } else { found.open.yaw };
+                (found.x, found.z, yaw)
             }
             None => {
                 println!("autospot: found nothing standable near ({cam_x}, {cam_z}); keeping it");
-                (cam_x, cam_z)
+                (cam_x, cam_z, yaw)
             }
         }
     } else {
-        (cam_x, cam_z)
+        (cam_x, cam_z, yaw)
     };
 
     let toggles = RenderToggles::default();
@@ -310,11 +323,63 @@ struct World {
     grids: Vec<(f32, f32, vackrooms::domain::entities::voxel_grid::VoxelGrid)>,
 }
 
-/// A standable spot and how far you can see from it.
+/// How open a place is, in the two ways that differ.
+#[derive(Clone, Copy)]
+struct Openness {
+    /// Longest clear sight line, world units.
+    reach: f32,
+    /// Mean clear distance over all directions, world units.
+    breadth: f32,
+    /// Bearing of the longest sight line.
+    yaw: f32,
+}
+
+impl Openness {
+    /// Reach over breadth. ~1 is a room open in every direction; large is a
+    /// route you can see down but not across.
+    fn elongation(&self) -> f32 {
+        self.reach / self.breadth.max(0.1)
+    }
+}
+
+/// What kind of place a survey is hunting for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// Open in every direction: halls, expanses.
+    Hall,
+    /// Long and narrow: circulation.
+    Corridor,
+    /// Anything you can see out of.
+    Any,
+}
+
+impl Want {
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "corridor" | "route" => Want::Corridor,
+            "any" => Want::Any,
+            _ => Want::Hall,
+        }
+    }
+
+    fn score(self, open: &Openness) -> f32 {
+        match self {
+            Want::Hall => open.breadth,
+            // Reward the long axis, but only once it is genuinely longer
+            // than the space is wide -- otherwise every big room wins on
+            // reach alone and corridors are never selected.
+            Want::Corridor => open.reach * open.elongation(),
+            Want::Any => open.reach,
+        }
+    }
+}
+
+/// A standable spot, why it won, and how far you can see from it.
 struct Viewpoint {
     x: f32,
     z: f32,
-    openness: f32,
+    score: f32,
+    open: Openness,
 }
 
 impl World {
@@ -369,17 +434,24 @@ impl World {
         true
     }
 
-    /// Clear horizontal distance, averaged over eight directions.
+    /// How open a spot is, and which way to look.
     ///
-    /// Averaged rather than maximised: a slot between two walls has one long
-    /// sight line and photographs as a corridor seen end-on. The average
-    /// rewards places that are open *around* you, which is what "wide area"
-    /// means and what makes a frame legible.
-    fn openness(&self, x: f32, z: f32, eye: f32) -> f32 {
-        const REACH: f32 = 24.0;
-        let mut total = 0.0;
-        for k in 0..8 {
-            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+    /// Averaging sight lines was wrong once corridors existed: a route is
+    /// open along one axis and closed across it, so an average scores it
+    /// *below* a small square room and the search actively rejected the
+    /// thing it was supposed to find. Reach and breadth are different
+    /// questions and are now asked separately.
+    ///
+    /// `reach` is the longest clear sight line -- how far you can see.
+    /// `breadth` is the mean over all directions -- how open it is around
+    /// you. A hall has both. A corridor has reach without breadth. A closet
+    /// has neither. Their ratio is what tells the three apart.
+    fn survey(&self, x: f32, z: f32, eye: f32) -> Openness {
+        const REACH: f32 = 40.0;
+        const RAYS: usize = 16;
+        let mut distances = [0.0f32; RAYS];
+        for (k, slot) in distances.iter_mut().enumerate() {
+            let a = k as f32 * std::f32::consts::TAU / RAYS as f32;
             let (dx, dz) = (a.cos(), a.sin());
             let mut d = self.voxel;
             while d < REACH {
@@ -388,13 +460,38 @@ impl World {
                 }
                 d += self.voxel * 2.0;
             }
-            total += d;
+            *slot = d;
         }
-        total / 8.0
+        let breadth = distances.iter().sum::<f32>() / RAYS as f32;
+        let (best, reach) = distances
+            .iter()
+            .enumerate()
+            .fold(
+                (0usize, 0.0f32),
+                |acc, (i, d)| {
+                    if *d > acc.1 { (i, *d) } else { acc }
+                },
+            );
+        Openness {
+            reach,
+            breadth,
+            // Look down the long axis. A shot that does not face the thing
+            // that made the spot interesting is a wasted shot, and aiming
+            // by hand is how the corridors went unphotographed.
+            yaw: best as f32 * std::f32::consts::TAU / RAYS as f32,
+        }
     }
 
-    /// The most open standable spot within `search` of the request.
-    fn best_viewpoint(&self, x: f32, z: f32, eye: f32, search: f32) -> Option<Viewpoint> {
+    /// The best standable spot within `search`, judged by what we are
+    /// hunting for.
+    fn best_viewpoint(
+        &self,
+        x: f32,
+        z: f32,
+        eye: f32,
+        search: f32,
+        want: Want,
+    ) -> Option<Viewpoint> {
         let step = 1.2f32;
         let mut best: Option<Viewpoint> = None;
         let mut oz = -search;
@@ -403,12 +500,14 @@ impl World {
             while ox <= search {
                 let (cx, cz) = (x + ox, z + oz);
                 if self.standable(cx, cz, eye) {
-                    let openness = self.openness(cx, cz, eye);
-                    if best.as_ref().is_none_or(|b| openness > b.openness) {
+                    let open = self.survey(cx, cz, eye);
+                    let score = want.score(&open);
+                    if best.as_ref().is_none_or(|b| score > b.score) {
                         best = Some(Viewpoint {
                             x: cx,
                             z: cz,
-                            openness,
+                            score,
+                            open,
                         });
                     }
                 }
