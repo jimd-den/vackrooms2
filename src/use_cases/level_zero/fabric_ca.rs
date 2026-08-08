@@ -154,6 +154,130 @@ fn sheet_for(
     })
 }
 
+/// Which wall of a cell an edge belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    West,
+    North,
+}
+
+/// Levels of the subdivision hierarchy above the fabric cell.
+///
+/// Four doublings: 7.2 u cells nest inside 14.4, 28.8, 57.6 and 115.2 u
+/// blocks. That top block is a hall you can see across, and its existence is
+/// the point — a world where every room is 7.2 u has no scale, because scale
+/// is only legible as *contrast* between sizes.
+const LEVELS: u32 = 4;
+
+/// Hierarchy levels the Peripheral Shift is allowed to redraw.
+///
+/// Everything above this is the building's own structure and survives every
+/// shift; at and below it, partitions are re-dealt each epoch.
+const FINE_LEVELS: u32 = 3;
+
+/// How strongly a wall belongs on this edge, in 0..=1.
+///
+/// This is the fractal half of the grammar. The same motif — "a block either
+/// splits in two or stays whole" — is applied at every scale, so the plan is
+/// self-similar: a hall contains rooms, those rooms contain smaller rooms,
+/// and the rule that made each division is the same rule with a different
+/// parameter draw.
+///
+/// An edge exists only if the block that *would have created it by
+/// splitting* actually split. An edge on a coarse boundary is therefore a
+/// major wall present only where a big block divided; an edge deep in the
+/// hierarchy is a partition inside an already-small room. A block that
+/// declines to split leaves everything inside it open, and that is where the
+/// halls come from.
+///
+/// Implicit, like everything else here: no tree is built. The rank of an
+/// edge is read straight off its coordinate, and its ancestry is a walk up
+/// the powers of two — a pure function of position.
+fn subdivision_weight(
+    noise: &dyn NoiseProvider,
+    seed: u32,
+    cx: i64,
+    cz: i64,
+    axis: Axis,
+    porosity: f32,
+    epoch: u32,
+) -> f32 {
+    // The coordinate this edge divides. A west wall is a vertical line, so
+    // its rank comes from x; a north wall from z.
+    let along = match axis {
+        Axis::West => cx,
+        Axis::North => cz,
+    };
+    // Rank: how coarse a boundary this is. An edge at a multiple of 8 is the
+    // boundary of a level-3 block; an odd coordinate is the finest partition
+    // the grammar can draw.
+    let rank = (along.trailing_zeros()).min(LEVELS);
+    // Firmness rises with rank, so compute it before the gates below can
+    // return early.
+    let firmness = 0.80 + 0.20 * (rank as f32 / LEVELS as f32);
+
+    // The boundaries of the coarsest blocks are the frame the whole grammar
+    // hangs on; nothing above them could have declined to split.
+    if rank >= LEVELS {
+        return firmness;
+    }
+    // Every ancestor from this edge's own level up to the coarsest must have
+    // chosen to split, or the edge lies inside something that stayed whole
+    // and must not be drawn at all.
+    for level in (rank + 1)..=LEVELS {
+        if !splits(noise, seed, cx, cz, axis, level, porosity, epoch) {
+            return 0.0;
+        }
+    }
+    // Coarse divisions read as building structure and stand firm; fine ones
+    // are partitions and are left weak, so the automaton is free to erode
+    // them into alcoves and ragged openings. That gradient is what keeps a
+    // large room from dissolving into the same texture as a small one.
+    firmness
+}
+
+/// Is this edge structure rather than partition?
+///
+/// The top two levels of the hierarchy: walls a building would not take
+/// down. They are held against the automaton so the plan keeps its large
+/// shapes while its fine grain is free to grow and erode.
+fn is_structural(along: i64, _axis: Axis) -> bool {
+    along.trailing_zeros().min(LEVELS) >= LEVELS
+}
+
+/// Does the block containing this edge, at this level, divide in two?
+fn splits(
+    noise: &dyn NoiseProvider,
+    seed: u32,
+    cx: i64,
+    cz: i64,
+    axis: Axis,
+    level: u32,
+    porosity: f32,
+    epoch: u32,
+) -> bool {
+    if level == 0 {
+        return true;
+    }
+    let size = 1i64 << level;
+    let (bx, bz) = (cx.div_euclid(size), cz.div_euclid(size));
+    // Porous neighbourhoods stop dividing sooner, so "broken open" reads as
+    // genuinely larger rooms rather than as the same rooms with holes.
+    // Coarse blocks nearly always divide; leaving one whole is a hall, and
+    // a hall has to stay rare enough to be an event.
+    let chance =
+        (0.96 - 0.07 * LEVELS.saturating_sub(level) as f32 - 0.18 * porosity).clamp(0.05, 0.98);
+    // The Peripheral Shift re-partitions, it does not rebuild. Fine levels
+    // are re-drawn every epoch, so the small rooms a wanderer walked through
+    // are genuinely not the same rooms on their way back; coarse levels
+    // ignore the epoch entirely, so the halls and the major walls they
+    // navigate by stay put. That split is the canon reading of the mechanic:
+    // you recognise the neighbourhood, never the hallways.
+    let shift = if level <= FINE_LEVELS { epoch } else { 0 };
+    let salt = 0xF2AC ^ (level << 4) ^ (shift << 8) ^ if axis == Axis::West { 1 } else { 2 };
+    BackroomsLevel::cell_hash(noise, seed, salt, bx, bz) < chance
+}
+
 /// Runs the automaton over one padded sheet.
 fn solve_sheet(
     noise: &dyn NoiseProvider,
@@ -166,6 +290,8 @@ fn solve_sheet(
     let n = (PADDED * PADDED) as usize;
     let mut west = vec![false; n];
     let mut north = vec![false; n];
+    let mut firm_w = vec![false; n];
+    let mut firm_n = vec![false; n];
 
     // --- generation 0: the porosity climate ------------------------------
     // Seeded from the same smooth porosity field the fabric always used, so
@@ -182,13 +308,22 @@ fn solve_sheet(
             );
             let porosity =
                 (BackroomsLevel::n(noise, seed, 0x9010, wx, wz, 0.11) * 0.5 + 0.5).clamp(0.0, 1.0);
-            // Denser than the finished target: smoothing erodes isolated
-            // walls, so a fill at the final density would thin away to
-            // almost nothing after a few generations.
-            let fill = 0.62 - 0.30 * porosity;
+            // Where the hierarchy says a wall belongs. Denser than the
+            // finished target: smoothing erodes isolated walls, so a fill at
+            // the final density would thin away to almost nothing.
             let i = (iz * PADDED + ix) as usize;
-            west[i] = BackroomsLevel::cell_hash(noise, seed, 0x9300 ^ era, cx, cz) < fill;
-            north[i] = BackroomsLevel::cell_hash(noise, seed, 0x9400 ^ era, cx, cz) < fill;
+            let epoch = era * (MAX_GENERATIONS + 1) + generation;
+            let weight_w = subdivision_weight(noise, seed, cx, cz, Axis::West, porosity, epoch);
+            let weight_n = subdivision_weight(noise, seed, cx, cz, Axis::North, porosity, epoch);
+            west[i] = BackroomsLevel::cell_hash(noise, seed, 0x9300 ^ era, cx, cz) < weight_w;
+            north[i] = BackroomsLevel::cell_hash(noise, seed, 0x9400 ^ era, cx, cz) < weight_n;
+            // Structure does not erode. A wall high in the hierarchy is the
+            // building holding itself up, and the automaton must not be able
+            // to dissolve it -- otherwise the scale contrast the hierarchy
+            // exists to create is smoothed away within a few generations,
+            // which is exactly what happened when everything was mutable.
+            firm_w[i] = is_structural(cx, Axis::West);
+            firm_n[i] = is_structural(cz, Axis::North);
         }
     }
 
@@ -202,9 +337,19 @@ fn solve_sheet(
     // makes harmless: after `generation` steps the error cannot have
     // travelled further than `generation` cells, and the margin is
     // MAX_GENERATIONS wide, so no cell a caller can ask about is affected.
+    let seeded_w = west.clone();
+    let seeded_n = north.clone();
     for _ in 0..generation {
         west = step(&west);
         north = step(&north);
+        for i in 0..n {
+            if firm_w[i] {
+                west[i] = seeded_w[i];
+            }
+            if firm_n[i] {
+                north[i] = seeded_n[i];
+            }
+        }
     }
 
     Sheet { west, north }
