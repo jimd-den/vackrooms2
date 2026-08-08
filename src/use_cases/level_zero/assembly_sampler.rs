@@ -3,27 +3,12 @@
 //! contradictory grid), and fixtures on the room's ceiling modules.
 
 use crate::domain::entities::architecture::{
-    AssemblyInstance, CeilingLanguage, FurnitureKind, StructuralSystemInstance,
+    AssemblyInstance, CeilingLanguage, StructuralSystemInstance,
 };
-use crate::domain::entities::voxel_grid::{VOXEL_FURNITURE, VOXEL_SEAT, VOXEL_SHELVING};
 use crate::use_cases::generate_chunk::LevelTuning;
 
-use super::column_plan::PropBand;
 use super::fixture_plan::{FixtureOwner, fixture_at};
 use super::{BackroomsLevel, ColumnPlan};
-
-/// Which voxel a furniture kind is built from. Casework and seating are
-/// separated so a desk and the chair at it do not merge into one block.
-fn furniture_material(kind: FurnitureKind) -> u8 {
-    match kind {
-        FurnitureKind::Chair => VOXEL_SEAT,
-        FurnitureKind::Shelving => VOXEL_SHELVING,
-        FurnitureKind::Desk
-        | FurnitureKind::Table
-        | FurnitureKind::Cabinet
-        | FurnitureKind::Fixture => VOXEL_FURNITURE,
-    }
-}
 
 impl BackroomsLevel {
     /// Is (wx, wz) on a structural column of this system?
@@ -122,22 +107,6 @@ impl BackroomsLevel {
             plan.fixture = fixture_at(seed, FixtureOwner::Assembly { assembly: a, zone }, wx, wz);
         }
 
-        // The fit-out on the floor. Behind the same `walls` knob as the rest
-        // of the architecture: a debug world with walls off is a bare plane,
-        // and furniture standing in it would be the only thing left.
-        if !plan.solid
-            && walls_on
-            && let Some((piece, (base, top))) = a
-                .furniture
-                .iter()
-                .find_map(|piece| piece.band_at(wx, wz).map(|band| (piece, band)))
-        {
-            plan.prop = Some(PropBand {
-                base_units: base,
-                top_units: top,
-                material: furniture_material(piece.kind),
-            });
-        }
         plan
     }
 }
@@ -180,7 +149,6 @@ mod tests {
                 }],
             ),
             fixtures: Vec::new(),
-            furniture: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile::default(),
         }

@@ -242,14 +242,14 @@ fn space_layout_for(
     ) {
         return SpaceLayout::default();
     }
-    let split_threshold = (1.0 - genome.furnishing_density).clamp(0.05, 0.95);
+    let split_threshold = (1.0 - genome.partition_density).clamp(0.05, 0.95);
     if aseed <= split_threshold {
         return SpaceLayout::default();
     }
 
     let rule = SubdivisionRule {
         target_side: (genome.room_proportions.min_side * 0.42).clamp(4.0, 7.2),
-        max_depth: 1 + (genome.furnishing_density.clamp(0.0, 1.0) * 2.5) as u8,
+        max_depth: 1 + (genome.partition_density.clamp(0.0, 1.0) * 2.5) as u8,
         seed: aseed,
     };
     let mut leaves = Vec::new();
@@ -627,7 +627,7 @@ pub(super) fn place_suite(
         &layout.partitions,
         ceiling.height_units,
         entrance,
-        genome.furnishing_density,
+        genome.partition_density,
         aseed,
     );
     Some(AssemblyInstance {
@@ -637,7 +637,6 @@ pub(super) fn place_suite(
         structure: structure_for(genome, aseed),
         ceiling: ceiling_bands_for(&footprint, ceiling, genome, aseed),
         fixtures: fixtures_for(genome, &footprint, true, aseed),
-        furniture: Vec::new(),
         service_voids: Vec::new(),
         corruption: CorruptionProfile::default(),
         hosts,
@@ -651,7 +650,7 @@ pub(super) fn place_suite(
 mod tests {
     use super::*;
 
-    fn genome_with(furnishing_density: f32, tolerance_for_symmetry: f32) -> ArchitectGenome {
+    fn genome_with(partition_density: f32, tolerance_for_symmetry: f32) -> ArchitectGenome {
         ArchitectGenome {
             circulation: CirculationStyle::StraightSpine,
             structural_system: StructuralSystem::RegularGrid,
@@ -663,14 +662,14 @@ mod tests {
             threshold_language: ThresholdLanguage::OpenPortal,
             ceiling_language: CeilingLanguage::FlatTiles,
             lighting_language: LightingLanguage::SparsePendants,
-            furnishing_density,
+            partition_density,
             renovation_history: RenovationStyle::Untouched,
             tolerance_for_symmetry,
         }
     }
 
     #[test]
-    fn furnishing_density_scales_how_readily_a_suite_partitions() {
+    fn partition_density_scales_how_readily_a_suite_partitions() {
         // Wide enough (30u span, 12u min_side) that a split candidate exists
         // at all (n = 2 before the density gate).
         let footprint = Polygon2::rect(0.0, 0.0, 30.0, 12.0);
@@ -678,11 +677,11 @@ mod tests {
         let dense = genome_with(1.0, 0.5);
         assert!(
             spaces_for(SpaceProgram::OpenOffice, &footprint, &bare_shell, 0.5).is_empty(),
-            "furnishing_density 0 should almost never partition"
+            "partition_density 0 should almost never partition"
         );
         assert!(
             spaces_for(SpaceProgram::OpenOffice, &footprint, &dense, 0.5).len() >= 2,
-            "furnishing_density 1 should recursively partition"
+            "partition_density 1 should recursively partition"
         );
     }
 

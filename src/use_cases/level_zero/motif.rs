@@ -94,8 +94,6 @@ pub(super) struct RoomMotif {
     pub ceiling_bias: f32,
     /// Multiplier on how readily walls are pierced.
     pub door_density: f32,
-    /// Multiplier on how much furniture belongs here.
-    pub furnish_density: f32,
     /// The subdivision level this world's rooms prefer.
     pub preferred_level: u32,
     /// Colossal solid masses stand in this space.
@@ -111,21 +109,20 @@ pub(super) fn motif_for(seed: u32) -> RoomMotif {
     h = h.wrapping_mul(0x7FEB_352D);
     h ^= h >> 15;
     let signature = Signature::of(h);
-    let (ceiling_bias, door_density, furnish_density, preferred_level) = match signature {
+    let (ceiling_bias, door_density, preferred_level) = match signature {
         // Over-connected and stripped: all the ways out, nothing to stay for.
-        Signature::DoorGlut => (0.0, 2.6, 0.15, 1),
+        Signature::DoorGlut => (0.0, 2.6, 1),
         // Under-connected and bare, but generously proportioned.
-        Signature::Minimal => (0.4, 0.35, 0.1, 2),
-        Signature::Colonnade => (0.6, 0.8, 0.3, 3),
-        Signature::Cellular => (-0.4, 1.4, 0.6, 0),
-        Signature::Pressed => (-0.6, 1.0, 0.8, 1),
-        Signature::Lofty => (0.8, 0.9, 0.5, 2),
+        Signature::Minimal => (0.4, 0.35, 2),
+        Signature::Colonnade => (0.6, 0.8, 3),
+        Signature::Cellular => (-0.4, 1.4, 0),
+        Signature::Pressed => (-0.6, 1.0, 1),
+        Signature::Lofty => (0.8, 0.9, 2),
     };
     RoomMotif {
         signature,
         ceiling_bias,
         door_density,
-        furnish_density,
         preferred_level,
         monumental: false,
     }
@@ -203,7 +200,6 @@ pub(super) fn motif_at(noise: &dyn NoiseProvider, seed: u32, wx: f32, wz: f32) -
         // anything. Nothing about the surface changes.
         motif.monumental = true;
         motif.ceiling_bias += 1.8;
-        motif.furnish_density = 0.0;
         motif.door_density *= 0.3;
     }
     motif

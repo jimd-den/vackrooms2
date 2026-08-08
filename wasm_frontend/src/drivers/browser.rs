@@ -23,6 +23,7 @@ use crate::adapters::query_config::{
 };
 use crate::adapters::section_locator::SectionLocator;
 use crate::application::engine::{Engine, EngineConfig};
+use crate::application::streaming::LodLadder;
 use crate::application::generation_worker_policy::parse_generation_worker_preference;
 use crate::application::ports::{
     ChunkDraw, FrameParams, RenderArtifactNeeds, RendererPort, SurfaceChunk, SurfaceChunkKey,
@@ -450,9 +451,16 @@ pub async fn boot() -> Result<(), JsValue> {
             seed: resolved_seed,
             spawn,
             spawn_yaw,
-            // 5x5 footprint: the outer ring (>= 20 units away) stays at
-            // the coarse LOD, so high spec pays for ~9 fine chunks, not 25.
-            fine_distance: 25.0,
+            // High spec's 20 u chunks cost ~3.2 MB of mesh each at full
+            // resolution, against 252 KB for a low-spec 10 u chunk, so its
+            // ladder is pulled in: the same 120 u reach costs ~110 MB here
+            // and ~30 MB there. Reaching the low-spec 155 u would roughly
+            // double it for detail the fog has already taken.
+            lod: LodLadder {
+                fine_distance: 25.0,
+                mid_distance: 60.0,
+                far_distance: 120.0,
+            },
             initial_level,
             ..EngineConfig::default()
         }

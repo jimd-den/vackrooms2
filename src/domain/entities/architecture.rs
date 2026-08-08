@@ -111,8 +111,9 @@ pub struct ArchitectGenome {
     pub threshold_language: ThresholdLanguage,
     pub ceiling_language: CeilingLanguage,
     pub lighting_language: LightingLanguage,
-    /// 0 = bare shells, 1 = densely partitioned interiors.
-    pub furnishing_density: f32,
+    /// How readily a suite subdivides into smaller rooms: 0 = bare shells,
+    /// 1 = densely partitioned interiors.
+    pub partition_density: f32,
     pub renovation_history: RenovationStyle,
     /// 0 = happily asymmetric, 1 = mirrors and centers everything.
     pub tolerance_for_symmetry: f32,
@@ -521,138 +522,6 @@ pub struct Fixture {
     pub lit: bool,
 }
 
-/// What a piece of furniture *is*. Kind decides height and material; the
-/// piece decides where and how big.
-///
-/// Deliberately a small closed set of ordinary commercial objects. The canon
-/// describes rooms with desks and chairs and tables in them, not a props
-/// library, and every kind here has to survive being seen a thousand times.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FurnitureKind {
-    /// Work surface: desk or workstation run.
-    Desk,
-    /// Meeting or break table.
-    Table,
-    /// Seating. Low enough to read as a chair beside a taller surface.
-    Chair,
-    /// Filing cabinet or credenza — waist height, against a wall.
-    Cabinet,
-    /// Shelving or racking, tall enough to divide sightlines.
-    Shelving,
-    /// Restroom fittings and the like: low, hard, against a wall.
-    Fixture,
-}
-
-/// How a piece occupies its volume.
-///
-/// The distinction is the whole difference between furniture and freight. A
-/// filing cabinet really is a solid box; a desk is a thin top held up at its
-/// corners, and modelling it as a filled block gives you a plinth the size
-/// of a desk — which reads as a crate, not as something anyone sat at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FurnitureForm {
-    /// Filled from the floor up: casework, racking, plant.
-    Mass,
-    /// A worktop carried on corner legs, open underneath.
-    Surface,
-}
-
-impl FurnitureKind {
-    /// Finished height above the floor slab, world units. Ordinary
-    /// commercial dimensions (desk 0.73 m, table 0.75 m, chair seat 0.45 m,
-    /// cabinet 1.0 m, racking 1.8 m), rounded to the 0.2 u voxel Level 0
-    /// actually quantizes to — authoring a 0.73 that renders as 0.8 would be
-    /// a dimension the grid cannot express.
-    pub fn top_units(self) -> f32 {
-        match self {
-            FurnitureKind::Chair => 0.4,
-            FurnitureKind::Desk | FurnitureKind::Table => 0.8,
-            FurnitureKind::Fixture => 0.6,
-            FurnitureKind::Cabinet => 1.0,
-            FurnitureKind::Shelving => 1.8,
-        }
-    }
-
-    pub fn form(self) -> FurnitureForm {
-        match self {
-            FurnitureKind::Desk | FurnitureKind::Table | FurnitureKind::Chair => {
-                FurnitureForm::Surface
-            }
-            FurnitureKind::Cabinet | FurnitureKind::Shelving | FurnitureKind::Fixture => {
-                FurnitureForm::Mass
-            }
-        }
-    }
-
-    /// Thickness of the worktop itself, world units. One voxel: a 25 mm
-    /// desk top cannot be drawn thinner than the grid, and drawing it
-    /// thicker turns the top back into the slab this is trying to avoid.
-    pub fn worktop_units(self) -> f32 {
-        0.2
-    }
-
-    /// How far in from the piece's edge a leg stands. Legs are at the
-    /// corners, so a column is a leg only when it is within this of the
-    /// edge on *both* axes.
-    pub fn leg_inset(self) -> f32 {
-        0.2
-    }
-}
-
-/// One placed object on the floor of an assembly.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FurniturePiece {
-    pub at: Position,
-    /// Half-extent along X / Z.
-    pub half_x: f32,
-    pub half_z: f32,
-    pub kind: FurnitureKind,
-}
-
-impl FurniturePiece {
-    /// Plan bounds: (min_x, min_z, max_x, max_z).
-    pub fn bounds(&self) -> (f32, f32, f32, f32) {
-        (
-            self.at.x - self.half_x,
-            self.at.z - self.half_z,
-            self.at.x + self.half_x,
-            self.at.z + self.half_z,
-        )
-    }
-
-    pub fn contains_plan(&self, x: f32, z: f32) -> bool {
-        (x - self.at.x).abs() <= self.half_x && (z - self.at.z).abs() <= self.half_z
-    }
-
-    /// The solid vertical band this piece occupies at one column, as
-    /// `(base_units, top_units)`, or `None` where the piece is open.
-    ///
-    /// A `Mass` piece fills from the floor. A `Surface` piece is its worktop
-    /// everywhere, plus a leg where the column is within the leg inset of
-    /// the edge on both axes — so you see a top with daylight under it and
-    /// four legs, instead of a block.
-    pub fn band_at(&self, x: f32, z: f32) -> Option<(f32, f32)> {
-        if !self.contains_plan(x, z) {
-            return None;
-        }
-        let top = self.kind.top_units();
-        match self.kind.form() {
-            FurnitureForm::Mass => Some((0.0, top)),
-            FurnitureForm::Surface => {
-                let inset = self.kind.leg_inset();
-                let edge_x = self.half_x - (x - self.at.x).abs() <= inset;
-                let edge_z = self.half_z - (z - self.at.z).abs() <= inset;
-                if edge_x && edge_z {
-                    // A corner leg carries the top down to the floor.
-                    Some((0.0, top))
-                } else {
-                    Some(((top - self.kind.worktop_units()).max(0.0), top))
-                }
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LightKind {
     CeilingPanel,
@@ -708,10 +577,6 @@ pub struct AssemblyInstance {
     pub structure: StructuralSystemInstance,
     pub ceiling: CeilingPlan,
     pub fixtures: Vec<Fixture>,
-    /// The fit-out on the floor: what the room is furnished with. Empty is
-    /// a legitimate answer — a shell that was never occupied, or a program
-    /// (circulation, mechanical) that carries no furniture.
-    pub furniture: Vec<FurniturePiece>,
     pub service_voids: Vec<ServiceVoid>,
     pub corruption: CorruptionProfile,
 }
@@ -761,10 +626,6 @@ impl AssemblyInstance {
         for fixture in &mut self.fixtures {
             fixture.at.x += dx;
             fixture.at.z += dz;
-        }
-        for piece in &mut self.furniture {
-            piece.at.x += dx;
-            piece.at.z += dz;
         }
         self.structure.phase.0 += dx;
         self.structure.phase.1 += dz;
@@ -979,7 +840,6 @@ mod tests {
                 height_units: 3.4,
             }),
             fixtures: Vec::new(),
-            furniture: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile::default(),
         }

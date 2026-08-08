@@ -489,7 +489,6 @@ impl BackroomsLevel {
             // Unplanned fabric is unfurnished: nobody laid this room out,
             // so there is nothing in it. Furniture belongs to rooms someone
             // programmed.
-            prop: None,
             // The fabric is fitted-out building, not raw shell: this is the
             // tenant floor of a commercial interior that happens to go on
             // forever. Its walls carry a base and its ceiling is a real

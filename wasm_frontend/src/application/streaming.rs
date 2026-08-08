@@ -46,6 +46,88 @@ impl ViewCone {
     }
 }
 
+/// Detail as a function of distance, so the resident world can reach past
+/// the fog without paying full resolution for all of it.
+///
+/// The engine used to have exactly two detail levels: full, within
+/// `fine_distance`, and one coarse level everywhere else. That put a hard
+/// ceiling on how far the world could reach, because the outer ring — which
+/// is almost all of it, growing as the square of the radius — cost a
+/// quarter of full resolution no matter how far away it was.
+///
+/// Measured cost of one 10 u chunk's surface mesh, which is what the ladder
+/// is trading against:
+///
+/// ```text
+/// lod 0   252 KB   33.3 ms
+/// lod 1    94 KB    8.4 ms
+/// lod 2    21 KB    4.7 ms
+/// lod 3     2 KB    4.8 ms
+/// ```
+///
+/// A chunk twelve times cheaper is a ring that can be twelve times larger,
+/// and the far ring is exactly where detail is least visible — Level 0's fog
+/// (`exp(-0.018 * (d - 12))`) has already removed 92% of a surface by 155 u.
+///
+/// Distances are world units, not chunks, so one ladder describes both the
+/// 10 u and 20 u chunk profiles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LodLadder {
+    /// Full resolution within this distance.
+    pub fine_distance: f32,
+    /// Half resolution within this distance.
+    pub mid_distance: f32,
+    /// Quarter resolution within this distance; eighth beyond it.
+    pub far_distance: f32,
+}
+
+impl LodLadder {
+    /// The detail a chunk at this distance should be held at.
+    pub fn lod_at(&self, distance: f32) -> u8 {
+        // A NaN distance must not silently become the most expensive level:
+        // every comparison below is false for NaN, so it falls through to
+        // the cheapest, which is the safe direction to fail.
+        if distance <= self.fine_distance {
+            0
+        } else if distance <= self.mid_distance {
+            1
+        } else if distance <= self.far_distance {
+            2
+        } else {
+            3
+        }
+    }
+
+    /// Chunks of `chunk_size` needed to reach the end of the ladder.
+    ///
+    /// This is what the visual streaming radius should be: holding chunks
+    /// beyond it would spend memory on geometry the ladder has already
+    /// decided is barely worth resolving.
+    pub fn radius_in_chunks(&self, chunk_size: f32) -> i32 {
+        if !(chunk_size > 0.0) || !self.far_distance.is_finite() {
+            return 1;
+        }
+        (self.far_distance / chunk_size).ceil().max(1.0) as i32
+    }
+}
+
+impl Default for LodLadder {
+    /// Sized against Level 0's fog rather than against a memory budget.
+    ///
+    /// At 155 u a surface is down to 7.6% transmittance, so a chunk arriving
+    /// at the far edge is a change to something already almost invisible —
+    /// which is the whole point: the player must never watch geometry appear.
+    /// For 10 u chunks this is a 31x31 footprint costing roughly 43 MB of
+    /// mesh, against the 9x9 (~8 MB) it replaces.
+    fn default() -> Self {
+        Self {
+            fine_distance: 30.0,
+            mid_distance: 75.0,
+            far_distance: 155.0,
+        }
+    }
+}
+
 /// Decides which chunks should be resident for a given player position.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingPolicy {
@@ -265,6 +347,81 @@ impl ChunkStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ladder_coarsens_monotonically_with_distance() {
+        let ladder = LodLadder::default();
+        let mut previous = 0u8;
+        let mut d = 0.0f32;
+        while d < ladder.far_distance * 2.0 {
+            let lod = ladder.lod_at(d);
+            assert!(
+                lod >= previous,
+                "detail increased with distance at {d} u: {previous} -> {lod}"
+            );
+            previous = lod;
+            d += 1.0;
+        }
+        assert_eq!(previous, 3, "the ladder never reached its cheapest rung");
+    }
+
+    #[test]
+    fn each_band_holds_its_own_edge() {
+        let ladder = LodLadder {
+            fine_distance: 10.0,
+            mid_distance: 20.0,
+            far_distance: 30.0,
+        };
+        // Boundaries belong to the finer band: a chunk exactly at the edge
+        // renders at the better level, never the worse one.
+        assert_eq!(ladder.lod_at(0.0), 0);
+        assert_eq!(ladder.lod_at(10.0), 0);
+        assert_eq!(ladder.lod_at(10.01), 1);
+        assert_eq!(ladder.lod_at(20.0), 1);
+        assert_eq!(ladder.lod_at(20.01), 2);
+        assert_eq!(ladder.lod_at(30.0), 2);
+        assert_eq!(ladder.lod_at(30.01), 3);
+    }
+
+    #[test]
+    fn a_nonsense_distance_falls_to_the_cheapest_rung() {
+        // Failing toward cheap is the safe direction: a NaN distance that
+        // resolved to lod 0 would generate the most expensive chunk in the
+        // engine for a position that does not exist.
+        let ladder = LodLadder::default();
+        assert_eq!(ladder.lod_at(f32::NAN), 3);
+        assert_eq!(ladder.lod_at(f32::INFINITY), 3);
+    }
+
+    #[test]
+    fn the_radius_reaches_the_end_of_the_ladder() {
+        let ladder = LodLadder::default();
+        // Both chunk profiles must cover the same world distance.
+        for chunk_size in [10.0f32, 20.0] {
+            let radius = ladder.radius_in_chunks(chunk_size);
+            assert!(
+                radius as f32 * chunk_size >= ladder.far_distance,
+                "radius {radius} of {chunk_size} u chunks falls short of {} u",
+                ladder.far_distance
+            );
+        }
+        assert_eq!(ladder.radius_in_chunks(0.0), 1, "a degenerate chunk size");
+    }
+
+    #[test]
+    fn the_footprint_reaches_past_where_level_zero_can_be_seen() {
+        // The property the whole ladder exists for. Level 0's fog is
+        // `exp(-density * (d - start))`; a chunk arriving where less than 8%
+        // of it survives is not something a player can watch appear.
+        let ladder = LodLadder::default();
+        let (fog_start, fog_density) = (12.0f32, 0.018f32);
+        let transmittance = (-fog_density * (ladder.far_distance - fog_start)).exp();
+        assert!(
+            transmittance < 0.08,
+            "the streaming frontier sits at {:.0}% visibility",
+            transmittance * 100.0
+        );
+    }
 
     #[test]
     fn desired_origins_covers_square_around_player() {

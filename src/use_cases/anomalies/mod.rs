@@ -81,7 +81,6 @@ mod tests {
             },
             ceiling: CeilingPlan::none(),
             fixtures: Vec::new(),
-            furniture: Vec::new(),
             service_voids: Vec::new(),
             corruption: CorruptionProfile {
                 red_room: true,

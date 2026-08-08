@@ -92,10 +92,9 @@ fn main() {
     });
     match standing_in {
         Some(a) => println!(
-            "  standing in #{} {:?} ({} furniture pieces, abandoned={})",
+            "  standing in #{} {:?} (abandoned={})",
             a.id,
             a.program,
-            a.furniture.len(),
             a.corruption.abandoned
         ),
         None => println!("  standing in unplanned fabric (no assembly covers this point)"),
@@ -103,14 +102,13 @@ fn main() {
     for a in &plan.assemblies {
         let b = a.footprint.bounds();
         println!(
-            "  #{:<3} {:<20} ({:6.1},{:6.1})-({:6.1},{:6.1})  furniture {}",
+            "  #{:<3} {:<20} ({:6.1},{:6.1})-({:6.1},{:6.1})",
             a.id,
             format!("{:?}", a.program),
             b.0,
             b.1,
             b.2,
-            b.3,
-            a.furniture.len()
+            b.3
         );
     }
 

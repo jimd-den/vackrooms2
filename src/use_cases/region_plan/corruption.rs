@@ -387,7 +387,6 @@ mod tests {
                 lintel_units: None,
             }],
             door_leaves: Vec::new(),
-            furniture: Vec::new(),
             spaces: vec![Space {
                 program: SpaceProgram::OpenOffice,
                 footprint: footprint.clone(),

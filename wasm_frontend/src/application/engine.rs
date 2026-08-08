@@ -27,7 +27,7 @@ use crate::application::ports::{
 };
 use crate::application::prepare_frame_lighting::select_scene_lights;
 use crate::application::streaming::{
-    ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, ViewCone, chunk_key,
+    ChunkKey, ChunkStore, LoadedChunk, LodLadder, StreamingPolicy, ViewCone, chunk_key,
 };
 use crate::application::survival_inventory::{ConsumptionIntent, SurvivalInventory};
 use crate::application::thermal;
@@ -55,11 +55,11 @@ pub struct EngineConfig {
     /// wasm), so higher budgets stall the frame visibly. Coarse loads cost
     /// a fraction of this budget (see `FINE_LOAD_COST`).
     pub max_loads_per_tick: usize,
-    /// Screen-space-error proxy: chunks whose nearest point is farther than
-    /// this from the player stay at the coarse LOD; nearer chunks refine to
-    /// full resolution. A coarse voxel at this distance projects to roughly
-    /// the same pixels as a fine voxel at half of it.
-    pub fine_distance: f32,
+    /// Detail as a function of distance. Its `fine_distance` is the old
+    /// screen-space-error proxy — a coarse voxel at that range projects to
+    /// roughly the same pixels as a fine voxel at half of it — and its outer
+    /// rungs are what let the resident world reach past the fog.
+    pub lod: LodLadder,
     /// Level to boot into (0 = Backrooms, 34 = grassland). Exposed as the
     /// `?level=` debug query so any level is reachable in any renderer
     /// without waiting on a noclip roll.
@@ -75,7 +75,7 @@ impl Default for EngineConfig {
             spawn: [5.0, 1.7, 5.0],
             spawn_yaw: 0.0,
             max_loads_per_tick: 2,
-            fine_distance: 15.0,
+            lod: LodLadder::default(),
             initial_level: LEVEL_BACKROOMS,
         }
     }
@@ -149,10 +149,14 @@ pub struct HudStats {
     pub route: Option<RouteAnchor>,
 }
 
-/// The single coarse LOD used for progressive availability: every missing
-/// chunk is first loaded at this LOD (voxels 2x the size, ~1/8 the cost) so
-/// the whole streaming footprint becomes visible before any chunk is refined.
-const COARSE_LOD: u8 = 1;
+/// The LOD every missing chunk is *first* loaded at, whatever the ladder
+/// will eventually want for it.
+///
+/// Availability before fidelity: one cheap load makes a chunk visible, and
+/// the refinement pass then walks it down the ladder nearest-first. Loading
+/// straight to the ladder's answer would spend the whole per-tick budget on
+/// the near ring while the far ring stayed a hole in the world.
+const INITIAL_LOD: u8 = 1;
 /// Chunks this close stay resident whatever the player looks at, so a
 /// fast turn never reveals an unloaded chunk.
 const VISUAL_CORE_RADIUS: i32 = 2;
@@ -311,8 +315,13 @@ impl Engine {
     ) -> Self {
         let radius = config.chunk_radius.clamp(0, 2);
         let artifact_needs = renderer.artifact_needs();
+        // Mesh renderers hold their own chunk meshes and have no atlas to
+        // fit, so their footprint is bounded by the LOD ladder rather than by
+        // a fixed chunk count: the far ring is cheap enough to reach past the
+        // fog. The raymarcher cannot — its chunk table is a fixed-size GPU
+        // array — so it stays on the collision radius.
         let visual_radius = if artifact_needs.needs_surface_extraction() {
-            4
+            config.lod.radius_in_chunks(config.chunk_size)
         } else {
             radius
         };
@@ -582,6 +591,11 @@ impl Engine {
 
     /// Squared distance from the player to the nearest point of a chunk's
     /// 2D footprint; 0 inside the chunk. Drives the fine/coarse LOD choice.
+    /// The LOD the ladder wants for the chunk at this origin.
+    fn desired_lod(&self, origin_x: f32, origin_z: f32) -> u8 {
+        self.config.lod.lod_at(self.chunk_dist2(origin_x, origin_z).sqrt())
+    }
+
     fn chunk_dist2(&self, origin_x: f32, origin_z: f32) -> f32 {
         let cs = self.config.chunk_size;
         let (px, pz) = (self.player.position[0], self.player.position[2]);
@@ -943,7 +957,7 @@ impl Engine {
             }
             let key = chunk_key(ox, oz);
             if !self.store.contains(key) && !self.pending.contains_key(&key) {
-                let request = self.make_request(ox, oz, COARSE_LOD);
+                let request = self.make_request(ox, oz, INITIAL_LOD);
                 self.pending.insert(key, request.clone());
                 self.source.request(request);
             }
@@ -953,17 +967,20 @@ impl Engine {
         if fine_in_flight || self.pending.len() >= max_pending {
             return;
         }
-        let fine_d2 = self.config.fine_distance * self.config.fine_distance;
-        let target = desired.iter().copied().find(|&(ox, oz)| {
+        // Refine the nearest chunk held coarser than the ladder wants.
+        // `desired` is already sorted nearest-first, so this spends the
+        // budget where the error is largest.
+        let target = desired.iter().copied().find_map(|(ox, oz)| {
             let key = chunk_key(ox, oz);
-            self.chunk_dist2(ox, oz) <= fine_d2
-                && !self.pending.contains_key(&key)
-                && self.store.get(key).is_some_and(|c| c.lod > 0)
+            let want = self.desired_lod(ox, oz);
+            (!self.pending.contains_key(&key)
+                && self.store.get(key).is_some_and(|c| c.lod > want))
+            .then_some((ox, oz, want))
         });
-        if let Some((ox, oz)) = target {
+        if let Some((ox, oz, want)) = target {
             let key = chunk_key(ox, oz);
             let resident_reality = self.store.get(key).unwrap().reality.clone();
-            let request = self.make_request_for(ox, oz, 0, resident_reality);
+            let request = self.make_request_for(ox, oz, want, resident_reality);
             self.pending.insert(key, request.clone());
             self.source.request(request);
         }
@@ -1085,13 +1102,13 @@ impl Engine {
                         ox,
                         oz,
                         self.level,
-                        COARSE_LOD,
+                        INITIAL_LOD,
                         &self.reality,
                         self.artifact_needs,
                     );
                     self.store.insert(
                         key,
-                        LoadedChunk::new((ox, oz), COARSE_LOD, self.reality.clone(), payload),
+                        LoadedChunk::new((ox, oz), INITIAL_LOD, self.reality.clone(), payload),
                     );
                     loaded.push(key);
                     budget -= 1;
@@ -1099,27 +1116,30 @@ impl Engine {
                 }
             }
 
-            // Phase 2 — refinement: nearest coarse chunk inside the fine ring.
-            let fine_d2 = self.config.fine_distance * self.config.fine_distance;
+            // Phase 2 — refinement: nearest chunk held coarser than the
+            // ladder wants it.
             while budget >= FINE_LOAD_COST {
-                let target = desired.iter().copied().find(|&(ox, oz)| {
-                    self.chunk_dist2(ox, oz) <= fine_d2
-                        && self.store.get(chunk_key(ox, oz)).is_some_and(|c| c.lod > 0)
+                let target = desired.iter().copied().find_map(|(ox, oz)| {
+                    let want = self.desired_lod(ox, oz);
+                    self.store
+                        .get(chunk_key(ox, oz))
+                        .is_some_and(|c| c.lod > want)
+                        .then_some((ox, oz, want))
                 });
-                let Some((ox, oz)) = target else { break };
+                let Some((ox, oz, want)) = target else { break };
                 let key = chunk_key(ox, oz);
                 let resident_reality = self.store.get(key).unwrap().reality.clone();
                 let payload = self.source.load_with_artifacts(
                     ox,
                     oz,
                     self.level,
-                    0,
+                    want,
                     &resident_reality,
                     self.artifact_needs,
                 );
                 self.store.insert(
                     key,
-                    LoadedChunk::new((ox, oz), 0, resident_reality, payload),
+                    LoadedChunk::new((ox, oz), want, resident_reality, payload),
                 );
                 if !loaded.contains(&key) {
                     loaded.push(key);
@@ -2116,14 +2136,71 @@ mod tests {
     }
 
     #[test]
+    fn a_mesh_renderer_streams_past_where_level_zero_can_be_seen() {
+        // The property the ladder exists for: the player must never watch
+        // geometry appear. A mesh renderer holds its own meshes and has no
+        // fixed chunk table, so its footprint is bounded by the ladder — and
+        // the ladder's far edge must sit where Level 0's fog has already
+        // taken the surface.
+        let config = EngineConfig::default();
+        let engine = Engine::new(
+            config,
+            Box::new(SurfaceRecordingRenderer::default()),
+            Box::new(FlatChunkSource),
+        );
+        let reach = engine.visual_policy.radius as f32 * config.chunk_size;
+        let transmittance = (-0.018f32 * (reach - 12.0)).exp();
+        assert!(
+            transmittance < 0.08,
+            "chunks arrive at {reach} u, still {:.0}% visible",
+            transmittance * 100.0
+        );
+        // And the old hardcoded footprint was nowhere near it.
+        assert!(
+            engine.visual_policy.radius > 4,
+            "the mesh footprint did not grow past the fixed 9x9"
+        );
+    }
+
+    #[test]
+    fn detail_never_increases_with_distance() {
+        // Guards the wiring, not the ladder: `desired_lod` measures to the
+        // nearest point of a chunk's footprint, and getting that backwards
+        // would refine the far ring and coarsen the near one.
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(FlatChunkSource),
+        );
+        engine.player.position = [5.0, 1.7, 5.0];
+        let mut previous = 0u8;
+        for step in 0..40 {
+            let origin = step as f32 * EngineConfig::default().chunk_size;
+            let lod = engine.desired_lod(origin, 0.0);
+            assert!(
+                lod >= previous,
+                "chunk at {origin} u wants finer detail ({lod}) than the nearer one ({previous})"
+            );
+            previous = lod;
+        }
+        assert_eq!(engine.desired_lod(0.0, 0.0), 0, "the player's own chunk");
+    }
+
+    #[test]
     fn chunks_beyond_fine_distance_stay_coarse() {
         let renderer = RecordingRenderer::default();
         let mut engine = Engine::new(
             EngineConfig {
                 // Spawn is at (5,5) mid-chunk: every neighbour chunk's
                 // nearest point is >= 5 units away, so only the player's own
-                // chunk sits inside the fine ring.
-                fine_distance: 3.0,
+                // chunk sits inside the fine ring. The outer rungs sit past
+                // this 3x3 footprint, so neighbours settle at the ladder's
+                // second rung and never refine.
+                lod: LodLadder {
+                    fine_distance: 3.0,
+                    mid_distance: 100.0,
+                    far_distance: 200.0,
+                },
                 ..EngineConfig::default()
             },
             Box::new(renderer),

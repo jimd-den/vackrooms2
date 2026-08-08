@@ -35,27 +35,6 @@ pub(crate) struct ColumnPlan {
     pub light_material: u8,
     /// The fit-out layers this column carries above bare structure.
     pub assembly: AssemblyStack,
-    /// A furniture piece stands on the floor here, rising to this height in
-    /// this material. Separate from `floor_units` (raised structural mass
-    /// like a stair tread) because furniture is an object in the room, not
-    /// a change in the floor: it is drawn in its own material and it is the
-    /// thing a `furnish` pass owns.
-    pub prop: Option<PropBand>,
-}
-
-/// A solid slice of an object standing on the floor of a column.
-///
-/// A band rather than a height: furniture is not a plinth. A desk is a
-/// worktop with air under it and legs at its corners, so the same piece
-/// contributes a different band depending on which column of it you sample.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct PropBand {
-    /// Bottom of the solid slice above the floor slab, world units. Zero for
-    /// a leg or a solid mass; the underside of the worktop elsewhere.
-    pub base_units: f32,
-    /// Top of the object above the floor slab, world units.
-    pub top_units: f32,
-    pub material: u8,
 }
 
 /// The construction layers of one column, over and above "solid or not".
@@ -120,7 +99,6 @@ impl ColumnPlan {
             floor_material: VOXEL_FLOOR,
             light_material: VOXEL_LIGHT,
             assembly: AssemblyStack::bare(),
-            prop: None,
         }
     }
 

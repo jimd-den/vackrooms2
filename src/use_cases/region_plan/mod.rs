@@ -95,7 +95,6 @@ pub fn spawn_point(seed: u32) -> Position {
 mod circulation;
 mod corruption;
 mod debug;
-mod furnish;
 mod genome;
 mod suites;
 // Phase 2 steps 2-3: free-space decomposition and scored greedy placement.
@@ -225,20 +224,6 @@ pub fn generate_region_plan(
     // Macro anomalies are derived after ordinary architecture so compact red
     // rooms can promote a real assembly, while region-spanning families keep
     // stable world-lattice identities independent of this region query.
-    // --- fit-out --------------------------------------------------------------
-    // Last, so it sees the final state of every room: a suite the corruption
-    // pass abandoned is furnished with nothing, a duplicated suite is
-    // furnished as the room it has become, and a red room is still a room
-    // someone worked in. Furniture is the layer that says a person was here.
-    for assembly in &mut assemblies {
-        let pieces = furnish::furnish(
-            assembly,
-            dominant.furnishing_density,
-            h(0x100 + assembly.id as i64),
-        );
-        assembly.furniture = pieces;
-    }
-
     let anomalies = plan_anomalies_for_region(
         seed,
         region_origin,

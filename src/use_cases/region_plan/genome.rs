@@ -155,7 +155,7 @@ pub fn derive_genome(
         threshold_language,
         ceiling_language,
         lighting_language,
-        furnishing_density: (0.3 + 0.7 * h(9) + refit_bias).min(1.0),
+        partition_density: (0.3 + 0.7 * h(9) + refit_bias).min(1.0),
         renovation_history,
         tolerance_for_symmetry: (h(10) + symmetry_bias).clamp(0.0, 1.0),
     }
