@@ -201,9 +201,61 @@ pub(super) fn room_at(
     Room { level: 0 }
 }
 
+/// Wall mass by hierarchy rank -- poche.
+///
+/// A plan reads as architecture when you can tell load-bearing structure
+/// from partition at a glance, and the way you tell is thickness: the
+/// drawing convention calls the filled-in mass poche. One constant
+/// thickness everywhere is why the fabric read as a hedge maze -- every
+/// line the same weight says every line means the same thing.
+///
+/// Coarse divisions are the building's own structure and get real mass;
+/// fine ones are stud partitions and stay thin.
+pub(super) fn wall_thickness(along: i64) -> f32 {
+    let rank = along.trailing_zeros().min(LEVELS);
+    match rank {
+        0 => 0.4,
+        1 => 0.6,
+        2 => 0.8,
+        _ => 1.2,
+    }
+}
+
+/// Half-width of a fabric corridor, world units. Wide enough for the
+/// egress minimum with room to pass, narrow enough to read as circulation
+/// rather than as another room.
+pub(super) const CORRIDOR_HALF: f32 = 1.4;
+
+/// Is the division at this coordinate a corridor rather than a wall?
+///
+/// A split does not have to be a wall. In a real floor plate the division
+/// between two wings is a *corridor* -- that is where double-loaded
+/// circulation comes from, and it is the thing a labyrinth of rooms alone
+/// can never produce. Only coarse divisions qualify: a corridor is a
+/// building-scale decision, and running one between two closets would just
+/// be a gap.
+pub(super) fn is_corridor(
+    noise: &dyn NoiseProvider,
+    seed: u32,
+    along: i64,
+    axis: Axis,
+    epoch: u32,
+) -> bool {
+    let rank = along.trailing_zeros().min(LEVELS);
+    if rank < LEVELS - 1 {
+        return false;
+    }
+    // Corridors persist across the Peripheral Shift. Circulation is the
+    // skeleton a wanderer navigates by; re-dealing it every epoch would
+    // make the level unnavigable rather than uncanny.
+    let _ = epoch;
+    let salt = 0xC077 ^ if axis == Axis::West { 1 } else { 2 };
+    BackroomsLevel::cell_hash(noise, seed, salt, along, 0) < 0.55
+}
+
 /// Which wall of a cell an edge belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Axis {
+pub(super) enum Axis {
     West,
     North,
 }

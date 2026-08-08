@@ -202,7 +202,39 @@ impl BackroomsLevel {
         let ceiling_units = Self::fabric_ceiling_height(noise, seed, wx, wz, ceiling_band);
         let fx = wx.rem_euclid(FABRIC_CELL);
         let fz = wz.rem_euclid(FABRIC_CELL);
-        let (in_w, in_n) = (fx < PLAN_WALL_T, fz < PLAN_WALL_T);
+        let boundary_x = (wx / FABRIC_CELL).floor() as i64;
+        let boundary_z = (wz / FABRIC_CELL).floor() as i64;
+        // Poche: a division's mass says what kind of division it is. The
+        // wall a column sits in is the one bounding its own cell, so the
+        // thickness comes from that boundary's rank.
+        let west_t = super::fabric_ca::wall_thickness(boundary_x);
+        let north_t = super::fabric_ca::wall_thickness(boundary_z);
+        let (in_w, in_n) = (fx < west_t, fz < north_t);
+
+        // Circulation. A coarse division that chose to be a corridor clears
+        // a band centred on its line -- half into each of the two blocks it
+        // separates, which is what makes it one continuous route rather than
+        // two parallel gaps. Every finer wall inside that band is suppressed:
+        // a corridor interrupted by partitions is not a corridor.
+        let in_corridor = {
+            let epoch_here = 0;
+            let near = |offset: f32, index: i64, axis| {
+                offset < super::fabric_ca::CORRIDOR_HALF
+                    && super::fabric_ca::is_corridor(noise, seed, index, axis, epoch_here)
+            };
+            near(fx, boundary_x, super::fabric_ca::Axis::West)
+                || near(
+                    FABRIC_CELL - fx,
+                    boundary_x + 1,
+                    super::fabric_ca::Axis::West,
+                )
+                || near(fz, boundary_z, super::fabric_ca::Axis::North)
+                || near(
+                    FABRIC_CELL - fz,
+                    boundary_z + 1,
+                    super::fabric_ca::Axis::North,
+                )
+        };
 
         // ---- material/decay -------------------------------------------------
         // Every consumer of Level 0 materials is meant to derive from one
@@ -248,7 +280,10 @@ impl BackroomsLevel {
         let mut solid = false;
         let mut lintel_from_units: Option<f32> = None;
 
-        if expanse {
+        if in_corridor {
+            // A route stays open. Nothing the warren does inside it applies:
+            // this is the skeleton the wanderer navigates by.
+        } else if expanse {
             // Menger galleries: recursive corridor crosses with WFC-chosen
             // colonnades and arcade courts (see menger_expanse). Structure
             // is epoch-free — expanses never drift.
