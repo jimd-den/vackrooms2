@@ -37,6 +37,7 @@ mod fixture_maintenance;
 mod fixture_plan;
 mod generate;
 mod menger_expanse;
+mod motif;
 mod provisions;
 #[cfg(test)]
 mod tests;

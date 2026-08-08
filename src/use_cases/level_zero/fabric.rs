@@ -144,6 +144,11 @@ impl BackroomsLevel {
         // the way a structural depth chart reads, not linear in area.
         let reach = (room.span() / FABRIC_CELL).log2() / super::fabric_ca::LEVELS as f32;
         let height = height + (hi - height) * reach.clamp(0.0, 1.0);
+        // The world's own signature, and this room's departure from it.
+        // Familiarity is zero here: the engine supplies it once it knows
+        // where someone has settled, and until then every world is simply
+        // itself.
+        let height = height + super::motif::ceiling_offset(noise, seed, cx, cz, wx, wz, 0.0);
         // Snap to the fine voxel lattice, then clamp last: 21 * 0.2 is
         // 4.2000003 in f32 and must not escape the band's range.
         ((height / 0.2).round() * 0.2).clamp(lo, hi)
@@ -280,7 +285,13 @@ impl BackroomsLevel {
         let mut solid = false;
         let mut lintel_from_units: Option<f32> = None;
 
-        if in_corridor {
+        // A colossal mass stands here: solid to the ceiling, no interior,
+        // wearing the same wallpaper as everything else. Checked before
+        // circulation, because a monolith is the one thing in the level that
+        // a corridor does not get to pass through.
+        if super::motif::monolith_at(noise, seed, wx, wz) {
+            solid = tuning.walls > 0.0;
+        } else if in_corridor {
             // A route stays open. Nothing the warren does inside it applies:
             // this is the skeleton the wanderer navigates by.
         } else if expanse {
