@@ -2,6 +2,7 @@
 //! the concrete outside world (browser input events, the procedural
 //! generation core).
 
+pub mod archived_chunk_source;
 pub mod block_cache;
 pub mod chunk_codec;
 pub mod collect_emissive_lights;

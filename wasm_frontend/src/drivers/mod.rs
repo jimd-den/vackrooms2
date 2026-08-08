@@ -24,6 +24,7 @@ pub mod worker_source;
 mod generation_worker_requests;
 
 pub mod cpu_reference_renderer;
+pub mod file_archive;
 pub mod fs_artifact_sink;
 pub mod raymarch_reference_renderer;
 pub mod webgpu;

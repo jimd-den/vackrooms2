@@ -5,6 +5,7 @@
 //! it exclusively through the ports declared in [`ports`].
 
 pub mod atlas;
+pub mod chunk_archive;
 pub mod body;
 pub mod collision;
 pub mod engine;
