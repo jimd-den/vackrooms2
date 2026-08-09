@@ -123,6 +123,12 @@ impl<N: NoiseProvider> ArchivedChunkSource<N> {
         self.archive.borrow().stats()
     }
 
+    /// Records rejected by their checksum. Non-zero means the storage under
+    /// this archive is damaging data.
+    pub fn corrupt_records(&self) -> u64 {
+        self.archive.borrow().corrupt_records()
+    }
+
     /// Chunks currently indexed.
     pub fn archived_chunks(&self) -> usize {
         self.archive.borrow().len()
@@ -137,7 +143,12 @@ impl<N: NoiseProvider> ArchivedChunkSource<N> {
         reality: &RealitySnapshot,
         artifacts: RenderArtifactNeeds,
     ) -> ChunkPayload {
-        let key = RecordKey::new(chunk_key(origin_x, origin_z), lod, reality);
+        let key = RecordKey::new(
+            chunk_key(origin_x, origin_z),
+            lod,
+            artifacts.bits(),
+            reality,
+        );
 
         let stored = {
             let storage = self.storage.borrow();
@@ -145,14 +156,13 @@ impl<N: NoiseProvider> ArchivedChunkSource<N> {
         };
         if let Some(bytes) = stored
             && let Some(payload) = decode_chunk_payload(&bytes)
-            && payload_satisfies(&payload, artifacts)
         {
             return payload;
         }
-        // Either absent, undecodable, or archived without the artifacts this
-        // renderer needs. A record written for a mesh renderer carries no SVO
-        // nodes, so a raymarcher asking for the same chunk must regenerate
-        // rather than be handed a payload with the nodes silently empty.
+        // Absent, corrupt, or archived for a different renderer — the
+        // artifact bits are part of the key, so a record built for the splat
+        // renderer is simply not found by a mesh renderer rather than being
+        // handed over with the wrong products.
         self.archive.borrow_mut().note_miss();
 
         let payload = self
@@ -172,27 +182,6 @@ impl<N: NoiseProvider> ArchivedChunkSource<N> {
         drop(archive);
         payload
     }
-}
-
-/// Does an archived payload carry everything this renderer asked for?
-///
-/// Artifacts are requested per renderer, so the same chunk can be archived in
-/// a weaker form than a later caller needs. Emptiness is the honest test:
-/// each product is either present or was never extracted.
-fn payload_satisfies(payload: &ChunkPayload, artifacts: RenderArtifactNeeds) -> bool {
-    if artifacts.svo_nodes() && payload.nodes.is_empty() {
-        return false;
-    }
-    if artifacts.bricks() && payload.brick_voxels.is_empty() {
-        return false;
-    }
-    if artifacts.needs_surface_extraction()
-        && payload.surface.vertices.is_empty()
-        && payload.surface.faces.instances.is_empty()
-    {
-        return false;
-    }
-    true
 }
 
 impl<N: NoiseProvider> ChunkSourcePort for ArchivedChunkSource<N> {
@@ -431,6 +420,60 @@ mod tests {
             archived.storage.borrow().len() <= 256 * 1024 + (128 * 1024),
             "the archive overran its budget by more than one record"
         );
+    }
+
+    #[test]
+    fn a_splat_record_is_never_served_to_a_mesh_renderer() {
+        // Both renderers "need surface extraction", but one wants indexed
+        // vertices and the other face instances. Serving one's record to the
+        // other draws nothing at all — and reports nothing, which is why this
+        // has to be a key, not an inference from which fields are non-empty.
+        let archived = source(Box::new(MemoryStorage::new()));
+        let reality = RealitySnapshot::default();
+
+        let splat =
+            archived.load_with_artifacts(0.0, 30.0, 0, 0, &reality, RenderArtifactNeeds::SPLAT);
+        assert!(!splat.surface.faces.instances.is_empty());
+        assert!(splat.surface.vertices.is_empty());
+
+        let mesh =
+            archived.load_with_artifacts(0.0, 30.0, 0, 0, &reality, RenderArtifactNeeds::SURFACE);
+        assert!(
+            !mesh.surface.vertices.is_empty(),
+            "the mesh renderer was handed a splat record and would draw nothing"
+        );
+    }
+
+    #[test]
+    fn every_renderer_gets_its_own_products_back_on_a_revisit() {
+        // Each renderer's records must round-trip independently, so a session
+        // that switches renderer does not poison the archive for the other.
+        let archived = source(Box::new(MemoryStorage::new()));
+        let reality = RealitySnapshot::default();
+        for artifacts in [
+            RenderArtifactNeeds::SURFACE,
+            RenderArtifactNeeds::SPLAT,
+            RenderArtifactNeeds::RAYMARCH,
+        ] {
+            let first = archived.load_with_artifacts(0.0, 30.0, 0, 0, &reality, artifacts);
+            let second = archived.load_with_artifacts(0.0, 30.0, 0, 0, &reality, artifacts);
+            assert_eq!(
+                first.surface.vertices.len(),
+                second.surface.vertices.len(),
+                "{artifacts:?} vertices changed on revisit"
+            );
+            assert_eq!(
+                first.surface.faces.instances.len(),
+                second.surface.faces.instances.len(),
+                "{artifacts:?} face instances changed on revisit"
+            );
+            assert_eq!(
+                first.nodes.len(),
+                second.nodes.len(),
+                "{artifacts:?} svo nodes changed on revisit"
+            );
+            assert_eq!(first.collision, second.collision, "{artifacts:?} collision");
+        }
     }
 
     #[test]

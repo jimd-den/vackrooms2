@@ -51,11 +51,12 @@ const RECORD_MAGIC: u32 = 0x5643_4B52; // "VCKR"
 ///
 /// This is *not* a substitute for [`ArchiveIdentity::generator_id`]: the
 /// framing can be stable while the geometry it frames changes completely.
-const ARCHIVE_FORMAT_VERSION: u32 = 1;
+const ARCHIVE_FORMAT_VERSION: u32 = 2;
 
 pub const HEADER_BYTES: usize = 32;
-/// magic + chunk x/z + lod + padding + reality hash + payload length.
-const RECORD_HEADER_BYTES: usize = 4 + 8 + 8 + 4 + 8 + 4;
+/// magic + chunk x/z + lod + artifacts + padding + reality hash + checksum
+/// + payload length.
+const RECORD_HEADER_BYTES: usize = 4 + 8 + 8 + 1 + 1 + 2 + 8 + 8 + 4;
 
 /// What an archive was built by. Any difference invalidates every record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,10 +67,39 @@ pub struct ArchiveIdentity {
     /// would make an archive silently never match itself.
     pub chunk_size_bits: u32,
     pub voxel_scale_bits: u32,
-    /// Identity of the code that generates geometry. The composition root
-    /// supplies it — a build hash, the wasm source digest, anything that
-    /// changes when generation changes.
+    /// Identity of the code and parameters that generate geometry.
+    ///
+    /// Always folded together with [`build_id`] by [`new`](Self::new), so a
+    /// caller cannot forget to invalidate archives when the generator itself
+    /// changes. That mistake is not recoverable at runtime: the archive would
+    /// keep serving last build's geometry, and nothing downstream can tell
+    /// that a wall is in the wrong place.
     pub generator_id: u64,
+}
+
+/// Identity of this build, folded into every [`ArchiveIdentity`].
+///
+/// `VACKROOMS_BUILD_ID` is set by `scripts/build-wasm.mjs` to the same source
+/// digest that stamps `static/pkg/.source-sha256`, so any change to generator
+/// source produces a different id and orphans every archive written by the
+/// previous build.
+///
+/// Without it — a plain `cargo build`, or an editor running tests — this
+/// falls back to the crate version, which does *not* change per build. In
+/// that case a persistent archive can outlive a code change, so
+/// [`is_build_id_pinned`] reports whether the guarantee is real and callers
+/// that persist across builds should refuse to when it is not.
+pub fn build_id() -> u64 {
+    fnv64(
+        option_env!("VACKROOMS_BUILD_ID")
+            .unwrap_or(concat!("unpinned-", env!("CARGO_PKG_VERSION")))
+            .as_bytes(),
+    )
+}
+
+/// Whether this build carries a real source digest (see [`build_id`]).
+pub fn is_build_id_pinned() -> bool {
+    option_env!("VACKROOMS_BUILD_ID").is_some()
 }
 
 impl ArchiveIdentity {
@@ -79,7 +109,10 @@ impl ArchiveIdentity {
             level,
             chunk_size_bits: chunk_size.to_bits(),
             voxel_scale_bits: voxel_scale.to_bits(),
-            generator_id,
+            // Mixed, not stored raw: the caller's id describes the world's
+            // parameters, `build_id` describes the code that reads them, and
+            // an archive is only valid when both match.
+            generator_id: generator_id ^ build_id().rotate_left(17),
         }
     }
 
@@ -112,11 +145,22 @@ impl ArchiveIdentity {
     }
 }
 
-/// Which chunk, at which detail, in which epoch of the world.
+/// Which chunk, at which detail, built for which renderer, in which epoch of
+/// the world.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecordKey {
     pub chunk: ChunkKey,
     pub lod: u8,
+    /// The artifact bits the record was generated for.
+    ///
+    /// Part of the key, not something inferred from the payload afterwards.
+    /// A record built for the splat renderer holds face instances and no
+    /// vertices; one built for the mesh renderer holds the reverse. Both
+    /// answer `needs_surface_extraction()`, so any attempt to recognise them
+    /// by which fields came back non-empty gets it wrong in one direction or
+    /// the other — and the failure is silent, because a renderer handed the
+    /// wrong products draws nothing rather than reporting an error.
+    pub artifacts: u8,
     /// Hash of the [`RealitySnapshot`] the chunk was generated against.
     /// Without this, a chunk cached before a Peripheral Shift would be
     /// served after it, and the world would not drift where the player had
@@ -125,13 +169,24 @@ pub struct RecordKey {
 }
 
 impl RecordKey {
-    pub fn new(chunk: ChunkKey, lod: u8, reality: &RealitySnapshot) -> Self {
+    pub fn new(chunk: ChunkKey, lod: u8, artifacts: u8, reality: &RealitySnapshot) -> Self {
         Self {
             chunk,
             lod,
+            artifacts,
             reality: hash_reality(reality),
         }
     }
+}
+
+/// FNV-1a over bytes. Used for the payload checksum and the reality hash.
+fn fnv64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        h ^= byte as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
 }
 
 /// FNV-1a over the snapshot's transport words.
@@ -141,14 +196,12 @@ impl RecordKey {
 /// serve one epoch's geometry in another — at 64 bits, across the handful of
 /// epochs a session produces, that is not a risk worth a larger key.
 pub fn hash_reality(reality: &RealitySnapshot) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for word in reality.to_words() {
-        for byte in word.to_le_bytes() {
-            h ^= byte as u64;
-            h = h.wrapping_mul(0x1000_0000_01b3);
-        }
+    let words = reality.to_words();
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for word in words {
+        bytes.extend_from_slice(&word.to_le_bytes());
     }
-    h
+    fnv64(&bytes)
 }
 
 /// Where a record's payload lives in the file.
@@ -156,6 +209,13 @@ pub fn hash_reality(reality: &RealitySnapshot) -> u64 {
 pub struct Extent {
     pub offset: u64,
     pub len: u32,
+    /// FNV-1a of the payload, verified on every read.
+    ///
+    /// Without it a flipped bit decodes into *plausible* geometry — a wall
+    /// in the wrong place, a light with an absurd radius — and nothing ever
+    /// reports a problem. Regenerating a chunk costs 42 ms; rendering a
+    /// corrupt one costs a bug nobody can reproduce.
+    pub checksum: u64,
 }
 
 /// Byte storage behind an archive. A file natively; an OPFS access handle in
@@ -187,6 +247,7 @@ pub struct ChunkArchive {
     hits: u64,
     misses: u64,
     stored: u64,
+    corrupt: u64,
 }
 
 impl ChunkArchive {
@@ -206,6 +267,7 @@ impl ChunkArchive {
             hits: 0,
             misses: 0,
             stored: 0,
+            corrupt: 0,
         };
         if existing == Some(identity) {
             archive.replay(storage);
@@ -233,8 +295,10 @@ impl ChunkArchive {
             let chunk_x = i64::from_le_bytes(header[4..12].try_into().expect("8 bytes"));
             let chunk_z = i64::from_le_bytes(header[12..20].try_into().expect("8 bytes"));
             let lod = header[20];
+            let artifacts = header[21];
             let reality = u64::from_le_bytes(header[24..32].try_into().expect("8 bytes"));
-            let len = u32::from_le_bytes(header[32..36].try_into().expect("4 bytes"));
+            let checksum = u64::from_le_bytes(header[32..40].try_into().expect("8 bytes"));
+            let len = u32::from_le_bytes(header[40..44].try_into().expect("4 bytes"));
 
             let payload_at = offset + RECORD_HEADER_BYTES as u64;
             if payload_at + len as u64 > total {
@@ -246,11 +310,13 @@ impl ChunkArchive {
                 RecordKey {
                     chunk: (chunk_x, chunk_z),
                     lod,
+                    artifacts,
                     reality,
                 },
                 Extent {
                     offset: payload_at,
                     len,
+                    checksum,
                 },
             );
             offset = payload_at + len as u64;
@@ -275,6 +341,12 @@ impl ChunkArchive {
         (self.hits, self.misses, self.stored)
     }
 
+    /// Records rejected by their checksum. Any non-zero value means the
+    /// storage under this archive is damaging data.
+    pub fn corrupt_records(&self) -> u64 {
+        self.corrupt
+    }
+
     pub fn contains(&self, key: RecordKey) -> bool {
         self.index.contains_key(&key)
     }
@@ -283,9 +355,18 @@ impl ChunkArchive {
     pub fn get(&mut self, storage: &dyn ArchiveStorage, key: RecordKey) -> Option<Vec<u8>> {
         let extent = *self.index.get(&key)?;
         match storage.read_at(extent.offset, extent.len as usize) {
-            Some(bytes) => {
+            Some(bytes) if fnv64(&bytes) == extent.checksum => {
                 self.hits += 1;
                 Some(bytes)
+            }
+            Some(_) => {
+                // Right length, wrong bytes. Drop the record and regenerate:
+                // corrupt geometry that renders is far worse than a cache
+                // miss, because nothing downstream can tell it is wrong.
+                self.index.remove(&key);
+                self.corrupt += 1;
+                self.misses += 1;
+                None
             }
             None => {
                 // Indexed but unreadable: the file shrank under us. Forget it
@@ -306,8 +387,11 @@ impl ChunkArchive {
         record.extend_from_slice(&key.chunk.0.to_le_bytes());
         record.extend_from_slice(&key.chunk.1.to_le_bytes());
         record.push(key.lod);
-        record.extend_from_slice(&[0u8; 3]); // pad to keep the hash aligned
+        record.push(key.artifacts);
+        record.extend_from_slice(&[0u8; 2]); // pad to keep the hashes aligned
         record.extend_from_slice(&key.reality.to_le_bytes());
+        let checksum = fnv64(payload);
+        record.extend_from_slice(&checksum.to_le_bytes());
         record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         record.extend_from_slice(payload);
 
@@ -326,6 +410,7 @@ impl ChunkArchive {
                 Extent {
                     offset: payload_at,
                     len: payload.len() as u32,
+                    checksum,
                 },
             );
             self.end = payload_at + payload.len() as u64;
@@ -426,6 +511,7 @@ mod tests {
         RecordKey {
             chunk: (x, z),
             lod,
+            artifacts: 1,
             reality: 7,
         }
     }
@@ -640,6 +726,142 @@ mod tests {
             "a cleared archive must still be a valid log"
         );
         assert_eq!(reopened.len(), 1, "the cleared records came back");
+    }
+
+    #[test]
+    fn a_record_built_for_another_renderer_is_not_found() {
+        // The bug this replaced: artifact presence was inferred from which
+        // payload fields came back non-empty. A splat record has face
+        // instances and no vertices, a mesh record the reverse, and both
+        // answer `needs_surface_extraction()` — so the mesh renderer was
+        // handed splat records and would have drawn nothing, silently.
+        let mut storage = MemoryStorage::new();
+        let mut archive = ChunkArchive::open(&mut storage, identity());
+        let splat = RecordKey {
+            artifacts: 0b10,
+            ..key(0, 0, 0)
+        };
+        archive.put(&mut storage, splat, b"face instances");
+
+        let mesh = RecordKey {
+            artifacts: 0b01,
+            ..key(0, 0, 0)
+        };
+        assert_eq!(
+            archive.get(&storage, mesh),
+            None,
+            "a splat record was served to a mesh renderer"
+        );
+        assert_eq!(
+            archive.get(&storage, splat).as_deref(),
+            Some(b"face instances".as_slice())
+        );
+    }
+
+    #[test]
+    fn a_corrupted_payload_is_refused_rather_than_rendered() {
+        // A flipped bit decodes into plausible geometry — a wall in the wrong
+        // place — and nothing downstream can tell. A miss costs 42 ms; a
+        // corrupt hit costs a bug nobody can reproduce.
+        let mut storage = MemoryStorage::new();
+        let mut archive = ChunkArchive::open(&mut storage, identity());
+        archive.put(&mut storage, key(0, 0, 0), b"honest geometry");
+
+        // Flip a bit inside the payload, leaving every length intact.
+        let mut bytes = storage.bytes().to_vec();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0b0000_1000;
+        let mut damaged = MemoryStorage::from_bytes(bytes);
+
+        let mut archive = ChunkArchive::open(&mut damaged, identity());
+        assert_eq!(archive.get(&damaged, key(0, 0, 0)), None);
+        assert_eq!(archive.corrupt_records(), 1);
+        // And the bad record is forgotten, so it is not re-read every frame.
+        assert!(!archive.contains(key(0, 0, 0)));
+    }
+
+    #[test]
+    fn an_older_format_is_never_read_as_the_current_one() {
+        // Adding the artifact byte and the checksum moved every field. An
+        // archive from before that must be discarded, not reinterpreted.
+        let mut storage = MemoryStorage::new();
+        {
+            let mut archive = ChunkArchive::open(&mut storage, identity());
+            archive.put(&mut storage, key(0, 0, 0), b"geometry");
+        }
+        // Rewrite the header's version word to the previous format.
+        let mut bytes = storage.bytes().to_vec();
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let mut old = MemoryStorage::from_bytes(bytes);
+
+        let archive = ChunkArchive::open(&mut old, identity());
+        assert!(archive.is_empty(), "a v1 archive was read as v2");
+    }
+
+    #[test]
+    fn arbitrary_bytes_never_panic_and_never_become_geometry() {
+        // An archive is read from a file the process does not control: a
+        // half-synced OPFS handle, a copied save, a disk that lied. Opening
+        // one must never panic and must never manufacture a record, whatever
+        // the bytes are. Lengths are attacker-shaped here on purpose —
+        // u32::MAX payload lengths and offsets past the end.
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..300 {
+            let len = (next() % 512) as usize;
+            let mut bytes: Vec<u8> = (0..len).map(|_| (next() & 0xFF) as u8).collect();
+            // Half the cases wear a valid file header, so the replay actually
+            // walks into the garbage instead of rejecting it up front.
+            if case % 2 == 0 {
+                let mut storage = MemoryStorage::new();
+                ChunkArchive::open(&mut storage, identity());
+                let mut framed = storage.bytes().to_vec();
+                framed.append(&mut bytes);
+                bytes = framed;
+            }
+            let mut storage = MemoryStorage::from_bytes(bytes);
+            let mut archive = ChunkArchive::open(&mut storage, identity());
+            // Whatever it made of that, no key may resolve to geometry.
+            assert_eq!(archive.get(&storage, key(0, 0, 0)), None, "case {case}");
+        }
+    }
+
+    #[test]
+    fn a_record_claiming_an_absurd_length_is_ignored() {
+        let mut storage = MemoryStorage::new();
+        {
+            let mut archive = ChunkArchive::open(&mut storage, identity());
+            archive.put(&mut storage, key(0, 0, 0), b"real");
+        }
+        // Rewrite the record's length field to claim the rest of the address
+        // space. The replay must stop, not allocate.
+        let mut bytes = storage.bytes().to_vec();
+        let len_at = HEADER_BYTES + 40;
+        bytes[len_at..len_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut damaged = MemoryStorage::from_bytes(bytes);
+
+        let archive = ChunkArchive::open(&mut damaged, identity());
+        assert!(archive.is_empty());
+    }
+
+    #[test]
+    fn the_build_is_part_of_every_archive_identity() {
+        // The caller supplies a world id; the build id is folded in whether
+        // they remember it or not, because forgetting is unrecoverable —
+        // the archive would serve the previous build's geometry silently.
+        let a = ArchiveIdentity::new(42, 0, 10.0, 0.2, 0);
+        assert_ne!(
+            a.generator_id, 0,
+            "the build id was not folded into the identity"
+        );
+        // And it still discriminates the caller's own id.
+        let b = ArchiveIdentity::new(42, 0, 10.0, 0.2, 1);
+        assert_ne!(a.generator_id, b.generator_id);
     }
 
     #[test]

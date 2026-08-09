@@ -110,6 +110,7 @@ mod tests {
         RecordKey {
             chunk: (x, 0),
             lod: 0,
+            artifacts: 1,
             reality: 0,
         }
     }

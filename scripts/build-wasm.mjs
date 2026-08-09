@@ -24,9 +24,19 @@ const staging = await mkdtemp(join(tmpdir(), 'vackrooms-wasm-'));
 await mkdir(dirname(output), { recursive: true });
 const replacement = await mkdtemp(join(dirname(output), '.pkg-next-'));
 
+// Pins the chunk archive to this exact source tree. The Rust side folds
+// VACKROOMS_BUILD_ID into every archive identity, so a change to generator
+// source orphans archives written by the previous build instead of serving
+// their geometry against new code. Same digest that stamps .source-sha256.
+const buildId = await wasmSourceHash(root);
+
 function run(command, args) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, args, { cwd: root, stdio: 'inherit' });
+    const child = spawn(command, args, {
+      cwd: root,
+      stdio: 'inherit',
+      env: { ...process.env, VACKROOMS_BUILD_ID: buildId },
+    });
     child.once('error', rejectRun);
     child.once('exit', (code, signal) => {
       if (code === 0) resolveRun();
