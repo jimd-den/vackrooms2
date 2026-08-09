@@ -46,18 +46,93 @@ pub struct PillarLattice {
     pub variation_seed: u64,
 }
 
+/// The plan of one pillar, as half-extents from the bay's own axis.
+///
+/// A shape rather than a pair of numbers, because a pillar is not always a
+/// rectangle and the sampler should not have to know which cases exist.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PillarShape {
+    pub half_x: f32,
+    pub half_z: f32,
+    /// A second mass crossing the first, when this pillar is cruciform.
+    pub cross: Option<(f32, f32)>,
+}
+
+impl PillarShape {
+    /// Is a point this far from the bay's axes inside the pillar?
+    ///
+    /// `dx`/`dz` are unsigned distances from the lattice lines, so a
+    /// composed shape is mirrored into all four quadrants — which is why
+    /// the second mass reads as a cruciform pier and never as a lopsided
+    /// accident.
+    pub fn covers(&self, dx: f32, dz: f32) -> bool {
+        (dx < self.half_x && dz < self.half_z)
+            || self.cross.is_some_and(|(hx, hz)| dx < hx && dz < hz)
+    }
+
+    /// The same pillar, thickened on every face.
+    pub fn grown(self, by: f32) -> Self {
+        Self {
+            half_x: self.half_x + by,
+            half_z: self.half_z + by,
+            cross: self.cross.map(|(hx, hz)| (hx + by, hz + by)),
+        }
+    }
+}
+
 impl PillarLattice {
-    /// Variable wallpapered piers, always snapped to the shared 0.4u plan
-    /// lattice. Entry regularity comes from placement, not a fixed size.
-    pub fn pillar_size(&self, cell_x: i64, cell_z: i64) -> f32 {
-        let hash = mix64(
-            self.variation_seed
-                ^ (cell_x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                ^ (cell_z as u64).rotate_left(29),
-        );
+    /// The plan of the pillar standing in one bay, snapped to the shared
+    /// 0.4 u plan lattice.
+    ///
+    /// The canon is specific: pillar rooms are *massive*, and the pillars
+    /// "will always appear in a lattice or grid pattern". The grid is
+    /// therefore fixed — a wanderer must be able to read the rhythm and
+    /// lose it — but nothing says the masses standing on it are copies of
+    /// one another, and in the reference photographs they plainly are not.
+    ///
+    /// So the two extents are rolled separately from the placement, and a
+    /// shape roll decides whether they agree: most pillars are square
+    /// piers, a good number are oblong in one direction or the other, and
+    /// a few are slabs wide enough to hide what is behind them. A cruciform
+    /// pier turns up occasionally and is meant to stay occasional — a room
+    /// where every pillar is a composed mass reads as debris, not as
+    /// structure.
+    pub fn pillar_shape(&self, cell_x: i64, cell_z: i64) -> PillarShape {
+        let roll = |k: u64| {
+            mix64(
+                self.variation_seed
+                    ^ (k << 48)
+                    ^ (cell_x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ (cell_z as u64).rotate_left(29),
+            )
+        };
         let steps = (((self.max_side - self.min_side) / 0.4).round() as u64).max(1);
-        let step = (hash % (steps + 1)) as f32;
-        (self.min_side + 0.4 * step).clamp(self.min_side, self.max_side)
+        let side = |k: u64| {
+            let step = (roll(k) % (steps + 1)) as f32;
+            (self.min_side + 0.4 * step).clamp(self.min_side, self.max_side)
+        };
+        let base = side(0);
+        let (x, z) = match roll(3) % 8 {
+            // A square pier: the plain case, and still the commonest.
+            0..=3 => (base, base),
+            // Oblong, one way and then the other. Turning the same pier
+            // through a right angle is what keeps a grid of masses from
+            // reading as one mass repeated.
+            4 | 5 => (base, side(1)),
+            6 => (side(1), base),
+            // A slab: long enough to stand as a piece of wall, which is
+            // what makes the far end of the room impossible to hold in
+            // your head.
+            _ => (base, (base * 2.0).min(self.max_side * 2.0)),
+        };
+        // One bay in sixteen. Rare on purpose: the cruciform pier is an
+        // event you notice, and it stops being one the moment it is common.
+        let cross = (roll(4) % 16 == 0).then_some((z * 0.5, x * 0.5));
+        PillarShape {
+            half_x: x * 0.5,
+            half_z: z * 0.5,
+            cross,
+        }
     }
 }
 
@@ -167,9 +242,9 @@ impl AnomalyInstance {
         &self.gates
     }
 
-    pub fn pillar_size(&self, cell_x: i64, cell_z: i64) -> Option<f32> {
+    pub fn pillar_shape(&self, cell_x: i64, cell_z: i64) -> Option<PillarShape> {
         self.pillar_lattice
-            .map(|lattice| lattice.pillar_size(cell_x, cell_z))
+            .map(|lattice| lattice.pillar_shape(cell_x, cell_z))
     }
 
     pub fn pit_hazards_for_bounds(&self, bounds: WorldBounds) -> Vec<PitHazard> {

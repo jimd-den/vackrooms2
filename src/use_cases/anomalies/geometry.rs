@@ -6,7 +6,7 @@
 //! dedicated phase machine and recursive Level 0 destination.
 
 use crate::domain::entities::anomaly::{
-    AnomalyInstance, AnomalyKind, ArchBehavior, ArchLayout, RealitySnapshot,
+    AnomalyInstance, AnomalyKind, ArchBehavior, ArchLayout, PillarShape, RealitySnapshot,
 };
 use crate::domain::entities::environment::{EnvironmentProfile, FloorState};
 use crate::domain::entities::voxel_grid::{
@@ -124,25 +124,62 @@ fn sample_pillar_expanse(context: &SampleContext<'_>) -> ColumnPlan {
     let tuning = &context.config.tuning;
     let (local_x, local_z) = (context.local_x, context.local_z);
     let lattice = instance.pillar_lattice.expect("pillar instance lattice");
-    let cell_x = ((local_x - lattice.phase_x) / lattice.bay_x).floor() as i64;
-    let cell_z = ((local_z - lattice.phase_z) / lattice.bay_z).floor() as i64;
-    let mut within_x = (local_x - lattice.phase_x).rem_euclid(lattice.bay_x);
-    let within_z = (local_z - lattice.phase_z).rem_euclid(lattice.bay_z);
-    let mut side = instance.pillar_size(cell_x, cell_z).unwrap_or(1.2);
+    // A pillar stands *on* a lattice line, straddling it, so the column
+    // that owns it is the nearest line — `round`, not `floor`. Under
+    // `floor` the four quadrants of one pillar fell into four different
+    // bays and each looked up its own size, which is why pillars came out
+    // as stepped, L-shaped masses that read as two or three blocks fused.
+    // That was invisible while every pillar was the same size and became
+    // obvious the moment they were not: the bug was always there, the
+    // uniformity was hiding it.
+    let mut off_x = local_x - lattice.phase_x;
+    let off_z = local_z - lattice.phase_z;
+    let cell_z = (off_z / lattice.bay_z).round() as i64;
 
     // Distortion grows only after the entry has taught the player a regular
     // grid. The route and entry band therefore remain a reliable baseline.
-    let budget = ((context.boundary - instance.entry_band) / (instance.entry_band.max(8.0) * 2.5))
+    // Every decision here is about *this pillar* — drop it, fatten it,
+    // shift its row — so each is answered once, against the row's own
+    // budget rather than a budget that varies across the pillar's own
+    // footprint.
+    let row_centre = instance.world_coords(
+        lattice.phase_x + off_x,
+        lattice.phase_z + cell_z as f32 * lattice.bay_z,
+    );
+    let budget = ((instance.boundary_distance(row_centre.x, row_centre.z) - instance.entry_band)
+        / (instance.entry_band.max(8.0) * 2.5))
         .clamp(0.0, 1.0);
     let immutable_zone = context.skeleton || budget <= 0.0;
-    let mut dropped = false;
+    // A shifted row moves the whole line of pillars half a bay across.
+    // Decided before the column index is taken, so the shift moves which
+    // pillar this is rather than tearing the one it lands on.
+    if !immutable_zone && anomaly_hash(instance, 0, 0x11D1, cell_z, 0) < 0.30 * budget {
+        off_x += lattice.bay_x * 0.5;
+    }
+    let cell_x = (off_x / lattice.bay_x).round() as i64;
+    let mut shape = instance
+        .pillar_shape(cell_x, cell_z)
+        .unwrap_or(PillarShape {
+            half_x: 0.6,
+            half_z: 0.6,
+            cross: None,
+        });
+
+    // The protected bearing lane is a route the wanderer can trust, and it
+    // is cut before anything is built rather than after: a pillar the lane
+    // passes through is not built at all. Clipping it instead left a thin
+    // cap of masonry on each side of the route — debris, and precisely the
+    // kind of fragment that reads as a mistake rather than as a building.
+    let reach_z = shape
+        .cross
+        .map_or(shape.half_z, |(_, hz)| shape.half_z.max(hz));
+    let line_z = lattice.phase_z + cell_z as f32 * lattice.bay_z;
+    let mut dropped = line_z.abs() <= instance.skeleton_half_width + reach_z;
+    let mut nudge_x = 0.0f32;
     if !immutable_zone {
-        dropped = anomaly_hash(instance, 0, 0x11D0, cell_x, cell_z) < 0.10 * budget;
-        if anomaly_hash(instance, 0, 0x11D1, cell_z, 0) < 0.30 * budget {
-            within_x = (within_x + lattice.bay_x * 0.5).rem_euclid(lattice.bay_x);
-        }
+        dropped |= anomaly_hash(instance, 0, 0x11D0, cell_x, cell_z) < 0.10 * budget;
         if anomaly_hash(instance, 0, 0x11D2, cell_x, cell_z) < 0.08 * budget {
-            side += 0.4;
+            shape = shape.grown(0.2);
         }
     }
 
@@ -153,19 +190,21 @@ fn sample_pillar_expanse(context: &SampleContext<'_>) -> ColumnPlan {
         .flatten();
     if let Some(epoch) = wake_epoch {
         if anomaly_hash(instance, epoch, 0x11F4, cell_x, cell_z) < 0.25 {
-            side += 0.4;
+            shape = shape.grown(0.2);
         }
         if anomaly_hash(instance, epoch, 0x11F5, cell_z, cell_x) < 0.35 {
-            within_x = (within_x + 0.4).rem_euclid(lattice.bay_x);
+            // Off its line, and off it as one piece: the pillar moves, it
+            // does not smear.
+            nudge_x = 0.4;
         }
     }
 
-    let dx = within_x.min(lattice.bay_x - within_x);
-    let dz = within_z.min(lattice.bay_z - within_z);
-    let mut solid = context.perimeter || (!dropped && dx < side * 0.5 && dz < side * 0.5);
+    let dx = (off_x - cell_x as f32 * lattice.bay_x - nudge_x).abs();
+    let dz = (off_z - cell_z as f32 * lattice.bay_z).abs();
+    let mut solid = context.perimeter || (!dropped && shape.covers(dx, dz));
     if !solid && let Some(epoch) = wake_epoch {
-        let edge_x = within_x < PLAN_WALL_T || lattice.bay_x - within_x < PLAN_WALL_T;
-        let edge_z = within_z < PLAN_WALL_T || lattice.bay_z - within_z < PLAN_WALL_T;
+        let edge_x = dx < PLAN_WALL_T;
+        let edge_z = dz < PLAN_WALL_T;
         let threshold =
             (0.12 * context.config.anomalies.remap_intensity * delirium_gain(context.reality))
                 .clamp(0.0, 0.48);

@@ -312,9 +312,41 @@ impl BackroomsLevel {
             // endless wrong building, never as "a maze section".
             let t = PLAN_WALL_T;
             if in_w && in_n {
-                // Junction posts anchor every corner; where the walls
-                // around them have dropped they survive as column stubs.
-                solid = tuning.walls > 0.0;
+                // A corner is where masonry meets masonry — it is not a
+                // thing in its own right. Standing a post at every lattice
+                // crossing regardless of what arrives there is what made a
+                // broken-open neighbourhood read as a field of orphan
+                // stubs: the walls erode away and their junctions stay
+                // behind, 7.2 u apart, in open floor. No architect draws
+                // that. A wall run that ends should simply end, and the
+                // end face of a 0.4--1.2 u wall is the pier you see in the
+                // reference photographs.
+                //
+                // So the corner fills only if one of the four segments
+                // that could arrive at it was actually drawn: this cell's
+                // west and north walls, plus the collinear neighbours that
+                // run into the same crossing from north and west. Two
+                // collinear runs still join through the corner (otherwise
+                // a continuous wall would show a hole every cell); a
+                // corner nothing reaches is floor.
+                let tier = reality.delirium() as u32;
+                let knob = tuning.walls.clamp(0.0, 1.5);
+                let epoch_at = |ccx: i64, ccz: i64| {
+                    reality.fabric_drift_epoch(
+                        (ccx as f32 + 0.5) * FABRIC_CELL,
+                        (ccz as f32 + 0.5) * FABRIC_CELL,
+                    )
+                };
+                let arrives = |ccx: i64, ccz: i64, axis| {
+                    super::fabric_ca::wall_stands(
+                        noise, seed, ccx, ccz, axis, tier, knob, &epoch_at,
+                    )
+                };
+                use super::fabric_ca::Axis;
+                solid = arrives(cx, cz, Axis::West)
+                    || arrives(cx, cz - 1, Axis::West)
+                    || arrives(cx, cz, Axis::North)
+                    || arrives(cx - 1, cz, Axis::North);
             } else if in_w || in_n {
                 // The whole fabric cell rearranges as one: its epoch is read
                 // at the cell's own center, never at the sampled column.
@@ -344,17 +376,12 @@ impl BackroomsLevel {
                 // every other one. The drift epoch is the generation count,
                 // so the Peripheral Shift is that growth continuing rather
                 // than a fresh deal of the same deck.
-                let ca = super::fabric_ca::walls_at(noise, seed, cx, cz, epoch, tier as u8);
-                let opens_west = ca.opens_west;
-                let (ca_wall, door_salt, opens_here) = if in_w {
-                    (ca.west, drift(0x9500u32), opens_west)
+                let opens_west =
+                    super::fabric_ca::walls_at(noise, seed, cx, cz, epoch, tier as u8).opens_west;
+                let (door_salt, opens_here) = if in_w {
+                    (drift(0x9500u32), opens_west)
                 } else {
-                    (ca.north, drift(0x9600u32), !opens_west)
-                };
-                let wall_salt = if in_w {
-                    drift(0x9300u32)
-                } else {
-                    drift(0x9400u32)
+                    (drift(0x9600u32), !opens_west)
                 };
                 // Under strain the binary-tree guarantee itself erodes: a
                 // cell's guaranteed doorway can be found bricked over, and
@@ -364,20 +391,30 @@ impl BackroomsLevel {
                 let sealed = tier > 0
                     && Self::cell_hash(noise, seed, strain(0x9800), cx, cz) < 0.10 * tier as f32;
                 let opens_here = opens_here && !sealed;
-                // The automaton decides the shape; the walls knob decides how
-                // much of it is built. Below 1 it thins the grown warren, at
-                // 1 it is exactly what grew, above 1 it thickens back toward
-                // a full grid — so a debug world can still be emptied or
-                // filled without the knob having to reproduce the rule.
-                let knob = tuning.walls.clamp(0.0, 1.5);
-                let roll = Self::cell_hash(noise, seed, wall_salt, cx, cz);
-                let stands = if knob <= 0.0 {
-                    false
-                } else if knob >= 1.0 {
-                    ca_wall || roll < knob - 1.0
-                } else {
-                    ca_wall && roll < knob
+                // Same decision the junction above consults, asked of this
+                // cell's own edge — one definition of "a wall is built
+                // here", so a corner can never disagree with the wall it is
+                // supposed to be part of.
+                let epoch_at = |ccx: i64, ccz: i64| {
+                    reality.fabric_drift_epoch(
+                        (ccx as f32 + 0.5) * FABRIC_CELL,
+                        (ccz as f32 + 0.5) * FABRIC_CELL,
+                    )
                 };
+                let stands = super::fabric_ca::wall_stands(
+                    noise,
+                    seed,
+                    cx,
+                    cz,
+                    if in_w {
+                        super::fabric_ca::Axis::West
+                    } else {
+                        super::fabric_ca::Axis::North
+                    },
+                    tier,
+                    tuning.walls.clamp(0.0, 1.5),
+                    &epoch_at,
+                );
                 if stands {
                     let along = if in_w { fz } else { fx };
                     // The binary-tree wall usually gets its doorway; porous

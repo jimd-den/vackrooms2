@@ -836,10 +836,22 @@ fn rare_doorways_still_have_lintels() {
 fn tuning_knobs_control_density() {
     let noise = TestNoise;
     // Aggregate over chunks in different fabric regimes (walled rooms
-    // and open expanses) so both knobs have something to steer.
+    // and open expanses) so both knobs have something to steer. The
+    // spread has to exceed one gallery plate (64.8 u) or the sample can
+    // land entirely inside a single plate's open cells, where the pillars
+    // knob has nothing to act on and every reading comes out identical.
     let count_solids = |tuning: LevelTuning| -> usize {
         let mut n = 0;
-        for (ox, oz) in [(10.0, 10.0), (30.0, 10.0), (50.0, 30.0), (10.0, 50.0)] {
+        for (ox, oz) in [
+            (10.0, 10.0),
+            (30.0, 10.0),
+            (50.0, 30.0),
+            (10.0, 50.0),
+            (90.0, 40.0),
+            (150.0, 90.0),
+            (40.0, 150.0),
+            (170.0, 170.0),
+        ] {
             let grid = BackroomsLevel.generate(
                 Position::new(ox, oz),
                 42,

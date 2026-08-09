@@ -40,26 +40,55 @@ mod tests {
     #[test]
     fn pillar_sizes_vary_but_stay_snapped() {
         let lattice = PillarLattice {
-            bay_x: 4.4,
-            bay_z: 4.0,
+            bay_x: 8.0,
+            bay_z: 8.0,
             phase_x: 0.0,
             phase_z: 0.0,
             min_side: 1.2,
-            max_side: 1.6,
+            max_side: 2.8,
             variation_seed: 42,
         };
         let mut seen = Vec::new();
+        let mut squares = 0usize;
+        let mut oblong = 0usize;
+        let mut wide = 0usize;
+        let mut crosses = 0usize;
         for z in 0..12 {
             for x in 0..12 {
-                let side = lattice.pillar_size(x, z);
-                assert!((1.2..=1.6).contains(&side));
-                assert!(((side / 0.4).round() - side / 0.4).abs() < 1e-4);
-                if !seen.contains(&side.to_bits()) {
-                    seen.push(side.to_bits());
+                let shape = lattice.pillar_shape(x, z);
+                let (sx, sz) = (shape.half_x * 2.0, shape.half_z * 2.0);
+                crosses += usize::from(shape.cross.is_some());
+                for side in [sx, sz] {
+                    // Never smaller than the room's own minimum, never so
+                    // large that it closes the bay it stands in.
+                    assert!((1.2..=lattice.bay_x - 1.6).contains(&side), "{side}");
+                    assert!(((side / 0.4).round() - side / 0.4).abs() < 1e-4);
+                }
+                if (sx - sz).abs() < 0.05 {
+                    squares += 1;
+                } else {
+                    oblong += 1;
+                    if sx > sz {
+                        wide += 1;
+                    }
+                }
+                if !seen.contains(&(sx.to_bits(), sz.to_bits())) {
+                    seen.push((sx.to_bits(), sz.to_bits()));
                 }
             }
         }
-        assert!(seen.len() >= 2);
+        // Canon fixes the grid, not the object standing on it: a wanderer
+        // must read the lattice and still never meet the same pillar twice.
+        assert!(seen.len() >= 8, "only {} distinct pillars", seen.len());
+        assert!(squares >= 20, "too few square pillars: {squares}");
+        assert!(oblong >= 20, "too few oblong pillars: {oblong}");
+        assert!(wide > 0, "every oblong pillar faces the same way");
+        // Composed masses are an event, not the texture of the room.
+        assert!(crosses > 0, "no cruciform pier in 144 bays");
+        assert!(
+            crosses * 4 < 144,
+            "cruciform piers are supposed to be rare: {crosses}/144"
+        );
     }
 
     #[test]

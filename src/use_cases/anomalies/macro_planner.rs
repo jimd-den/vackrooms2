@@ -142,14 +142,28 @@ fn macro_instance(
         half_z,
         basis,
     };
-    let pillar_lattice = (kind == AnomalyKind::PillarExpanse).then(|| PillarLattice {
-        bay_x: snap(3.6 + 1.2 * unit(h(0xE1))),
-        bay_z: snap(3.6 + 1.2 * unit(h(0xE2))),
-        phase_x: snap((unit(h(0xE3)) - 0.5) * 3.2),
-        phase_z: snap((unit(h(0xE4)) - 0.5) * 3.2),
-        min_side: 1.2,
-        max_side: 1.6,
-        variation_seed: id ^ 0xA111_AA55_u64,
+    // "Occasionally, one will come across massive pillar rooms -- they can
+    // sometimes stretch for miles and will always appear in a lattice or
+    // grid pattern." The grid is the canon part and stays. The rest was
+    // not massive: a 1.2--1.6 u pillar every 3.6--4.8 u left barely two
+    // units of clearance, so the room played as a thicket you push through
+    // rather than a hall you are lost in -- and with only two possible
+    // sizes, every pillar in it was one of two objects.
+    //
+    // A bay you can see down, and pillars with the mass to block what is
+    // behind them. Each room draws its own bay and its own range of sizes,
+    // so one is a forest of squat piers and the next a colonnade of slabs.
+    let pillar_lattice = (kind == AnomalyKind::PillarExpanse).then(|| {
+        let min_side = snap(1.2 + 0.8 * unit(h(0xE5)));
+        PillarLattice {
+            bay_x: snap(7.2 + 3.6 * unit(h(0xE1))),
+            bay_z: snap(7.2 + 3.6 * unit(h(0xE2))),
+            phase_x: snap((unit(h(0xE3)) - 0.5) * 3.2),
+            phase_z: snap((unit(h(0xE4)) - 0.5) * 3.2),
+            min_side,
+            max_side: snap(min_side + 1.2 + 1.6 * unit(h(0xE6))),
+            variation_seed: id ^ 0xA111_AA55_u64,
+        }
     });
     let pit_lattice = (kind == AnomalyKind::PitLattice).then(|| PitLattice {
         spacing_x: snap(2.0 + 0.4 * unit(h(0xF1))),

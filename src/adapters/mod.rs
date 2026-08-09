@@ -5,5 +5,6 @@ pub mod chunk_voxel_renderer;
 pub mod json_presenter;
 pub mod material_palette;
 pub mod octree_gpu_serializer;
+pub mod png_writer;
 pub mod voxel_mapper;
 pub mod web_renderer;

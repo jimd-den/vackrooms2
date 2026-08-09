@@ -132,6 +132,128 @@ pub(super) fn walls_at(
     }
 }
 
+/// Was a wall segment drawn on one edge of one fabric cell?
+///
+/// The question a plan asks, rather than the question a voxel asks: this is
+/// about whether the *segment* was ever drawn, not whether some particular
+/// point along it survived a doorway cut. A junction needs the former —
+/// masonry meets masonry at a corner whether or not either arm happens to
+/// have a door in it three units away.
+///
+/// This is the automaton's raw answer. [`wall_stands`] is the one the
+/// building is actually built from; call that unless you are implementing
+/// it.
+#[allow(clippy::too_many_arguments)]
+fn segment_stands(
+    noise: &dyn NoiseProvider,
+    seed: u32,
+    cx: i64,
+    cz: i64,
+    axis: Axis,
+    epoch: u32,
+    tier: u32,
+    knob: f32,
+) -> bool {
+    if knob <= 0.0 {
+        return false;
+    }
+    let ca = walls_at(noise, seed, cx, cz, epoch, tier as u8);
+    let ca_wall = if axis == Axis::West {
+        ca.west
+    } else {
+        ca.north
+    };
+    let base: u32 = if axis == Axis::West { 0x9300 } else { 0x9400 };
+    let salt = base ^ epoch.wrapping_mul(0x9E37_79B9);
+    let roll = BackroomsLevel::cell_hash(noise, seed, salt, cx, cz);
+    // The automaton decides the shape; the walls knob decides how much of
+    // it is built. Below 1 it thins the grown warren, at 1 it is exactly
+    // what grew, above 1 it thickens back toward a full grid — so a debug
+    // world can still be emptied or filled without the knob having to
+    // reproduce the rule.
+    if knob >= 1.0 {
+        ca_wall || roll < knob - 1.0
+    } else {
+        ca_wall && roll < knob
+    }
+}
+
+/// Does a wall actually get built on this edge?
+///
+/// `segment_stands` decides each 7.2 u edge on its own, and that is how the
+/// fabric came to read as a field of dashes: a lone edge, with nothing
+/// collinear beside it and nothing perpendicular at either end, is a wall
+/// 7.2 u long that begins in open floor and ends in open floor, holding
+/// nothing up and dividing nothing from anything. Punch the cell's doorway
+/// through the middle of it and what is left is two stubs and a corner
+/// post — the pillar mess.
+///
+/// No one drawing this plan would keep that line. A wall is a wall because
+/// it *reaches* something: it continues into the next bay, or it dies into
+/// a wall running the other way. So a fragment attached at neither end is
+/// deleted, and what survives is runs — long planes whose free ends read as
+/// the piers in the reference photographs, standing in open floor you can
+/// see across.
+///
+/// Deletion is judged against the *raw* neighbours, never against this
+/// filtered answer. One pass, not a cascade: an erosion that fed on its own
+/// output would eat every run inward from both ends until the fabric was
+/// empty, and it would make a cell's answer depend on cells arbitrarily far
+/// away — which chunk-independent generation cannot afford.
+///
+/// `epoch_at` resolves the drift epoch for a neighbouring cell, because the
+/// Peripheral Shift is a field over the world: the run this edge belongs to
+/// may straddle two epochs, and each cell must be asked in its own.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn wall_stands(
+    noise: &dyn NoiseProvider,
+    seed: u32,
+    cx: i64,
+    cz: i64,
+    axis: Axis,
+    tier: u32,
+    knob: f32,
+    epoch_at: &dyn Fn(i64, i64) -> u32,
+) -> bool {
+    let raw = |ccx: i64, ccz: i64, a: Axis| {
+        segment_stands(noise, seed, ccx, ccz, a, epoch_at(ccx, ccz), tier, knob)
+    };
+    if !raw(cx, cz, axis) {
+        return false;
+    }
+    // Structure is never a fragment: the top of the hierarchy is the
+    // building holding itself up, and it stands whether or not anything
+    // else survived around it.
+    let along = match axis {
+        Axis::West => cx,
+        Axis::North => cz,
+    };
+    if is_structural(along, axis) {
+        return true;
+    }
+
+    // A west wall is the vertical line at x = cx, spanning this cell in z;
+    // a north wall is the horizontal line at z = cz, spanning it in x. The
+    // collinear neighbours continue the run; the perpendicular arms are the
+    // walls it could die into, two at each end (one on either side of the
+    // line it meets).
+    let (collinear, ends) = match axis {
+        Axis::West => (
+            [(cx, cz - 1), (cx, cz + 1)],
+            [(cx, cz), (cx - 1, cz), (cx, cz + 1), (cx - 1, cz + 1)],
+        ),
+        Axis::North => (
+            [(cx - 1, cz), (cx + 1, cz)],
+            [(cx, cz), (cx, cz - 1), (cx + 1, cz), (cx + 1, cz - 1)],
+        ),
+    };
+    let other = match axis {
+        Axis::West => Axis::North,
+        Axis::North => Axis::West,
+    };
+    collinear.iter().any(|&(x, z)| raw(x, z, axis)) || ends.iter().any(|&(x, z)| raw(x, z, other))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sheet_for(
     noise: &dyn NoiseProvider,
