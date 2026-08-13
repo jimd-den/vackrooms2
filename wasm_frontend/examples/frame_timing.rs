@@ -16,7 +16,11 @@
 //! set the engine actually uses for surface strategies),
 //! `FRAMES` (timed frames per renderer, default 60),
 //! `WARMUP` (untimed frames first, default 10),
-//! `LOD` (`flat0` | `flat1` | `tiered`, default `tiered`).
+//! `LOD` (`flat0` | `flat1` | `tiered`, default `tiered`),
+//! `ONLY` (comma-separated renderer names) to time a subset. Useful when
+//! one back end is unstable on the adapter under test -- a driver that
+//! loses the device on one pipeline should not cost you the numbers for
+//! the others.
 //!
 //! `tiered` mirrors the engine's real policy: LOD 0 inside
 //! `fine_distance`, coarse beyond. `flat0` is the worst case (everything
@@ -26,20 +30,22 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::spawn_point;
 use wasm_frontend::adapters::local_chunk_source::LocalChunkSource;
 use wasm_frontend::application::atlas::{AtlasPool, payload_rows};
 use wasm_frontend::application::ports::{
-    ChunkDraw, ChunkPayload, ChunkSourcePort, Environment, FrameParams, SurfaceChunk,
+    ChunkDraw, ChunkPayload, ChunkSourcePort, Environment, FrameParams, RenderArtifactNeeds,
+    SurfaceChunk,
 };
 use wasm_frontend::application::render_settings::RenderToggles;
 use wasm_frontend::application::streaming::chunk_key;
 use wasm_frontend::drivers::webgpu::frame_resources::FrameResources;
 use wasm_frontend::drivers::webgpu::gpu_types::{GpuFrameUniforms, collect_frame_lights};
 use wasm_frontend::drivers::webgpu::pipelines::{
-    RaymarchPipeline, RaymarchRuntimeOptions, SplatPipeline, SurfacePipeline,
+    RaymarchPipeline, RaymarchRuntimeOptions, SplatPipeline, SurfacePipeline, SurfelPipeline,
 };
 
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -136,6 +142,14 @@ impl Timings {
     }
 }
 
+/// Renderers selected by `ONLY`; all of them when it is unset.
+fn wanted(name: &str) -> bool {
+    match std::env::var("ONLY") {
+        Ok(list) => list.split(',').any(|entry| entry.trim() == name),
+        Err(_) => true,
+    }
+}
+
 fn main() {
     let seed: u32 = env_parse("SEED").unwrap_or(42);
     let (width, height) = size();
@@ -202,73 +216,147 @@ fn main() {
         })
         .collect();
 
-    let mut surface = SurfacePipeline::new(
-        &device,
-        TARGET_FORMAT,
-        frame_resources.layout(),
-        MAX_DRAW_DISTANCE,
-    );
-    surface.upload(&device, &surface_chunks);
-    time_renderer(&device, &queue, &targets, frames, warmup, |encoder| {
-        surface.draw(
-            &queue,
-            encoder,
-            &targets.color,
-            &targets.depth,
-            &frame_resources,
-            &world.frame,
-            toggles,
-            light_count,
-            FOV_TAN,
-            aspect,
+    // Surfels are opt-in (`RenderArtifactNeeds::ALL` excludes them), so
+    // they need their own load pass, taken only when they are being timed.
+    let surfel_payloads: Vec<(f32, f32, ChunkPayload)> = if wanted("surfel") {
+        let source = LocalChunkSource::new(
+            SimpleNoiseProvider::new(),
+            seed,
+            GeneratorConfig::low_spec(),
         );
-    })
-    .report("surface");
+        world
+            .payloads
+            .iter()
+            .map(|(x, z, _)| {
+                let payload = source.load_with_artifacts(
+                    *x,
+                    *z,
+                    0,
+                    0,
+                    &RealitySnapshot::default(),
+                    RenderArtifactNeeds::SURFEL,
+                );
+                (*x, *z, payload)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let surfel_chunks: Vec<SurfaceChunk> = surfel_payloads
+        .iter()
+        .map(|(x, z, payload)| SurfaceChunk {
+            key: chunk_key(*x, *z),
+            origin: [*x, 0.0, *z],
+            mesh: &payload.surface,
+        })
+        .collect();
+    if wanted("surfel") {
+        let discs: usize = surfel_payloads
+            .iter()
+            .map(|(_, _, payload)| payload.surface.surfels.surfels.len())
+            .sum();
+        println!("surfel geometry: {discs} discs");
+    }
 
-    let mut splat = SplatPipeline::new(
-        &device,
-        TARGET_FORMAT,
-        frame_resources.layout(),
-        MAX_DRAW_DISTANCE,
-        FACE_BUDGET,
-    );
-    splat.upload(&device, &surface_chunks);
-    time_renderer(&device, &queue, &targets, frames, warmup, |encoder| {
-        splat.draw(
-            &queue,
-            encoder,
-            &targets.color,
-            &targets.depth,
-            &frame_resources,
-            &world.frame,
-            toggles,
-            light_count,
-            FOV_TAN,
-            aspect,
+    if wanted("surface") {
+        let mut surface = SurfacePipeline::new(
+            &device,
+            TARGET_FORMAT,
+            frame_resources.layout(),
+            MAX_DRAW_DISTANCE,
         );
-    })
-    .report("splat");
+        surface.upload(&device, &surface_chunks);
+        time_renderer(&device, &queue, &targets, frames, warmup, |encoder| {
+            surface.draw(
+                &queue,
+                encoder,
+                &targets.color,
+                &targets.depth,
+                &frame_resources,
+                &world.frame,
+                toggles,
+                light_count,
+                FOV_TAN,
+                aspect,
+            );
+        })
+        .report("surface");
+    }
 
-    let mut raymarch = RaymarchPipeline::new(
-        &device,
-        TARGET_FORMAT,
-        frame_resources.layout(),
-        world.chunks.len(),
-    );
-    raymarch.configure(RaymarchRuntimeOptions::new(MAX_DRAW_DISTANCE, true, 4));
-    raymarch.upload_atlas(&device, &world.atlas);
-    time_renderer(&device, &queue, &targets, frames, warmup, |encoder| {
-        raymarch.draw(
-            &queue,
-            encoder,
-            &targets.color,
-            &frame_resources,
-            &world.frame,
-            &world.chunks,
-            toggles,
+    if wanted("splat") {
+        let mut splat = SplatPipeline::new(
+            &device,
+            TARGET_FORMAT,
+            frame_resources.layout(),
+            MAX_DRAW_DISTANCE,
+            FACE_BUDGET,
         );
-    })
-    .report("raymarch");
+        splat.upload(&device, &surface_chunks);
+        time_renderer(&device, &queue, &targets, frames, warmup, |encoder| {
+            splat.draw(
+                &queue,
+                encoder,
+                &targets.color,
+                &targets.depth,
+                &frame_resources,
+                &world.frame,
+                toggles,
+                light_count,
+                FOV_TAN,
+                aspect,
+            );
+        })
+        .report("splat");
+    }
+
+    if wanted("surfel") {
+        let mut surfel = SurfelPipeline::new(
+            &device,
+            TARGET_FORMAT,
+            frame_resources.layout(),
+            MAX_DRAW_DISTANCE,
+            FACE_BUDGET,
+        );
+        surfel.upload(&device, &surfel_chunks);
+        time_renderer(&device, &queue, &targets, frames, warmup, |encoder| {
+            surfel.draw(
+                &queue,
+                encoder,
+                &targets.color,
+                &targets.depth,
+                &frame_resources,
+                &world.frame,
+                toggles,
+                light_count,
+                FOV_TAN,
+                aspect,
+            );
+        })
+        .report("surfel");
+    }
+
+    if wanted("raymarch") {
+        let mut raymarch = RaymarchPipeline::new(
+            &device,
+            TARGET_FORMAT,
+            frame_resources.layout(),
+            world.chunks.len(),
+        );
+        raymarch.configure(RaymarchRuntimeOptions::new(MAX_DRAW_DISTANCE, true, 4));
+        raymarch.upload_atlas(&device, &world.atlas);
+        time_renderer(&device, &queue, &targets, frames, warmup, |encoder| {
+            raymarch.draw(
+                &queue,
+                encoder,
+                &targets.color,
+                &frame_resources,
+                &world.frame,
+                &world.chunks,
+                toggles,
+            );
+        })
+        .report("raymarch");
+    }
 }
 
 /// Render targets are created once so per-frame timings measure drawing,
