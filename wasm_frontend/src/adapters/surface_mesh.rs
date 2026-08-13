@@ -79,6 +79,15 @@ pub fn build_surface_artifacts(
         } else {
             crate::application::ports::FaceInstanceSet::empty()
         },
+        // One disc per voxel cell at this LOD: the density that makes a
+        // surfel cloud interchangeable with the mesh rather than a coarser
+        // stand-in for it. Coarser clouds are a streaming decision, made
+        // where the LOD is chosen, not baked in at extraction.
+        surfels: if artifacts.surfels() {
+            crate::adapters::surfel_cloud::build_surfel_cloud(&quads, voxel_scale, voxel_scale)
+        } else {
+            crate::adapters::surfel_cloud::SurfelCloud::empty()
+        },
         voxel_scale,
         light_volume_bytes: probe_grid.as_bytes().to_vec(),
         light_volume_dims: [pw as u32, ph as u32, pd as u32],

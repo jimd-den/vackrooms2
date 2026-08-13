@@ -8,6 +8,7 @@
 //! `None` and the driver simply drops that chunk (the streamer re-requests).
 //! Platform-free and natively round-trip tested.
 
+use crate::adapters::surfel_cloud::{PackedSurfel, SurfelCloud};
 use crate::application::collision::Aabb;
 use crate::application::ports::{
     ChunkPayload, FaceCellRange, FaceInstanceSet, LightKind, LightSource, PackedFaceInstance,
@@ -28,6 +29,7 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
             + payload.surface.vertices.len() * 10
             + payload.surface.indices.len() * 4
             + payload.surface.faces.instances.len() * 16
+            + payload.surface.surfels.surfels.len() * 12
             + payload.surface.light_volume_bytes.len()
             + payload.lights.len() * 51
             + payload.collision.len() * 24
@@ -115,6 +117,25 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
         put_u32(&mut out, cell.count);
     }
     put_f32(&mut out, s.faces.cell_size);
+
+    // Surfels. Written after the faces and before the collision boxes, so
+    // the section order matches the struct's and a reader that stops early
+    // stops at a section boundary rather than mid-record.
+    put_u32(&mut out, s.surfels.surfels.len() as u32);
+    for surfel in &s.surfels.surfels {
+        for c in surfel.position {
+            put_u16(&mut out, c);
+        }
+        out.extend_from_slice(&[
+            surfel.radius,
+            surfel.normal_axis,
+            surfel.material,
+            surfel.baked_light,
+            surfel.ao,
+            surfel.flags,
+        ]);
+    }
+    put_u32(&mut out, s.surfels.spacing_millis);
 
     put_u32(&mut out, payload.collision.len() as u32);
     for aabb in &payload.collision {
@@ -238,6 +259,24 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     }
     let cell_size = r.f32()?;
 
+    // 12 bytes each; `len` bounds the count against the bytes actually
+    // remaining, so a truncated or hostile record cannot make us allocate
+    // a surfel array the file could never contain.
+    let surfel_count = r.len(12)?;
+    let mut surfels = Vec::with_capacity(surfel_count);
+    for _ in 0..surfel_count {
+        surfels.push(PackedSurfel {
+            position: [r.u16()?, r.u16()?, r.u16()?],
+            radius: r.u8()?,
+            normal_axis: r.u8()?,
+            material: r.u8()?,
+            baked_light: r.u8()?,
+            ao: r.u8()?,
+            flags: r.u8()?,
+        });
+    }
+    let spacing_millis = r.u32()?;
+
     let collision_count = r.len(24)?;
     let mut collision = Vec::with_capacity(collision_count);
     for _ in 0..collision_count {
@@ -297,6 +336,10 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
                 instances,
                 cells,
                 cell_size,
+            },
+            surfels: SurfelCloud {
+                surfels,
+                spacing_millis,
             },
             voxel_scale,
             light_volume_bytes,
@@ -492,5 +535,47 @@ mod tests {
         assert_eq!(decoded.supply_items, payload.supply_items);
         assert_eq!(decoded.level_exits, payload.level_exits);
         assert_eq!(decoded, payload);
+    }
+    /// A surfel cloud has to survive the archive, or a surfel renderer
+    /// served from disk draws an empty world while every other path looks
+    /// fine. The encode and decode sides are hand-written and adjacent
+    /// only by convention, so this pins them together.
+    #[test]
+    fn a_surfel_cloud_survives_the_round_trip() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let payload = source.load_with_artifacts(
+            10.0,
+            -10.0,
+            0,
+            0,
+            &RealitySnapshot::default(),
+            RenderArtifactNeeds::SURFEL,
+        );
+        assert!(
+            !payload.surface.surfels.is_empty(),
+            "asking for surfels produced none"
+        );
+        let decoded = decode_chunk_payload(&encode_chunk_payload(&payload)).expect("decodes");
+        assert_eq!(decoded.surface.surfels, payload.surface.surfels);
+    }
+
+    /// The complement: a renderer that never asked for surfels must not be
+    /// charged for them, in build time or in bytes.
+    #[test]
+    fn a_payload_without_surfels_carries_none() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let payload = source.load_with_artifacts(
+            10.0,
+            -10.0,
+            0,
+            0,
+            &RealitySnapshot::default(),
+            RenderArtifactNeeds::SURFACE,
+        );
+        assert!(payload.surface.surfels.is_empty());
+        let decoded = decode_chunk_payload(&encode_chunk_payload(&payload)).expect("decodes");
+        assert!(decoded.surface.surfels.is_empty());
     }
 }

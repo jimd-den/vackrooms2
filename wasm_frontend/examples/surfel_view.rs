@@ -26,9 +26,7 @@ use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::spawn_point;
-use wasm_frontend::adapters::cpu_surfel::{
-    SurfelCamera, SurfelRenderSettings, render_surfels,
-};
+use wasm_frontend::adapters::cpu_surfel::{SurfelCamera, SurfelRenderSettings, render_surfels};
 use wasm_frontend::adapters::local_chunk_source::LocalChunkSource;
 use wasm_frontend::adapters::surfel_cloud::PackedSurfel;
 
@@ -94,11 +92,8 @@ fn main() {
         let draw_ms = drawn.elapsed().as_secs_f32() * 1000.0;
 
         let path = out_dir.join(format!("surfel_{seed}_{:.0}mm.png", spacing * 1000.0));
-        fs::write(
-            &path,
-            encode_rgb(width as u32, height as u32, &image.rgb),
-        )
-        .expect("write surfel png");
+        fs::write(&path, encode_rgb(width as u32, height as u32, &image.rgb))
+            .expect("write surfel png");
 
         println!(
             "{:>7.2}u  {:>10}  {:>8.1}MB  {:>6.0}ms  {:>6.0}ms  {:>9}  {:>7.1}%",

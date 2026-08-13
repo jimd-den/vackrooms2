@@ -5,6 +5,7 @@
 //! | [`raymarch`]| fullscreen SVO raymarcher (`?renderer=raymarch`)       |
 //! | [`surface`] | indexed greedy meshes (default renderer)               |
 //! | [`splat`]   | instanced face splats (`?renderer=splat`)              |
+//! | [`surfel`]  | instanced surface discs (`?renderer=surfel`)           |
 //! | [`shadow`]  | depth-only hero-light shadow pass (surface + splat)    |
 //! | [`chunks`]  | shared GLSL snippets spliced into the programs above   |
 //!
@@ -30,3 +31,4 @@ pub mod splat;
 pub mod supply_labels;
 #[path = "render_world_surfaces/mod.rs"]
 pub mod surface;
+pub mod surfel;

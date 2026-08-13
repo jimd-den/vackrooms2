@@ -261,8 +261,16 @@ pub fn render_surfels(
             let axis_b = screen_axis(t2, radius, ndc, view_depth, &basis);
 
             if draw_ellipse(
-                centre, axis_a, axis_b, view_depth, surfel, settings, &mut depth, &mut accum,
-                &mut weight, &mut stats,
+                centre,
+                axis_a,
+                axis_b,
+                view_depth,
+                surfel,
+                settings,
+                &mut depth,
+                &mut accum,
+                &mut weight,
+                &mut stats,
             ) {
                 stats.drawn += 1;
             } else {
@@ -277,11 +285,7 @@ pub fn render_surfels(
         let color = if weight[i] > 0.0 {
             covered += 1;
             let inv = 1.0 / weight[i];
-            let lit = [
-                accum[i][0] * inv,
-                accum[i][1] * inv,
-                accum[i][2] * inv,
-            ];
+            let lit = [accum[i][0] * inv, accum[i][1] * inv, accum[i][2] * inv];
             fog_blend(lit, depth[i], &settings.fog)
         } else {
             settings.fog.color
@@ -392,10 +396,7 @@ fn draw_ellipse(
     let mut touched = false;
     for py in y0..y1 {
         for px in x0..x1 {
-            let d = [
-                px as f32 + 0.5 - centre[0],
-                py as f32 + 0.5 - centre[1],
-            ];
+            let d = [px as f32 + 0.5 - centre[0], py as f32 + 0.5 - centre[1]];
             let inside = if invertible {
                 let u = (d[0] * axis_b[1] - d[1] * axis_b[0]) / det;
                 let v = (axis_a[0] * d[1] - axis_a[1] * d[0]) / det;
@@ -723,5 +724,4 @@ mod tests {
             );
         }
     }
-
 }

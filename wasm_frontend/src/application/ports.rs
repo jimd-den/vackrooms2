@@ -4,6 +4,7 @@
 //! (adapters / drivers) *implement* them. This keeps the frame loop and
 //! streaming logic testable without a GPU or a browser.
 
+use crate::adapters::surfel_cloud::SurfelCloud;
 use crate::application::collision::Aabb;
 use vackrooms::domain::entities::anomaly::{LevelExit, PitHazard, RealitySnapshot, TraversalGate};
 use vackrooms::domain::entities::supplies::SupplyItem;
@@ -154,6 +155,9 @@ pub struct SurfaceMeshPayload {
     /// Face-instance page for the splat renderer. When both representations
     /// are requested, it is derived from the same quads as `vertices`.
     pub faces: FaceInstanceSet,
+    /// Oriented surface discs for the surfel splatter, from those same
+    /// quads. Empty unless [`RenderArtifactNeeds::SURFEL`] was asked for.
+    pub surfels: SurfelCloud,
     /// World size of one voxel cell at this payload's LOD.
     pub voxel_scale: f32,
     /// Packed RGB8 3D light-volume probe data.
@@ -170,6 +174,7 @@ impl SurfaceMeshPayload {
             bounds: Aabb::new([0.0; 3], [0.0; 3]),
             lod,
             faces: FaceInstanceSet::empty(),
+            surfels: SurfelCloud::empty(),
             voxel_scale: 1.0,
             light_volume_bytes: vec![0, 0, 0],
             light_volume_dims: [1, 1, 1],
@@ -394,10 +399,15 @@ impl RenderArtifactNeeds {
     /// both land in `ChunkPayload::nodes`, so a renderer asks for one or the
     /// other and never pays for the volume twice.
     const BRICKS_BIT: u8 = 1 << 3;
+    /// Oriented surface discs. Derived from the same greedy quads as the
+    /// mesh and the face splats, so it costs the extraction pass but not a
+    /// second one.
+    const SURFELS_BIT: u8 = 1 << 4;
     const KNOWN_BITS: u8 = Self::INDEXED_SURFACE_MESH_BIT
         | Self::FACE_SPLATS_BIT
         | Self::SVO_NODES_BIT
-        | Self::BRICKS_BIT;
+        | Self::BRICKS_BIT
+        | Self::SURFELS_BIT;
 
     pub const NONE: Self = Self(0);
     pub const SURFACE: Self = Self(Self::INDEXED_SURFACE_MESH_BIT);
@@ -405,13 +415,23 @@ impl RenderArtifactNeeds {
     pub const RAYMARCH: Self = Self(Self::SVO_NODES_BIT);
     /// What a brick-aware ray marcher asks for.
     pub const BRICKS: Self = Self(Self::BRICKS_BIT);
+    /// What the surfel splatter asks for.
+    pub const SURFEL: Self = Self(Self::SURFELS_BIT);
     pub const CPU: Self = Self(Self::SVO_NODES_BIT);
-    /// Every artifact that can coexist. Deliberately *excludes* bricks:
-    /// they and the plain SVO both land in `ChunkPayload::nodes` and only
-    /// one encoding can occupy it, so a blanket request has to name the one
-    /// every consumer can decode. A brick-aware renderer asks for
-    /// [`Self::BRICKS`] explicitly.
-    pub const ALL: Self = Self(Self::KNOWN_BITS & !Self::BRICKS_BIT);
+    /// What a blanket request means: the union of what the shipped
+    /// renderers ask for, and nothing else.
+    ///
+    /// Deliberately *excludes* bricks, because they and the plain SVO both
+    /// land in `ChunkPayload::nodes` and only one encoding can occupy it,
+    /// so a blanket request has to name the one every consumer can decode.
+    ///
+    /// Deliberately excludes surfels too, for a different reason. They can
+    /// coexist with anything -- they occupy their own field -- but they are
+    /// a *third* encoding of the same surface, and a caller asking for
+    /// everything already receives two. Folding them in would charge every
+    /// mesh and splat frame for a few hundred thousand discs nothing reads.
+    /// Both exclusions are opt-in for the renderer that wants them.
+    pub const ALL: Self = Self(Self::KNOWN_BITS & !Self::BRICKS_BIT & !Self::SURFELS_BIT);
 
     pub const fn from_bits(bits: u8) -> Option<Self> {
         if bits & !Self::KNOWN_BITS == 0 {
@@ -431,6 +451,10 @@ impl RenderArtifactNeeds {
 
     pub const fn face_splats(self) -> bool {
         self.0 & Self::FACE_SPLATS_BIT != 0
+    }
+
+    pub const fn surfels(self) -> bool {
+        self.0 & Self::SURFELS_BIT != 0
     }
 
     pub const fn svo_nodes(self) -> bool {
@@ -455,7 +479,7 @@ impl RenderArtifactNeeds {
     }
 
     pub const fn needs_surface_extraction(self) -> bool {
-        self.indexed_surface_mesh() || self.face_splats()
+        self.indexed_surface_mesh() || self.face_splats() || self.surfels()
     }
 }
 
@@ -715,5 +739,21 @@ mod artifact_tests {
                 .union(RenderArtifactNeeds::RAYMARCH),
             RenderArtifactNeeds::ALL,
         );
+    }
+
+    /// Surfels are opt-in. They are a third encoding of a surface that
+    /// `ALL` already describes twice, so a blanket request must not build
+    /// them -- and a surfel renderer must not be handed a mesh instead.
+    #[test]
+    fn surfels_are_asked_for_or_not_built() {
+        assert!(RenderArtifactNeeds::SURFEL.surfels());
+        assert!(RenderArtifactNeeds::SURFEL.needs_surface_extraction());
+        assert!(!RenderArtifactNeeds::ALL.surfels());
+        assert!(!RenderArtifactNeeds::SURFACE.surfels());
+        assert!(!RenderArtifactNeeds::SPLAT.surfels());
+        // And it composes: a debug view wanting both is representable.
+        let both = RenderArtifactNeeds::SURFACE.union(RenderArtifactNeeds::SURFEL);
+        assert!(both.surfels() && both.indexed_surface_mesh());
+        assert!(RenderArtifactNeeds::from_bits(both.bits()).is_some());
     }
 }
