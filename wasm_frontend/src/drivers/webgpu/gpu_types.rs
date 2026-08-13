@@ -5,6 +5,7 @@
 //! worker codec remains independent of wgpu and no compiler layout is relied
 //! upon.
 
+use crate::adapters::surfel_cloud::PackedSurfel;
 use bytemuck::{Pod, Zeroable};
 #[cfg(test)]
 use vackrooms::adapters::material_palette::MATERIAL_VISUALS;
@@ -237,6 +238,37 @@ impl From<&PackedFaceInstance> for GpuPackedFace {
     }
 }
 
+/// One oriented surface disc, 16 bytes. Mirrors `PackedSurfel` with the
+/// material's colour resolved, exactly as `GpuPackedFace` does: the shader
+/// has no palette, so the colour travels with the primitive.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuPackedSurfel {
+    pub xy: u32,
+    /// z | radius << 16 | normal_axis << 24.
+    pub z_radius_axis: u32,
+    /// material | baked_light << 8 | ao << 16 | flags << 24.
+    pub surface: u32,
+    /// Low 24 bits: canonical sRGB color; high byte: emitted radiance.
+    pub visual: u32,
+}
+
+impl From<&PackedSurfel> for GpuPackedSurfel {
+    fn from(surfel: &PackedSurfel) -> Self {
+        Self {
+            xy: u32::from(surfel.position[0]) | (u32::from(surfel.position[1]) << 16),
+            z_radius_axis: u32::from(surfel.position[2])
+                | (u32::from(surfel.radius) << 16)
+                | (u32::from(surfel.normal_axis) << 24),
+            surface: u32::from(surfel.material)
+                | (u32::from(surfel.baked_light) << 8)
+                | (u32::from(surfel.ao) << 16)
+                | (u32::from(surfel.flags) << 24),
+            visual: pack_material_visual(surfel.material),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuRayChunk {
@@ -327,6 +359,7 @@ mod tests {
         assert_eq!(size_of::<GpuChunkUniforms>(), 48);
         assert_eq!(size_of::<GpuPackedSurfaceVertex>(), 16);
         assert_eq!(size_of::<GpuPackedFace>(), 16);
+        assert_eq!(size_of::<GpuPackedSurfel>(), 16);
         assert_eq!(size_of::<GpuRayChunk>(), 48);
         assert_eq!(size_of::<GpuRayScene>(), 16);
         assert_eq!(size_of::<GpuSupplySprite>(), 16);

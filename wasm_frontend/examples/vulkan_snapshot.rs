@@ -19,6 +19,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::spawn_point;
@@ -26,7 +27,8 @@ use wasm_frontend::adapters::cpu_splatter::{CpuRenderSettings, CpuShadowMode};
 use wasm_frontend::adapters::local_chunk_source::LocalChunkSource;
 use wasm_frontend::application::atlas::{AtlasPool, payload_rows};
 use wasm_frontend::application::ports::{
-    ChunkDraw, ChunkPayload, ChunkSourcePort, Environment, FrameParams, SurfaceChunk,
+    ChunkDraw, ChunkPayload, ChunkSourcePort, Environment, FrameParams, RenderArtifactNeeds,
+    SurfaceChunk,
 };
 use wasm_frontend::application::render_settings::RenderToggles;
 use wasm_frontend::application::streaming::chunk_key;
@@ -34,6 +36,7 @@ use wasm_frontend::drivers::webgpu::frame_resources::FrameResources;
 use wasm_frontend::drivers::webgpu::gpu_types::{GpuFrameUniforms, collect_frame_lights};
 use wasm_frontend::drivers::webgpu::pipelines::{
     CpuPresentPipeline, RaymarchPipeline, RaymarchRuntimeOptions, SplatPipeline, SurfacePipeline,
+    SurfelPipeline,
 };
 
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -95,6 +98,43 @@ fn main() {
     // greedy-quad artifacts, so this is built once regardless of `ONLY`.
     let surface_chunks: Vec<SurfaceChunk> = world
         .payloads
+        .iter()
+        .map(|(x, z, payload)| SurfaceChunk {
+            key: chunk_key(*x, *z),
+            origin: [*x, 0.0, *z],
+            mesh: &payload.surface,
+        })
+        .collect();
+
+    // Surfels are an opt-in artifact -- `RenderArtifactNeeds::ALL` excludes
+    // them on purpose -- so they need their own load pass, and it only runs
+    // when the surfel snapshot was actually asked for. A cloud is a few
+    // hundred thousand discs and no other pipeline here reads one.
+    let surfel_payloads: Vec<(f32, f32, ChunkPayload)> = if wanted("surfel") {
+        let source = LocalChunkSource::new(
+            SimpleNoiseProvider::new(),
+            seed,
+            GeneratorConfig::low_spec(),
+        );
+        world
+            .payloads
+            .iter()
+            .map(|(x, z, _)| {
+                let payload = source.load_with_artifacts(
+                    *x,
+                    *z,
+                    0,
+                    0,
+                    &RealitySnapshot::default(),
+                    RenderArtifactNeeds::SURFEL,
+                );
+                (*x, *z, payload)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let surfel_chunks: Vec<SurfaceChunk> = surfel_payloads
         .iter()
         .map(|(x, z, payload)| SurfaceChunk {
             key: chunk_key(*x, *z),
@@ -175,6 +215,48 @@ fn main() {
             },
         );
         write_png(&out_dir, "splat", width, height, &pixels);
+    }
+
+    if wanted("surfel") {
+        // Surfel: the surface sampled into oriented discs, expanded into
+        // in-plane quads on the GPU and cut to circles in the fragment
+        // stage. Its chunks are uploaded separately because surfels are an
+        // opt-in artifact -- `ALL` deliberately excludes them.
+        let mut surfel = SurfelPipeline::new(
+            &device,
+            TARGET_FORMAT,
+            frame_resources.layout(),
+            MAX_DRAW_DISTANCE,
+            FACE_BUDGET,
+        );
+        surfel.upload(&device, &surfel_chunks);
+        let pixels = render_offscreen(
+            &device,
+            &queue,
+            width,
+            height,
+            true,
+            |encoder, color, depth| {
+                surfel.draw(
+                    &queue,
+                    encoder,
+                    color,
+                    depth.expect("surfel pass renders with depth"),
+                    &frame_resources,
+                    &world.frame,
+                    toggles,
+                    world.frame.scene_lights.len() as u32,
+                    FOV_TAN,
+                    width as f32 / (height.max(1)) as f32,
+                );
+            },
+        );
+        eprintln!(
+            "surfel: {} discs in {} draws",
+            surfel.stats().surfels_drawn,
+            surfel.stats().draw_calls
+        );
+        write_png(&out_dir, "surfel", width, height, &pixels);
     }
 
     if wanted("raymarch") {

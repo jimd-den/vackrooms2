@@ -15,6 +15,7 @@ pub enum ShaderProgram {
     SurfaceShadow,
     Splat,
     SplatShadow,
+    Surfel,
     Raymarch,
     CpuPresent,
     SupplyLabels,
@@ -23,11 +24,12 @@ pub enum ShaderProgram {
 impl ShaderProgram {
     /// Every program, so a caller that must visit all of them (offline
     /// validation) cannot silently miss one added later.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Surface,
         Self::SurfaceShadow,
         Self::Splat,
         Self::SplatShadow,
+        Self::Surfel,
         Self::Raymarch,
         Self::CpuPresent,
         Self::SupplyLabels,
@@ -39,6 +41,7 @@ impl ShaderProgram {
             Self::SurfaceShadow => "webgpu.surface-shadow",
             Self::Splat => "webgpu.splat",
             Self::SplatShadow => "webgpu.splat-shadow",
+            Self::Surfel => "webgpu.surfel",
             Self::Raymarch => "webgpu.raymarch",
             Self::CpuPresent => "webgpu.cpu-present",
             Self::SupplyLabels => "webgpu.supply-labels",
@@ -53,6 +56,7 @@ impl ShaderProgram {
         const SHADOW_CASTER: &str = include_str!("shaders/shadow_caster.wgsl");
         const SURFACE_GEOMETRY: &str = include_str!("shaders/surface_geometry.wgsl");
         const SPLAT_GEOMETRY: &str = include_str!("shaders/splat_geometry.wgsl");
+        const SURFEL_GEOMETRY: &str = include_str!("shaders/surfel_geometry.wgsl");
         match self {
             Self::Surface => Cow::Owned(
                 [
@@ -93,6 +97,20 @@ impl ShaderProgram {
                     RASTER_CHUNK,
                     SPLAT_GEOMETRY,
                     include_str!("shaders/splat_shadow.wgsl"),
+                ]
+                .concat(),
+            ),
+            // No shadow variant: the splat path casts from a retained mesh
+            // and a surfel cloud has none. Inventing one would make the two
+            // representations disagree about the silhouette.
+            Self::Surfel => Cow::Owned(
+                [
+                    COMMON,
+                    HERO_SHADOW_CONTRACT,
+                    RASTER_SHADOW,
+                    RASTER_CHUNK,
+                    SURFEL_GEOMETRY,
+                    include_str!("shaders/surfel.wgsl"),
                 ]
                 .concat(),
             ),

@@ -7,6 +7,7 @@ mod raymarch;
 mod splat;
 mod supply_labels;
 mod surface;
+mod surfel;
 mod visibility;
 
 pub use cpu_present::CpuPresentPipeline;
@@ -15,3 +16,4 @@ pub use raymarch::{RaymarchPipeline, RaymarchRuntimeOptions};
 pub use splat::{SplatFrameStats, SplatPipeline};
 pub use supply_labels::SupplyLabelPipeline;
 pub use surface::SurfacePipeline;
+pub use surfel::{SurfelFrameStats, SurfelPipeline};
