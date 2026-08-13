@@ -25,6 +25,7 @@ use std::cell::RefCell;
 use vackrooms::adapters::brick_pool_gpu_serializer::BrickPoolGpuSerializer;
 use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
+use vackrooms::adapters::voxel_mapper::VoxelMapper;
 use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::domain::entities::position::Position;
 use vackrooms::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
@@ -37,6 +38,7 @@ use vackrooms::use_cases::build_brick_pool::build_brick_pool;
 use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::use_cases::compress_svdag::compress_svdag;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
+use vackrooms::use_cases::generated_chunk::GeneratedChunk;
 use vackrooms::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 use vackrooms::use_cases::world_block::BlockCoord;
 
@@ -44,6 +46,7 @@ use crate::adapters::block_cache::{BlockCache, DEFAULT_BLOCK_CAPACITY};
 
 use crate::adapters::collect_emissive_lights::collect_emissive_lights;
 use crate::adapters::surface_mesh::build_surface_artifacts;
+use crate::adapters::surfel_cloud::{SurfelCloud, build_surfel_cloud};
 use crate::application::collision::Aabb;
 use crate::application::ports::{
     ChunkPayload, ChunkSourcePort, RenderArtifactNeeds, SurfaceMeshPayload,
@@ -141,16 +144,23 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
         );
     }
 
-    fn generate_payload(
+    /// The chunk's voxels plus a one-voxel X/Z halo, and the world corner
+    /// that halo starts at.
+    ///
+    /// Extracted so every representation derived from a chunk is derived
+    /// from the *same* grid. The halo rules here are subtle — a one-voxel
+    /// skirt so boundary faces are decided against real neighbours, plans
+    /// taken from the block containing the chunk's centre — and a second
+    /// caller reimplementing them would not fail loudly. It would produce
+    /// geometry that disagreed with the mesh only at chunk seams.
+    fn halo_grid(
         &self,
         origin_x: f32,
         origin_z: f32,
+        config: &GeneratorConfig,
         level: u32,
-        lod: u8,
         reality: &RealitySnapshot,
-        artifacts: RenderArtifactNeeds,
-    ) -> ChunkPayload {
-        let config = self.config.with_level(level).at_lod(lod);
+    ) -> (GeneratedChunk, [f32; 3]) {
         let generator =
             GenerateChunkArchitectureUseCase::with_telemetry(&self.noise, self.telemetry);
 
@@ -160,7 +170,7 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
         // merely because the adjacent streamed chunk has not uploaded yet.
         let halo_config = GeneratorConfig {
             chunk_size: config.chunk_size + config.voxel_scale * 2.0,
-            ..config
+            ..*config
         };
         let halo_world_origin = [
             origin_x - config.voxel_scale,
@@ -184,18 +194,59 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
         let block = blocks.get_or_plan(
             level,
             BlockCoord::of(centre),
-            &config,
+            config,
             &self.noise,
             &mut |_, _| {},
         );
-        let halo_grid = generator.execute_from_plans(
+        let grid = generator.execute_from_plans(
             halo_origin,
             self.seed,
             halo_config,
             reality,
             Some(block.plans()),
         );
-        drop(blocks);
+        (grid, halo_world_origin)
+    }
+
+    /// The chunk's visible surface as a cloud of oriented discs, sampled at
+    /// `spacing` world units.
+    ///
+    /// Built from the same halo grid and the same greedy quads the mesh and
+    /// the face splats come from, so the three representations can only ever
+    /// disagree about how a surface is *drawn*, never about where it is.
+    pub fn load_surfel_cloud(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        spacing: f32,
+    ) -> SurfelCloud {
+        let config = self.config.with_level(level).at_lod(lod);
+        let (halo_grid, _) = self.halo_grid(
+            origin_x,
+            origin_z,
+            &config,
+            level,
+            &RealitySnapshot::default(),
+        );
+        let mapper = VoxelMapper::new(config.voxel_scale, &DEFAULT_MATERIAL_PALETTE);
+        let quads = mapper.map_voxel_grid_with_padding(&halo_grid, 1);
+        build_surfel_cloud(&quads, config.voxel_scale, spacing)
+    }
+
+    fn generate_payload(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+        artifacts: RenderArtifactNeeds,
+    ) -> ChunkPayload {
+        let config = self.config.with_level(level).at_lod(lod);
+        let (halo_grid, halo_world_origin) =
+            self.halo_grid(origin_x, origin_z, &config, level, reality);
         let grid = crop_lateral_halo(&halo_grid, 1);
         let lights = collect_emissive_lights(&halo_grid, config.voxel_scale, halo_world_origin, 1);
         let surface = if artifacts.needs_surface_extraction() {
