@@ -204,7 +204,12 @@ fn main() {
 
     let targets = Targets::new(&device, width, height);
     let aspect = width as f32 / (height.max(1)) as f32;
-    let light_count = world.frame.scene_lights.len() as u32;
+    // `LIGHTS` shortens the per-corner/per-fragment light loop for every
+    // pipeline. Not a rendering feature -- it is how the cost of the flat
+    // frame light array is separated from the cost of the geometry.
+    let light_count = env_parse::<u32>("LIGHTS")
+        .unwrap_or_else(|| world.frame.scene_lights.len() as u32)
+        .min(world.frame.scene_lights.len() as u32);
 
     let surface_chunks: Vec<SurfaceChunk> = world
         .payloads
@@ -218,7 +223,7 @@ fn main() {
 
     // Surfels are opt-in (`RenderArtifactNeeds::ALL` excludes them), so
     // they need their own load pass, taken only when they are being timed.
-    let surfel_payloads: Vec<(f32, f32, ChunkPayload)> = if wanted("surfel") {
+    let mut surfel_payloads: Vec<(f32, f32, ChunkPayload)> = if wanted("surfel") {
         let source = LocalChunkSource::new(
             SimpleNoiseProvider::new(),
             seed,
@@ -242,6 +247,20 @@ fn main() {
     } else {
         Vec::new()
     };
+    // `SURFEL_SPACING` resamples the same greedy quads at a chosen density.
+    // Extraction bakes one disc per voxel cell; the point of a surfel cloud
+    // is that density is a dial, so the dial has to be measurable.
+    if let Some(spacing) = env_parse::<f32>("SURFEL_SPACING") {
+        let source = LocalChunkSource::new(
+            SimpleNoiseProvider::new(),
+            seed,
+            GeneratorConfig::low_spec(),
+        );
+        for (x, z, payload) in &mut surfel_payloads {
+            let lod = payload.surface.lod;
+            payload.surface.surfels = source.load_surfel_cloud(*x, *z, 0, lod, spacing);
+        }
+    }
     let surfel_chunks: Vec<SurfaceChunk> = surfel_payloads
         .iter()
         .map(|(x, z, payload)| SurfaceChunk {
@@ -256,6 +275,44 @@ fn main() {
             .map(|(_, _, payload)| payload.surface.surfels.surfels.len())
             .sum();
         println!("surfel geometry: {discs} discs");
+
+        // How much of the flat 360-light frame array a chunk actually needs.
+        // Every pipeline currently passes the whole list, so this is the size
+        // of the win available to `light_first`/`light_count`.
+        let lights = world.frame.active_scene_lights();
+        let mut counts: Vec<usize> = Vec::new();
+        for chunk in &surfel_chunks {
+            let min = chunk.origin;
+            let max = [
+                min[0] + chunk.mesh.bounds.max[0],
+                min[1] + chunk.mesh.bounds.max[1],
+                min[2] + chunk.mesh.bounds.max[2],
+            ];
+            let reaching = lights
+                .iter()
+                .filter(|light| light.enabled)
+                .filter(|light| {
+                    let mut d2 = 0.0f32;
+                    for axis in 0..3 {
+                        let p = light.position[axis];
+                        let clamped = p.clamp(min[axis], max[axis]);
+                        d2 += (p - clamped) * (p - clamped);
+                    }
+                    d2 <= light.radius * light.radius
+                })
+                .count();
+            counts.push(reaching);
+        }
+        counts.sort_unstable();
+        let total: usize = counts.iter().sum();
+        println!(
+            "lights per chunk: min {} median {} max {} mean {:.1} (of {} in the frame)",
+            counts.first().copied().unwrap_or(0),
+            counts[counts.len() / 2],
+            counts.last().copied().unwrap_or(0),
+            total as f32 / counts.len() as f32,
+            lights.len(),
+        );
     }
 
     if wanted("surface") {
@@ -318,6 +375,10 @@ fn main() {
             FACE_BUDGET,
         );
         surfel.upload(&device, &surfel_chunks);
+        // Isolates the light loop from raster and fill: with zero lights the
+        // vertex stage still runs, still expands the quad, still writes
+        // depth -- it just stops summing 360 lights per corner.
+        let surfel_lights = env_parse::<u32>("SURFEL_LIGHTS").unwrap_or(light_count);
         time_renderer(&device, &queue, &targets, frames, warmup, |encoder| {
             surfel.draw(
                 &queue,
@@ -327,7 +388,7 @@ fn main() {
                 &frame_resources,
                 &world.frame,
                 toggles,
-                light_count,
+                surfel_lights,
                 FOV_TAN,
                 aspect,
             );

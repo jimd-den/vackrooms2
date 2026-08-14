@@ -34,6 +34,7 @@ use vackrooms::use_cases::ports::NoiseProvider;
 
 use crate::adapters::chunk_codec::{decode_chunk_payload, encode_chunk_payload};
 use crate::adapters::local_chunk_source::LocalChunkSource;
+use crate::adapters::surface_mesh::SurfelDensity;
 use crate::application::chunk_archive::{
     ArchiveIdentity, ArchiveStorage, ChunkArchive, RecordKey,
 };
@@ -110,6 +111,14 @@ impl<N: NoiseProvider> ArchivedChunkSource<N> {
             max_bytes,
             clears: RefCell::new(0),
         }
+    }
+
+    /// Sets how finely the surfel artifact samples the surface. The archive
+    /// needs no invalidation for this: `generator_id` already folds in the
+    /// query string that carries the density.
+    pub fn with_surfel_density(mut self, density: SurfelDensity) -> Self {
+        self.inner = self.inner.with_surfel_density(density);
+        self
     }
 
     /// How many times the archive has been emptied to stay inside its budget.

@@ -41,7 +41,7 @@ use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, Gen
 use vackrooms::use_cases::region_plan::{REGION_SIZE, generate_region_plan};
 
 use wasm_frontend::adapters::collect_emissive_lights::collect_emissive_lights;
-use wasm_frontend::adapters::surface_mesh::build_surface_artifacts;
+use wasm_frontend::adapters::surface_mesh::{SurfelDensity, build_surface_artifacts};
 use wasm_frontend::application::ports::{
     Environment, FrameParams, RenderArtifactNeeds, SurfaceChunk, SurfaceMeshPayload,
 };
@@ -93,9 +93,7 @@ fn main() {
     match standing_in {
         Some(a) => println!(
             "  standing in #{} {:?} (abandoned={})",
-            a.id,
-            a.program,
-            a.corruption.abandoned
+            a.id, a.program, a.corruption.abandoned
         ),
         None => println!("  standing in unplanned fabric (no assembly covers this point)"),
     }
@@ -186,6 +184,7 @@ fn main() {
                 0,
                 1,
                 RenderArtifactNeeds::SURFACE,
+                SurfelDensity::PER_VOXEL,
             );
             meshes.push((cx, cz, mesh));
             world

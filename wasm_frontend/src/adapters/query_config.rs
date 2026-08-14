@@ -23,6 +23,7 @@
 use vackrooms::domain::entities::anomaly::AnomalyKind;
 use vackrooms::use_cases::generate_chunk::{AnomalyTuning, GeneratorConfig, LevelTuning};
 
+use crate::adapters::surface_mesh::SurfelDensity;
 use crate::application::quality::QualityProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,6 +140,22 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
 /// so all of them voxelize the identical world by construction.
 pub fn generator_setup_from_query(query: &str, default_seed: u32) -> (u32, GeneratorConfig) {
     generator_setup_for_quality(query, default_seed, quality_profile_from_query(query))
+}
+
+/// Parses `?surfel_density=`, which subdivides the surfel cloud below its
+/// one-disc-per-voxel default.
+///
+/// Read on both sides of the worker boundary rather than sent in the chunk
+/// request: `ChunkRequest` carries no spacing, and the workers are where
+/// extraction actually happens. The archive follows automatically, because
+/// `generator_id` is the query string's own hash — changing the density
+/// changes the key, so a denser cloud never reads back a coarser cached one.
+pub fn surfel_density_from_query(query: &str) -> SurfelDensity {
+    query_param(query, "surfel_density")
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map(SurfelDensity::new)
+        .unwrap_or_default()
 }
 
 /// Parses the shared `?spec=low|high` decision. Values are case-insensitive,

@@ -134,7 +134,16 @@ pub fn radius_for_spacing(spacing: f32) -> f32 {
 pub fn build_surfel_cloud(quads: &[MergedQuad], voxel_scale: f32, spacing: f32) -> SurfelCloud {
     let spacing = spacing.clamp(voxel_scale * 0.1, 64.0);
     let radius = radius_for_spacing(spacing);
-    let radius_q = ((radius / RADIUS_QUANT).round() as u32).clamp(1, u8::MAX as u32) as u8;
+    // Round *up*, never to nearest. `radius_for_spacing` is a minimum, not a
+    // target: a radius quantized below it leaves each cell's four corners
+    // uncovered, and the result is a regular grid of pinholes across every
+    // surface. Rounding up costs at most one 1/32 u step of extra overlap.
+    //
+    // The error is worst where the quantization is coarsest relative to the
+    // radius, so it appears at high density: at 0.1 u spacing the exact
+    // radius is 0.0707, which is 2.26 steps -- to-nearest gives 2 steps
+    // (0.0625), 12% short, and the surface visibly perforates.
+    let radius_q = ((radius / RADIUS_QUANT).ceil() as u32).clamp(1, u8::MAX as u32) as u8;
 
     let mut surfels = Vec::new();
     for quad in quads {
@@ -310,6 +319,28 @@ mod tests {
             radius >= corner_distance - 1e-6,
             "radius {radius} cannot reach a cell corner at {corner_distance}"
         );
+    }
+
+    /// The radius that reaches the GPU is the *quantized* one, and that is
+    /// the one coverage depends on.
+    ///
+    /// The float check above passed for years while `build_surfel_cloud`
+    /// quantized to nearest, which rounds down whenever the exact radius
+    /// falls in the lower half of a 1/32 u step. At 0.1 u spacing that is a
+    /// 12% shortfall and the surface perforates into a regular grid of
+    /// pinholes -- visible only once the density dial went past 2x, because
+    /// coarser spacings happened to round up.
+    #[test]
+    fn the_quantized_radius_still_reaches_the_cell_corner() {
+        for spacing in [0.05f32, 0.1, 0.15, 0.2, 0.283, 0.4, 0.5, 0.8, 1.0, 1.6] {
+            let cloud = build_surfel_cloud(&[wall(4.0, 4.0)], 0.05, spacing);
+            let quantized = f32::from(cloud.surfels[0].radius) * RADIUS_QUANT;
+            let needed = radius_for_spacing(spacing);
+            assert!(
+                quantized >= needed - 1e-6,
+                "at spacing {spacing} the packed radius {quantized} falls short of {needed}"
+            );
+        }
     }
 
     /// A merged quad and the faces it was merged from must sample to the

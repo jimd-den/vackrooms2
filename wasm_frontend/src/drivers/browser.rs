@@ -20,6 +20,7 @@ use crate::adapters::input::InputCollector;
 use crate::adapters::local_chunk_source::LocalChunkSource;
 use crate::adapters::query_config::{
     generator_setup_for_quality, quality_profile_from_query, query_param,
+    surfel_density_from_query,
 };
 use crate::adapters::section_locator::SectionLocator;
 use crate::application::engine::{Engine, EngineConfig};
@@ -32,6 +33,7 @@ use crate::drivers::console_telemetry::CONSOLE_TELEMETRY;
 use crate::drivers::cpu_canvas::CpuCanvasRenderer;
 use crate::drivers::splat_webgl::{SplatProfile, SplatRenderer};
 use crate::drivers::surface_webgl::SurfaceRenderer;
+use crate::drivers::surfel_webgl::{SurfelProfile, SurfelRenderer};
 use crate::drivers::webgl::WebGl2Renderer;
 use crate::drivers::webgpu::config::{GpuQualityProfile, RendererKind};
 use crate::drivers::webgpu::renderer::WebGpuRenderer;
@@ -50,6 +52,7 @@ const HUD_INTERVAL: u32 = 30;
 enum DriverRenderer {
     Surface(SurfaceRenderer),
     Splat(SplatRenderer),
+    Surfel(SurfelRenderer),
     Raymarch(WebGl2Renderer),
     Cpu(CpuCanvasRenderer),
     WebGpu(WebGpuRenderer),
@@ -60,6 +63,7 @@ impl DriverRenderer {
         match self {
             DriverRenderer::Surface(r) => r.resize(width, height),
             DriverRenderer::Splat(r) => r.resize(width, height),
+            DriverRenderer::Surfel(r) => r.resize(width, height),
             DriverRenderer::Raymarch(r) => r.resize(width, height),
             DriverRenderer::Cpu(r) => r.resize(width, height),
             DriverRenderer::WebGpu(r) => r.resize(width, height),
@@ -71,9 +75,10 @@ impl DriverRenderer {
     /// canvas and software framebuffer always have identical dimensions.
     fn resolution_factor(&self) -> f64 {
         match self {
-            DriverRenderer::Surface(_) | DriverRenderer::Splat(_) | DriverRenderer::Raymarch(_) => {
-                1.0
-            }
+            DriverRenderer::Surface(_)
+            | DriverRenderer::Splat(_)
+            | DriverRenderer::Surfel(_)
+            | DriverRenderer::Raymarch(_) => 1.0,
             DriverRenderer::Cpu(_) => crate::get_cpu_settings().canvas_resolution_factor(),
             DriverRenderer::WebGpu(r) => r.resolution_factor(),
         }
@@ -83,6 +88,7 @@ impl DriverRenderer {
         match self {
             DriverRenderer::Surface(_) => "WebGL2 surfaces",
             DriverRenderer::Splat(_) => "WebGL2 face splats",
+            DriverRenderer::Surfel(_) => "WebGL2 surfels",
             DriverRenderer::Raymarch(_) => "WebGL2 raymarch (debug)",
             DriverRenderer::Cpu(_) => "CPU splat",
             DriverRenderer::WebGpu(r) => r.label(),
@@ -108,6 +114,9 @@ impl RendererPort for DriverRenderer {
             DriverRenderer::Splat(_) => {
                 RenderArtifactNeeds::SPLAT.union(RenderArtifactNeeds::SURFACE)
             }
+            // Discs only. The surfel driver has no shadow pass, so unlike
+            // the splat driver it never needs the indexed mesh alongside.
+            DriverRenderer::Surfel(_) => RenderArtifactNeeds::SURFEL,
             DriverRenderer::Raymarch(_) => RenderArtifactNeeds::RAYMARCH,
             DriverRenderer::Cpu(_) => RenderArtifactNeeds::CPU,
             DriverRenderer::WebGpu(r) => r.artifact_needs(),
@@ -122,6 +131,7 @@ impl RendererPort for DriverRenderer {
         match self {
             DriverRenderer::Surface(r) => r.upload_surfaces(chunks),
             DriverRenderer::Splat(r) => r.upload_surfaces(chunks),
+            DriverRenderer::Surfel(r) => r.upload_surfaces(chunks),
             DriverRenderer::WebGpu(r) => r.upload_surfaces(chunks),
             _ => {}
         }
@@ -131,6 +141,7 @@ impl RendererPort for DriverRenderer {
         match self {
             DriverRenderer::Surface(r) => r.remove_surfaces(keys),
             DriverRenderer::Splat(r) => r.remove_surfaces(keys),
+            DriverRenderer::Surfel(r) => r.remove_surfaces(keys),
             DriverRenderer::WebGpu(r) => r.remove_surfaces(keys),
             _ => {}
         }
@@ -140,6 +151,7 @@ impl RendererPort for DriverRenderer {
         match self {
             DriverRenderer::Surface(r) => r.clear_surfaces(),
             DriverRenderer::Splat(r) => r.clear_surfaces(),
+            DriverRenderer::Surfel(r) => r.clear_surfaces(),
             DriverRenderer::WebGpu(r) => r.clear_surfaces(),
             _ => {}
         }
@@ -149,6 +161,7 @@ impl RendererPort for DriverRenderer {
         match self {
             DriverRenderer::Surface(r) => r.cpu_telemetry_string(),
             DriverRenderer::Splat(r) => r.cpu_telemetry_string(),
+            DriverRenderer::Surfel(r) => r.cpu_telemetry_string(),
             DriverRenderer::Raymarch(r) => r.cpu_telemetry_string(),
             DriverRenderer::Cpu(r) => r.cpu_telemetry_string(),
             DriverRenderer::WebGpu(r) => r.cpu_telemetry_string(),
@@ -185,6 +198,7 @@ impl RendererPort for DriverRenderer {
         match self {
             DriverRenderer::Surface(r) => r.draw(frame, chunks),
             DriverRenderer::Splat(r) => r.draw(frame, chunks),
+            DriverRenderer::Surfel(r) => r.draw(frame, chunks),
             DriverRenderer::Raymarch(r) => r.draw(frame, chunks),
             DriverRenderer::Cpu(r) => r.draw(frame, chunks),
             DriverRenderer::WebGpu(r) => r.draw(frame, chunks),
@@ -284,7 +298,23 @@ async fn create_renderer(
         .map(str::to_owned)
         .or_else(|| stored_backend_pref(window))
         .unwrap_or_else(|| "auto".to_owned());
-    let use_webgpu = if backend == "webgpu" {
+    // Surfels are a WebGL2-only renderer for now: the WebGPU `SurfelPipeline`
+    // exists but nothing selects it. This is decided before the preflight
+    // rather than after, for two reasons. `?renderer=surfel` would otherwise
+    // parse to `None` on a WebGPU-capable browser and quietly render
+    // *surfaces* — the worst outcome, because the wrong renderer looks like
+    // the right one having a bad day. And `?backend=webgpu` propagates a
+    // preflight failure as a hard error, which would be an odd way for a
+    // renderer that never touches WebGPU to fail.
+    let wants_surfel = query_param(query, "renderer") == Some("surfel");
+    if wants_surfel && backend != "webgl" {
+        web_sys::console::warn_1(&JsValue::from_str(
+            "the surfel renderer is WebGL2-only; ignoring the requested backend",
+        ));
+    }
+    let use_webgpu = if wants_surfel {
+        false
+    } else if backend == "webgpu" {
         webgpu_preflight(window, status_msg).await?;
         true
     } else if backend == "auto" {
@@ -311,6 +341,24 @@ async fn create_renderer(
     }
     if renderer_choice == Some("raymarch") {
         return WebGl2Renderer::new(canvas).map(DriverRenderer::Raymarch);
+    }
+    if renderer_choice == Some("surfel") {
+        let profile = if quality == GpuQualityProfile::High {
+            SurfelProfile::high()
+        } else {
+            SurfelProfile::low()
+        };
+        match SurfelRenderer::new(canvas, profile) {
+            Ok(gpu) => return Ok(DriverRenderer::Surfel(gpu)),
+            Err(err) => {
+                web_sys::console::warn_2(
+                    &JsValue::from_str(
+                        "surfel renderer unavailable, falling back to surface meshes:",
+                    ),
+                    &err,
+                );
+            }
+        }
     }
     if renderer_choice == Some("splat") {
         let profile = if quality == GpuQualityProfile::High {
@@ -502,12 +550,15 @@ pub async fn boot() -> Result<(), JsValue> {
     let source: Box<dyn crate::application::ports::ChunkSourcePort> =
         if generation_worker_count == 0 {
             web_sys::console::log_1(&"chunk generation: synchronous main thread".into());
-            Box::new(LocalChunkSource::with_telemetry(
-                SimpleNoiseProvider::new(),
-                resolved_seed,
-                generator_config,
-                &CONSOLE_TELEMETRY,
-            ))
+            Box::new(
+                LocalChunkSource::with_telemetry(
+                    SimpleNoiseProvider::new(),
+                    resolved_seed,
+                    generator_config,
+                    &CONSOLE_TELEMETRY,
+                )
+                .with_surfel_density(surfel_density_from_query(&query)),
+            )
         } else {
             match crate::drivers::worker_source::WorkerChunkSource::new(
                 &query,
@@ -527,12 +578,15 @@ pub async fn boot() -> Result<(), JsValue> {
                         ),
                         &err,
                     );
-                    Box::new(LocalChunkSource::with_telemetry(
-                        SimpleNoiseProvider::new(),
-                        resolved_seed,
-                        generator_config,
-                        &CONSOLE_TELEMETRY,
-                    ))
+                    Box::new(
+                        LocalChunkSource::with_telemetry(
+                            SimpleNoiseProvider::new(),
+                            resolved_seed,
+                            generator_config,
+                            &CONSOLE_TELEMETRY,
+                        )
+                        .with_surfel_density(surfel_density_from_query(&query)),
+                    )
                 }
             }
         };

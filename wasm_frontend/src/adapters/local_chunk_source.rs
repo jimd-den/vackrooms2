@@ -45,7 +45,7 @@ use vackrooms::use_cases::world_block::BlockCoord;
 use crate::adapters::block_cache::{BlockCache, DEFAULT_BLOCK_CAPACITY};
 
 use crate::adapters::collect_emissive_lights::collect_emissive_lights;
-use crate::adapters::surface_mesh::build_surface_artifacts;
+use crate::adapters::surface_mesh::{SurfelDensity, build_surface_artifacts};
 use crate::adapters::surfel_cloud::{SurfelCloud, build_surfel_cloud};
 use crate::application::collision::Aabb;
 use crate::application::ports::{
@@ -65,6 +65,9 @@ pub struct LocalChunkSource<N: NoiseProvider> {
     telemetry: &'static dyn TelemetryPort,
     seed: u32,
     config: GeneratorConfig,
+    /// How finely the surfel artifact samples the surface. Only consulted
+    /// when a renderer asks for `RenderArtifactNeeds::SURFEL`.
+    surfel_density: SurfelDensity,
     /// Planned blocks feeding the voxel path. `RefCell` because
     /// [`ChunkSourcePort`] loads through `&self` — the source is logically
     /// immutable and this is a memo, not state the caller can observe.
@@ -87,8 +90,16 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             telemetry,
             seed,
             config,
+            surfel_density: SurfelDensity::PER_VOXEL,
             blocks: RefCell::new(BlockCache::new(seed, DEFAULT_BLOCK_CAPACITY)),
         }
+    }
+
+    /// Sets how finely the surfel artifact samples the surface. Inert for
+    /// every renderer that does not ask for surfels.
+    pub fn with_surfel_density(mut self, density: SurfelDensity) -> Self {
+        self.surfel_density = density;
+        self
     }
 
     /// How many blocks this source has planned. Diagnostics only — a number
@@ -250,7 +261,14 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
         let grid = crop_lateral_halo(&halo_grid, 1);
         let lights = collect_emissive_lights(&halo_grid, config.voxel_scale, halo_world_origin, 1);
         let surface = if artifacts.needs_surface_extraction() {
-            build_surface_artifacts(&halo_grid, config.voxel_scale, lod, 1, artifacts)
+            build_surface_artifacts(
+                &halo_grid,
+                config.voxel_scale,
+                lod,
+                1,
+                artifacts,
+                self.surfel_density,
+            )
         } else {
             let mut empty = SurfaceMeshPayload::empty(lod);
             empty.voxel_scale = config.voxel_scale;

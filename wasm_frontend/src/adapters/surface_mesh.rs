@@ -29,7 +29,52 @@ pub fn build_surface_mesh(
         lod,
         lateral_padding,
         RenderArtifactNeeds::SURFACE,
+        SurfelDensity::PER_VOXEL,
     )
+}
+
+/// How finely a surfel cloud samples the surface, as a multiple of the
+/// per-voxel default.
+///
+/// `1.0` puts one disc in each voxel cell at this LOD — the density that
+/// makes a cloud interchangeable with the mesh rather than a coarser stand-in
+/// for it. Higher values subdivide further: `2.0` halves the spacing, so
+/// four times the discs at half the radius each.
+///
+/// Radius follows spacing (`radius_for_spacing` is `spacing · √2/2`), so
+/// raising density shrinks every disc *and* keeps coverage hole-free. That is
+/// what makes it the honest dial for the scalloped silhouette where discs
+/// overhang a surface boundary: the overhang is one radius wide, so it
+/// shrinks in proportion while the surface stays closed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfelDensity(f32);
+
+impl SurfelDensity {
+    /// One disc per voxel cell.
+    pub const PER_VOXEL: Self = Self(1.0);
+
+    pub fn new(density: f32) -> Self {
+        // Clamped rather than rejected: this arrives from a URL. The ceiling
+        // is where `build_surfel_cloud` stops honoring spacing anyway (it
+        // floors at `voxel_scale * 0.1`), and the floor keeps a cloud from
+        // degenerating into one disc per merged quad.
+        Self(density.clamp(0.25, 8.0))
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+
+    /// The spacing this density asks for at a given voxel scale.
+    pub fn spacing(self, voxel_scale: f32) -> f32 {
+        voxel_scale / self.0
+    }
+}
+
+impl Default for SurfelDensity {
+    fn default() -> Self {
+        Self::PER_VOXEL
+    }
 }
 
 /// Builds only the raster representation selected by the renderer. Greedy
@@ -41,6 +86,7 @@ pub fn build_surface_artifacts(
     lod: u8,
     lateral_padding: usize,
     artifacts: RenderArtifactNeeds,
+    surfel_density: SurfelDensity,
 ) -> SurfaceMeshPayload {
     let mapper = VoxelMapper::new(voxel_scale, &DEFAULT_MATERIAL_PALETTE);
     let quads = mapper.map_voxel_grid_with_padding(halo_grid, lateral_padding);
@@ -79,12 +125,17 @@ pub fn build_surface_artifacts(
         } else {
             crate::application::ports::FaceInstanceSet::empty()
         },
-        // One disc per voxel cell at this LOD: the density that makes a
-        // surfel cloud interchangeable with the mesh rather than a coarser
-        // stand-in for it. Coarser clouds are a streaming decision, made
-        // where the LOD is chosen, not baked in at extraction.
+        // One disc per voxel cell at this LOD by default: the density that
+        // makes a surfel cloud interchangeable with the mesh rather than a
+        // coarser stand-in for it. `SurfelDensity` subdivides below that;
+        // coarser clouds remain a streaming decision, made where the LOD is
+        // chosen, not baked in at extraction.
         surfels: if artifacts.surfels() {
-            crate::adapters::surfel_cloud::build_surfel_cloud(&quads, voxel_scale, voxel_scale)
+            crate::adapters::surfel_cloud::build_surfel_cloud(
+                &quads,
+                voxel_scale,
+                surfel_density.spacing(voxel_scale),
+            )
         } else {
             crate::adapters::surfel_cloud::SurfelCloud::empty()
         },
@@ -192,6 +243,71 @@ mod tests {
     use super::*;
     use vackrooms::domain::entities::voxel_grid::VOXEL_WALL;
 
+    /// Density subdivides; it must not move the surface. A denser cloud that
+    /// also shifted would look like an improvement and be a regression.
+    #[test]
+    fn raising_density_adds_discs_without_moving_the_surface() {
+        let mut grid = VoxelGrid::new(6, 3, 6);
+        for x in 0..6 {
+            for z in 0..6 {
+                grid.set(x, 0, z, VOXEL_WALL);
+            }
+        }
+
+        let coarse = build_surface_artifacts(
+            &grid,
+            0.2,
+            0,
+            1,
+            RenderArtifactNeeds::SURFEL,
+            SurfelDensity::PER_VOXEL,
+        );
+        let fine = build_surface_artifacts(
+            &grid,
+            0.2,
+            0,
+            1,
+            RenderArtifactNeeds::SURFEL,
+            SurfelDensity::new(2.0),
+        );
+
+        assert!(
+            fine.surfels.surfels.len() > coarse.surfels.surfels.len(),
+            "halving the spacing must produce more discs, not the same cloud"
+        );
+        assert_eq!(
+            fine.bounds, coarse.bounds,
+            "density is a sampling rate, not a change of geometry"
+        );
+
+        // Radius follows spacing, so the discs must get smaller in step --
+        // that is what keeps coverage hole-free while the silhouette
+        // overhang shrinks.
+        let widest = |payload: &SurfaceMeshPayload| {
+            payload
+                .surfels
+                .surfels
+                .iter()
+                .map(|surfel| surfel.radius)
+                .max()
+                .unwrap_or(0)
+        };
+        assert!(
+            widest(&fine) < widest(&coarse),
+            "denser sampling must shrink the discs, not just add them"
+        );
+    }
+
+    /// The density arrives from a URL, so it is clamped rather than trusted.
+    #[test]
+    fn an_absurd_density_is_clamped_not_obeyed() {
+        assert_eq!(SurfelDensity::new(0.0).get(), 0.25);
+        assert_eq!(SurfelDensity::new(-4.0).get(), 0.25);
+        assert_eq!(SurfelDensity::new(1e9).get(), 8.0);
+        assert_eq!(SurfelDensity::default(), SurfelDensity::PER_VOXEL);
+        assert_eq!(SurfelDensity::new(2.0).spacing(0.4), 0.2);
+    }
+
     #[test]
     fn isolated_voxel_becomes_indexed_closed_surface() {
         let mut grid = VoxelGrid::new(3, 2, 3);
@@ -206,7 +322,14 @@ mod tests {
     fn splat_artifacts_do_not_materialize_the_indexed_mesh() {
         let mut grid = VoxelGrid::new(4, 2, 4);
         grid.set(1, 0, 1, VOXEL_WALL);
-        let artifacts = build_surface_artifacts(&grid, 1.0, 0, 1, RenderArtifactNeeds::SPLAT);
+        let artifacts = build_surface_artifacts(
+            &grid,
+            1.0,
+            0,
+            1,
+            RenderArtifactNeeds::SPLAT,
+            SurfelDensity::PER_VOXEL,
+        );
 
         assert!(artifacts.vertices.is_empty());
         assert!(artifacts.indices.is_empty());

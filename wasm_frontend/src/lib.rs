@@ -1089,7 +1089,7 @@ mod worker_entry {
 
     use crate::adapters::archived_chunk_source::ArchivedChunkSource;
     use crate::adapters::chunk_codec::encode_chunk_payload;
-    use crate::adapters::query_config::generator_setup_from_query;
+    use crate::adapters::query_config::{generator_setup_from_query, surfel_density_from_query};
     use crate::application::chunk_archive::MemoryStorage;
     use crate::application::ports::{ChunkSourcePort, RenderArtifactNeeds};
     use vackrooms::domain::entities::anomaly::RealitySnapshot;
@@ -1135,7 +1135,11 @@ mod worker_entry {
                 Box::new(MemoryStorage::new()),
                 generator_id,
                 WORKER_ARCHIVE_BYTES,
-            ));
+            )
+            // Extraction happens here, not on the main thread, so the surfel
+            // density has to be read from the query on this side of the
+            // worker boundary too.
+            .with_surfel_density(surfel_density_from_query(query)));
         });
     }
 
