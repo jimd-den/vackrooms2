@@ -1,0 +1,124 @@
+VOXEL RENDERING — WHAT TO STEAL, WHAT WE HAVE, WHAT BUYS FPS + MILES OF WORLD
+Vackrooms one-pager. Grounded in the codebase (file:line cited) + the 25 fetched
+research links (/tmp/vox_links/p/).
+
+================================================================================
+WHAT VACKROOMS ALREADY HAS  (verified in code)
+================================================================================
+- Greedy 2D surface meshing, Exact vs LowSpec merge policies
+    src/adapters/voxel_mapper.rs:83-110, greedy_mesh_2d
+- Splat + surfel + CPU-splatter strategies
+    wasm_frontend/src/adapters/cpu_splatter/, drivers/splat_webgl, surfel_cloud.rs
+- Raymarch strategy (fullscreen SVO traversal)
+    WebGPU walks BRICKS, WebGL2 walks plain node atlas
+    drivers/webgpu/config.rs:68-70, drivers/browser.rs:120
+- SVDAG compression                       src/use_cases/compress_svdag.rs
+  (used for the svo_nodes atlas; bricks are built from the TREE, not the DAG)
+    adapters/local_chunk_source.rs:288-303
+- Brick pool build + GPU brick reader (BRICK_EDGE=4)
+    use_cases/build_brick_pool.rs, adapters/brick_pool_gpu_serializer.rs,
+    shaders/raymarch.wgsl:161-202 (read_brick_voxel)
+- Baked probe-volume GI (static) + analytic lights + hero shadow map
+    use_cases/bake_voxel_lighting/, shaders uLightVolume, raster_shadow.rs
+- ENGINE-WIDE LOD ladder (fine 30u / mid 75u / far 155u, LOD 0-3 by distance)
+    application/streaming.rs:75-128, engine.rs:596 desired_lod
+  NOTE: applies to every renderer (chunks carry lod), NOT surface-only.
+- Worker-based async chunk generation + residency caps (9-25 chunks, atlas 25)
+    drivers/worker_source.rs, application/engine.rs, atlas.rs:19 MAX_CHUNKS=25
+- Perf governor (resolution scaling under load)   application/perf_governor.rs
+- WFC3D                                          use_cases/wfc3d.rs
+- NO: cone tracing, mipmapped SVO, temporal reuse/reprojection, wavefront/packet
+      coherence, GPU page tables / out-of-core, clipmaps
+      (all 0 hits across wasm_frontend/src)
+
+================================================================================
+TOP 3 — DO THESE FIRST
+================================================================================
+1) BRICKMAPS blog (#20  dubiousconst282 "fast voxel ray tracing sparse 64-trees")
+   STEAL: 64-ary brick trees + 64-bit occupancy masks + brick-DAG instancing.
+   HAVE : the whole brick pipeline — but ONLY the WebGPU marcher receives bricks;
+          WebGL2 marcher (the default on most devices) still chases the node atlas.
+   PAYOFF: replaces WebGL2's 10-deep dependent pointer chase with 1-2 fetches;
+           occupancy masks skip empty space without DDA. Biggest raymarch FPS win.
+
+2) VOXEL CONE TRACING (#3  NVIDIA RTR GIVoxels, fetched clean)
+   STEAL: mipmapped-SVO cone tracing for GI / soft shadows / AO.
+   HAVE : baked probe volumes (static) + a per-light SHADOW-RAY multiplier in the
+          marcher (raymarch.wgsl:649-668 raymarch_analytic_direct).
+   PAYOFF: one mip cone replaces N shadow rays per pixel — kills raymarch's worst
+           cost multiplier AND unlocks dynamic GI (probe volumes stay as fallback).
+
+3) GIGAVOXELS (#2  fetched project page)
+   STEAL: ray-guided out-of-core streaming — GPU page table + brick pool paged by
+          demand.
+   HAVE : worker generation + HARD residency caps (9-25 chunks); the "far" edge is
+          a deliberate fog wall at 155u, not a streaming horizon.
+   PAYOFF: draw distance bounded by STORAGE, not RAM — this is literally the paper
+           on rendering MILES of world while only the visible set is resident.
+
+================================================================================
+TIER 1 — FPS GAINS NOW
+================================================================================
+#20 Brickmaps      occupancy-bitmask traversal + brick instancing      (top 3)
+#8  Wavefront      coherent ray queues vs divergent megakernel. HAVE: none
+                   (fragment shader). WebGL2 translation: march at LOW RES +
+                   upscale, or march only where depth says geometry exists.
+#19 Aokana 2025    GPU-driven on-demand brick residency + cull-before-trace.
+                   HAVE: none.
+#23 Teardown       shipping engine: sparse 8^3 chunks + 3D bitmaps — a production
+                   blueprint for exactly your BRICK_EDGE=4 idea, scaled up.
+#25 Voxlap         classic software voxel engine; reference architecture.
+
+================================================================================
+TIER 2 — "MILES AWAY FROM THE USER"  (far draw distance / big world)
+================================================================================
+#2  GigaVoxels     out-of-core brick paging (see top 3).
+#10 VXGI clipmap   nested multi-res grids instead of per-chunk octrees. HAVE: LOD
+                   ladder (engine-wide) but chunked, not clipmapped. PAYOFF: far
+                   field coarse + cheap = miles of visible world.
+#4  SVDAG          subtree sharing. HAVE: compress_svdag — but bricks are built
+                   FROM THE TREE, NOT the DAG (local_chunk_source.rs:288).
+                   UPGRADE: instance bricks via the DAG. PAYOFF: 10-100x memory
+                   compression -> more world resident.
+#11 NanoVDB        pointer-free linearized layout, one memcpy to GPU. HAVE: custom
+                   serialization. PAYOFF: faster uploads + cache-friendly traversal.
+#6  Voxel hashing  spatial hash of blocks. HAVE: ordered chunk store (BTreeMap).
+                   PAYOFF: O(1) residency + sparse-world indexing at mile scale.
+#9  Out-of-core    streaming SVO construction, Morton-ordered. HAVE: worker
+    SVO construction chunking (procedural — lower priority). PAYOFF: build memory
+                   O(log n).
+#1  ESVO           contour-augmented voxels + stack-based ray casting. HAVE:
+                   per-vertex light/AO. PAYOFF: per-voxel shading detail at no
+                   extra geometry.
+
+================================================================================
+TIER 3 — GI QUALITY AT CURRENT COST
+================================================================================
+#3  Cone tracing — replaces per-light shadow rays with mip cones (see top 3).
+
+================================================================================
+TIER 4 — GENERATION & ML  (fidelity, not FPS)
+================================================================================
+#22 Model Synthesis / #23 WaveFunctionCollapse — constraint-grown coherent
+    structures. HAVE: WFC3D. PAYOFF: better far-field coherence, zero fps cost.
+#12 NeuralVDB — neural compression of the tree. PAYOFF: 10-100x far-field memory
+    compression (future).
+#13 NGP / #14 Plenoxels / #15 XCube / #16 TRELLIS / #17 GANcraft / #18 Oasis —
+    learned generation/rendering. PAYOFF: generation FIDELITY, but compute-heavy;
+    keep off the low-spec path (future/offline).
+
+================================================================================
+BOTTOM LINE
+================================================================================
+The data structures are ~80% there (DAG, bricks, bitmask children, empty-skipping,
+workers, engine-wide LOD ladder, baked probe GI, splatting). The wins are WIRING,
+not research:
+  (1) give the WebGL2 marcher the bricks already built (artifact-needs + upload),
+  (2) cone-trace a mipmapped SVO instead of shadow-ray-per-light,
+  (3) page bricks out-of-core (GigaVoxels) for mile-scale draw distance beyond the
+      155u fog wall.
+Everything else is quality-of-life or future generation fidelity.
+
+CORRECTION vs earlier draft: the LOD ladder is ENGINE-WIDE (engine.rs:596,
+streaming.rs:114-128), applied to every renderer's resident chunks — not surface-
+only as previously stated.
