@@ -11,6 +11,20 @@
 //!
 //! Every chunk's node array is padded to whole 1024-node rows by the
 //! core `OctreeGpuSerializer`, so slots stay row-aligned by construction.
+//!
+//! `slots` remains the authority for iteration order (`full_texels`,
+//! `full_brick_words` walk it slot-by-slot to build one contiguous upload),
+//! but `assign`/`release`/`*_offset_of` no longer scan it: `index` and
+//! `free` turn "which slot holds this key" and "which slot is free" from an
+//! O(n) scan into an O(1) lookup and a stack pop, the first step toward
+//! lifting `MAX_CHUNKS` from a hardcoded 25 to a size picked by an actual
+//! GPU/storage budget (out-of-core streaming, `VOXEL_RESEARCH_STEAL_LIST.txt`
+//! item 3). Raising the cap itself is a separate change: `application::
+//! engine`'s per-frame `draws` table and the WebGL2 shader's fixed
+//! `uChunkOrigins[25]`-style uniform arrays are their own ceiling on
+//! resident chunk count, independent of this pool's slot budget.
+
+use std::collections::HashMap;
 
 use crate::application::ports::ChunkPayload;
 use crate::application::streaming::ChunkKey;
@@ -36,8 +50,16 @@ pub struct AtlasPool {
     /// Rows per slot in the brick voxel arena, sized independently: a chunk
     /// that is mostly uniform has many nodes and few bricks, and vice versa.
     brick_slot_rows: usize,
-    /// Slot occupancy; index is the slot number.
+    /// Slot occupancy; index is the slot number. `full_texels`/
+    /// `full_brick_words` are the only readers left that need this instead
+    /// of `index` -- they must walk every slot, occupied or not, to build
+    /// one contiguous upload.
     slots: Vec<Option<ChunkKey>>,
+    /// Reverse of `slots`, kept in sync by `assign`/`release`/relayout.
+    index: HashMap<ChunkKey, usize>,
+    /// Free slot indices, ascending-index-first like the scan `assign` used
+    /// to do (`(0..len).rev()` so the smallest index is on top).
+    free: Vec<usize>,
 }
 
 impl AtlasPool {
@@ -81,6 +103,8 @@ impl AtlasPool {
             let len = self.slots.len().max(num_slots);
             self.slots.clear();
             self.slots.resize(len, None);
+            self.index.clear();
+            self.free = (0..len).rev().collect();
         }
         changed
     }
@@ -92,29 +116,26 @@ impl AtlasPool {
 
     /// Word offset of `key`'s brick block within the pooled voxel arena.
     pub fn brick_offset_of(&self, key: ChunkKey) -> Option<usize> {
-        self.slots
-            .iter()
-            .position(|s| *s == Some(key))
-            .map(|i| i * self.brick_slot_words())
+        self.index.get(&key).map(|&i| i * self.brick_slot_words())
     }
 
     /// Assigns (or finds) the slot for `key`. Returns `None` when the pool
     /// is full — the caller sized it for the streaming radius, so that is a
     /// logic error handled by falling back to a full relayout.
     pub fn assign(&mut self, key: ChunkKey) -> Option<usize> {
-        if let Some(i) = self.slots.iter().position(|s| *s == Some(key)) {
+        if let Some(&i) = self.index.get(&key) {
             return Some(i);
         }
-        let free = self.slots.iter().position(|s| s.is_none())?;
-        self.slots[free] = Some(key);
-        Some(free)
+        let slot = self.free.pop()?;
+        self.slots[slot] = Some(key);
+        self.index.insert(key, slot);
+        Some(slot)
     }
 
     pub fn release(&mut self, key: ChunkKey) {
-        for slot in &mut self.slots {
-            if *slot == Some(key) {
-                *slot = None;
-            }
+        if let Some(slot) = self.index.remove(&key) {
+            self.slots[slot] = None;
+            self.free.push(slot);
         }
     }
 
@@ -125,10 +146,7 @@ impl AtlasPool {
 
     /// Node offset of `key`'s slot within the pooled atlas.
     pub fn node_offset_of(&self, key: ChunkKey) -> Option<usize> {
-        self.slots
-            .iter()
-            .position(|s| *s == Some(key))
-            .map(|i| i * self.slot_nodes())
+        self.index.get(&key).map(|&i| i * self.slot_nodes())
     }
 
     /// Whether `payload` fits in the current slot size.
@@ -288,6 +306,67 @@ mod tests {
         assert!(!pool.ensure_layout(2, 1), "same layout is a no-op");
         assert!(pool.ensure_layout(2, 3), "bigger slots relayout");
         assert_eq!(pool.node_offset_of(key), None);
+    }
+
+    #[test]
+    fn assign_is_idempotent_and_does_not_consume_a_free_slot() {
+        let mut pool = AtlasPool::new();
+        pool.ensure_layout(2, 1);
+        let key = chunk_key(0.0, 0.0);
+        let first = pool.assign(key).unwrap();
+        let second = pool.assign(key).unwrap();
+        assert_eq!(first, second, "re-assigning a resident key returns its slot");
+        // The other slot is still free: a second, different key must fit.
+        assert!(pool.assign(chunk_key(10.0, 0.0)).is_some());
+    }
+
+    #[test]
+    fn pool_is_full_once_every_slot_is_taken() {
+        let mut pool = AtlasPool::new();
+        pool.ensure_layout(2, 1);
+        assert!(pool.assign(chunk_key(0.0, 0.0)).is_some());
+        assert!(pool.assign(chunk_key(10.0, 0.0)).is_some());
+        assert_eq!(pool.assign(chunk_key(20.0, 0.0)), None);
+    }
+
+    /// Interleaves assign/release across every slot several times over,
+    /// checking `index` and `slots` never disagree -- the failure mode an
+    /// O(1) reverse-index refactor risks that a linear scan structurally
+    /// cannot: a stale `index` entry pointing at a slot `slots` disagrees
+    /// with, or a freed slot handed out twice.
+    #[test]
+    fn index_and_slots_stay_consistent_under_churn() {
+        let mut pool = AtlasPool::new();
+        pool.ensure_layout(5, 1);
+        let keys: Vec<ChunkKey> = (0..12)
+            .map(|i| chunk_key(i as f32 * 10.0, 0.0))
+            .collect();
+        let mut resident: Vec<ChunkKey> = Vec::new();
+
+        for (round, &key) in keys.iter().enumerate() {
+            if let Some(slot) = pool.assign(key) {
+                assert_eq!(pool.node_offset_of(key), Some(slot * pool.slot_nodes()));
+                resident.push(key);
+            }
+            if round % 3 == 2 {
+                if let Some(evict) = resident.pop() {
+                    pool.release(evict);
+                    assert_eq!(pool.node_offset_of(evict), None);
+                }
+            }
+            // Every still-resident key must resolve to a distinct slot.
+            let mut offsets: Vec<usize> = resident
+                .iter()
+                .filter_map(|&k| pool.node_offset_of(k))
+                .collect();
+            offsets.sort_unstable();
+            offsets.dedup();
+            assert_eq!(
+                offsets.len(),
+                resident.iter().filter(|&&k| pool.node_offset_of(k).is_some()).count(),
+                "no two resident keys share a slot"
+            );
+        }
     }
 
     #[test]
