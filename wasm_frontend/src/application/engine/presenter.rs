@@ -37,6 +37,22 @@ impl Engine {
             self.completed_backlog.len(),
             self.forced_reloads.len(),
         );
+        // A resident chunk that never reaches `draws` never appears on
+        // screen, whatever generation and streaming already did for it --
+        // `draws` requires both a store entry *and* a pool slot
+        // (`AtlasPool::node_offset_of`). When `resident` climbs but `drawn`
+        // stalls, the fault is downstream of streaming: the atlas pool is
+        // either full or the upload it needed failed. That split is
+        // otherwise invisible -- the two counts read identically from
+        // outside the engine.
+        let _ = writeln!(
+            out,
+            "drawn {} of {} resident | atlas pool {}/{} slot(s) occupied",
+            self.draws.len(),
+            self.store.len(),
+            self.pool.occupied_slots(),
+            self.pool.slot_count(),
+        );
         let _ = writeln!(
             out,
             "flares {} | push {:.2}s",

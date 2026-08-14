@@ -77,6 +77,18 @@ impl AtlasPool {
         self.slot_rows * self.slots.len()
     }
 
+    /// Total slots the pool currently holds, occupied or not -- the hard
+    /// ceiling on chunks that can reach `draws` in one frame.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Occupied slots: chunks with both a store entry and a place in the
+    /// pool. Below `slot_count`, this is exactly `draws.len()`'s ceiling.
+    pub fn occupied_slots(&self) -> usize {
+        self.index.len()
+    }
+
     /// Ensures the pool holds at least `num_slots` slots of at least `rows`
     /// rows each. Returns `true` when the layout changed — every slot
     /// assignment is then dropped and the caller must reassign all resident
