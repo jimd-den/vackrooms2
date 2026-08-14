@@ -197,6 +197,13 @@ impl RendererPort for DriverRenderer {
         }
     }
 
+    fn upload_brick_voxels_rows(&mut self, first_row: u32, words: &[u32]) -> bool {
+        match self {
+            DriverRenderer::Raymarch(r) => r.upload_brick_voxels_rows(first_row, words),
+            _ => false,
+        }
+    }
+
     fn upload_label_atlas(&mut self, rgba: &[u8], width: u32, height: u32) {
         match self {
             DriverRenderer::Surface(r) => r.upload_label_atlas(rgba, width, height),

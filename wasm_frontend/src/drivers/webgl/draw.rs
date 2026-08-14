@@ -204,6 +204,10 @@ impl RendererPort for WebGl2Renderer {
         self.bricks.replace(&self.gl, words);
     }
 
+    fn upload_brick_voxels_rows(&mut self, first_row: u32, words: &[u32]) -> bool {
+        self.bricks.update_rows(&self.gl, first_row, words)
+    }
+
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         let toggles = crate::get_render_toggles();
         self.timer.poll(&self.gl);

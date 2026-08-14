@@ -144,6 +144,11 @@ impl AtlasPool {
         slot * self.slot_rows
     }
 
+    /// First brick-arena row of a slot.
+    pub fn brick_slot_first_row(&self, slot: usize) -> usize {
+        slot * self.brick_slot_rows
+    }
+
     /// Node offset of `key`'s slot within the pooled atlas.
     pub fn node_offset_of(&self, key: ChunkKey) -> Option<usize> {
         self.index.get(&key).map(|&i| i * self.slot_nodes())
@@ -176,6 +181,16 @@ impl AtlasPool {
         while block.len() < self.slot_nodes() * 4 {
             block.extend_from_slice(&AIR_LEAF);
         }
+        block
+    }
+
+    /// The slot-sized brick word block for one chunk. Unlike `rebased_block`,
+    /// voxel words carry no pointers, so there is nothing to rebase -- just
+    /// pad the tail with zero, which decodes as air (see [`Self::
+    /// full_brick_words`] for why nothing ever reads that padding).
+    pub fn rebased_brick_block(&self, payload: &ChunkPayload) -> Vec<u32> {
+        let mut block = payload.brick_voxels.clone();
+        block.resize(self.brick_slot_words(), 0);
         block
     }
 
@@ -295,6 +310,29 @@ mod tests {
         assert_eq!(block[5], 42, "leaf payload untouched");
         // Padding decodes as air leaves.
         assert_eq!(&block[8..12], &AIR_LEAF);
+    }
+
+    #[test]
+    fn rebased_brick_block_pads_but_never_shifts() {
+        let mut pool = AtlasPool::new();
+        pool.ensure_layout_with_bricks(2, 1, 1);
+
+        let mut p = payload(0, 1);
+        p.brick_voxels = vec![7, 9, 11];
+
+        let block = pool.rebased_brick_block(&p);
+        assert_eq!(block.len(), pool.brick_slot_words());
+        assert_eq!(&block[..3], &[7, 9, 11], "voxel words carry no pointers");
+        assert!(block[3..].iter().all(|&w| w == 0), "tail pads with air");
+    }
+
+    #[test]
+    fn brick_slot_first_row_matches_the_brick_arena_stride() {
+        let mut pool = AtlasPool::new();
+        pool.ensure_layout_with_bricks(3, 1, 2);
+        assert_eq!(pool.brick_slot_first_row(0), 0);
+        assert_eq!(pool.brick_slot_first_row(1), 2);
+        assert_eq!(pool.brick_slot_first_row(2), 4);
     }
 
     #[test]

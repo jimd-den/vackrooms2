@@ -1210,10 +1210,6 @@ impl Engine {
         let mut need_full = self
             .pool
             .ensure_layout_with_bricks(num_slots, rows, brick_rows);
-        // The brick arena has no partial-row upload path yet, and a node
-        // block is meaningless without the voxels its brick pointers name.
-        // Re-upload both together rather than let them disagree for a frame.
-        need_full |= brick_rows > 0;
 
         if !need_full {
             for &key in &loaded {
@@ -1222,7 +1218,22 @@ impl Engine {
                         let payload = &self.store.get(key).expect("just inserted").payload;
                         let block = self.pool.rebased_block(slot, payload);
                         let first_row = self.pool.slot_first_row(slot) as u32;
-                        self.renderer.upload_atlas_rows(first_row, &block)
+                        let nodes_uploaded = self.renderer.upload_atlas_rows(first_row, &block);
+                        // A node block is meaningless without the voxels its
+                        // brick pointers name -- patch both incrementally
+                        // (when the back end supports it) or fall back to a
+                        // full reupload rather than let them disagree for a
+                        // frame. Skipped entirely when nothing resident
+                        // holds bricks: `brick_slot_words()` is then 0.
+                        let bricks_uploaded = if self.pool.brick_slot_words() == 0 {
+                            true
+                        } else {
+                            let brick_block = self.pool.rebased_brick_block(payload);
+                            let brick_first_row = self.pool.brick_slot_first_row(slot) as u32;
+                            self.renderer
+                                .upload_brick_voxels_rows(brick_first_row, &brick_block)
+                        };
+                        nodes_uploaded && bricks_uploaded
                     }
                     None => false,
                 };
@@ -1533,11 +1544,18 @@ mod tests {
     struct RecordingRenderer {
         uploads: Rc<RefCell<Vec<usize>>>,
         row_uploads: Rc<RefCell<Vec<u32>>>,
+        brick_uploads: Rc<RefCell<Vec<usize>>>,
+        brick_row_uploads: Rc<RefCell<Vec<u32>>>,
         draws: Rc<RefCell<Vec<usize>>>,
         light_counts: Rc<RefCell<Vec<usize>>>,
         /// When true the renderer accepts partial row updates like the GPU
         /// driver; when false it forces the full-upload fallback.
         supports_rows: bool,
+        /// When true the renderer also accepts partial *brick* row updates,
+        /// like the WebGL2 driver; when false (WebGPU's default: it only
+        /// ever replaces its whole brick buffer) any resident bricks force
+        /// the full-upload fallback even if `supports_rows` is set.
+        supports_brick_rows: bool,
     }
 
     impl RendererPort for RecordingRenderer {
@@ -1549,6 +1567,15 @@ mod tests {
                 self.row_uploads.borrow_mut().push(first_row);
             }
             self.supports_rows
+        }
+        fn upload_brick_voxels(&mut self, words: &[u32]) {
+            self.brick_uploads.borrow_mut().push(words.len());
+        }
+        fn upload_brick_voxels_rows(&mut self, first_row: u32, _words: &[u32]) -> bool {
+            if self.supports_brick_rows {
+                self.brick_row_uploads.borrow_mut().push(first_row);
+            }
+            self.supports_brick_rows
         }
         fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
             self.draws.borrow_mut().push(chunks.len());
@@ -1666,6 +1693,34 @@ mod tests {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024), // one padded row of air leaves
                 brick_voxels: Vec::new(),
+                world_size: 12.8,
+                voxel_size: 0.2,
+                svo_depth: 6,
+                surface: crate::application::ports::SurfaceMeshPayload::empty(0),
+                lights: vec![],
+                collision: vec![Aabb::new([origin_x, 0.0, 0.0], [origin_x + 0.2, 3.0, 0.2])],
+                traversal_gates: vec![],
+                pit_hazards: vec![],
+                supply_items: vec![],
+                level_exits: vec![],
+            }
+        }
+    }
+
+    /// Like `FlatChunkSource`, but every chunk holds one brick node pointing
+    /// at one real brick's worth of voxel words -- `payload_brick_rows` > 0,
+    /// exercising the incremental brick-row path in `stream_chunks`.
+    struct BrickedChunkSource;
+
+    impl ChunkSourcePort for BrickedChunkSource {
+        fn load(&self, origin_x: f32, _origin_z: f32, _level: u32, _lod: u8) -> ChunkPayload {
+            ChunkPayload {
+                root: 0,
+                // NODE_KIND_BRICK = 2, word_base = 0: one padded row where
+                // every node points at the start of this chunk's own arena.
+                nodes: [2u32, 0, 0, 0].repeat(1024),
+                // One brick's worth (BRICK_VOXELS=64 * WORDS_PER_VOXEL=2).
+                brick_voxels: vec![0u32; 128],
                 world_size: 12.8,
                 voxel_size: 0.2,
                 svo_depth: 6,
@@ -2242,6 +2297,81 @@ mod tests {
         // place refinements — goes through the partial row path.
         assert_eq!(uploads.borrow().len(), 1, "exactly one full upload");
         assert_eq!(row_uploads.borrow().len(), 10, "remaining loads partial");
+    }
+
+    /// Regression test for the bug this fix targets: before it, any
+    /// resident bricks forced a full atlas *and* brick-arena reupload on
+    /// every single streamed-in chunk (`need_full |= brick_rows > 0`,
+    /// unconditional) -- fine for WebGPU's cheap storage-buffer replace,
+    /// expensive for WebGL2's `tex_image_2d` reallocation. A back end that
+    /// supports both row paths must get incremental patches for bricks too.
+    #[test]
+    fn partial_brick_row_uploads_replace_full_uploads_when_supported() {
+        let renderer = RecordingRenderer {
+            supports_rows: true,
+            supports_brick_rows: true,
+            ..Default::default()
+        };
+        let uploads = renderer.uploads.clone();
+        let brick_uploads = renderer.brick_uploads.clone();
+        let brick_row_uploads = renderer.brick_row_uploads.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(renderer),
+            Box::new(BrickedChunkSource),
+        );
+        let input = InputFrame::default();
+        for _ in 0..10 {
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert_eq!(engine.stats().resident_chunks, 9);
+        // First tick sizes and fully populates the pool (including bricks);
+        // every later load patches both arenas' rows in place.
+        assert_eq!(uploads.borrow().len(), 1, "exactly one full atlas upload");
+        assert_eq!(
+            brick_uploads.borrow().len(),
+            1,
+            "exactly one full brick-arena upload"
+        );
+        assert!(
+            !brick_row_uploads.borrow().is_empty(),
+            "later brick loads must patch rows instead of reuploading"
+        );
+    }
+
+    /// A back end that can patch node rows but not brick rows (WebGPU's
+    /// real default: `upload_brick_voxels_rows` is unsupported, matching
+    /// its whole-buffer-replace pipeline) must still fall back to a full
+    /// reupload for chunks carrying bricks -- unchanged from before this
+    /// fix, just no longer the *only* path available.
+    #[test]
+    fn brick_rows_fall_back_to_full_upload_when_unsupported() {
+        let renderer = RecordingRenderer {
+            supports_rows: true,
+            supports_brick_rows: false,
+            ..Default::default()
+        };
+        let uploads = renderer.uploads.clone();
+        let brick_uploads = renderer.brick_uploads.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(renderer),
+            Box::new(BrickedChunkSource),
+        );
+        let input = InputFrame::default();
+        for _ in 0..10 {
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert_eq!(engine.stats().resident_chunks, 9);
+        assert!(
+            uploads.borrow().len() > 1,
+            "every bricked load without row support must fall back to a full atlas reupload"
+        );
+        assert_eq!(
+            uploads.borrow().len(),
+            brick_uploads.borrow().len(),
+            "atlas and brick arena stay in lockstep on the fallback path"
+        );
     }
 
     #[test]

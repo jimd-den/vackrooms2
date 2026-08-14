@@ -536,6 +536,19 @@ pub trait RendererPort {
         false
     }
 
+    /// Overwrites whole brick-arena rows starting at `first_row` (words per
+    /// row shared with `application::atlas::BRICK_ROW_WORDS`) without
+    /// reallocating or re-uploading the rest of the arena. Returns `false`
+    /// if the back end can't do partial brick updates (or has no arena
+    /// yet), in which case the caller must fall back to `upload_atlas` plus
+    /// `upload_brick_voxels` for the whole pool. Unlike `upload_atlas_rows`
+    /// this defaults to unsupported: `upload_brick_voxels` itself documents
+    /// that a back end may only ever replace its whole buffer, and the
+    /// default here preserves that for any back end that doesn't override it.
+    fn upload_brick_voxels_rows(&mut self, _first_row: u32, _words: &[u32]) -> bool {
+        false
+    }
+
     /// Receives the decoded RGBA label atlas (stacked product logos). Ships
     /// once at boot; renderers without a sprite path simply ignore it.
     fn upload_label_atlas(&mut self, _rgba: &[u8], _width: u32, _height: u32) {}

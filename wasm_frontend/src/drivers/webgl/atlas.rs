@@ -120,22 +120,25 @@ impl AtlasTexture {
 /// corruption rather than harmless (unreached) sampling.
 pub(super) struct BrickVoxelTexture {
     texture: WebGlTexture,
+    /// Allocated arena height in `BRICK_ATLAS_WIDTH`-wide rows, or `0` while
+    /// the placeholder is active (never a valid row-patch target: the
+    /// placeholder is 1x1, not `BRICK_ATLAS_WIDTH` wide).
+    rows: i32,
 }
 
 impl BrickVoxelTexture {
     pub(super) fn new(gl: &Gl) -> Self {
         let texture = gl.create_texture().expect("create brick voxel texture");
         upload_placeholder(gl, &texture);
-        Self { texture }
+        Self { texture, rows: 0 }
     }
 
-    /// Replaces the whole arena. `RendererPort` has no incremental brick
-    /// upload (WebGPU's own pipeline replaces its whole buffer too), so
-    /// unlike the node atlas this texture only ever fully reallocates. An
-    /// empty stream falls back to the placeholder rather than unbinding.
+    /// Replaces the whole arena. An empty stream falls back to the
+    /// placeholder rather than unbinding (see the struct doc).
     pub(super) fn replace(&mut self, gl: &Gl, words: &[u32]) {
         if words.is_empty() {
             upload_placeholder(gl, &self.texture);
+            self.rows = 0;
             return;
         }
 
@@ -160,6 +163,42 @@ impl BrickVoxelTexture {
         .expect("brick voxel texture upload failed");
         set_nearest_clamped(gl);
         gl.bind_texture(Gl::TEXTURE_2D, None);
+        self.rows = rows;
+    }
+
+    /// Patches complete arena rows without reallocating the texture. Mirrors
+    /// `AtlasTexture::update_rows`; unlike `replace`, this is what lets a
+    /// single streamed-in chunk's bricks land without a full-pool reupload
+    /// -- see `application::engine::Engine::stream_chunks`'s incremental
+    /// path, which patches this alongside the matching node-atlas rows so
+    /// the two never disagree for a frame.
+    pub(super) fn update_rows(&mut self, gl: &Gl, first_row: u32, words: &[u32]) -> bool {
+        let row_stride = 2 * BRICK_ATLAS_WIDTH as usize;
+        let patch_rows = words.len() / row_stride;
+        if patch_rows == 0
+            || words.len() % row_stride != 0
+            || first_row as i32 + patch_rows as i32 > self.rows
+        {
+            return false;
+        }
+
+        gl.bind_texture(Gl::TEXTURE_2D, Some(&self.texture));
+        let view = js_sys::Uint32Array::from(words);
+        let uploaded = gl
+            .tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_array_buffer_view(
+                Gl::TEXTURE_2D,
+                0,
+                0,
+                first_row as i32,
+                BRICK_ATLAS_WIDTH,
+                patch_rows as i32,
+                Gl::RG_INTEGER,
+                Gl::UNSIGNED_INT,
+                Some(&view),
+            )
+            .is_ok();
+        gl.bind_texture(Gl::TEXTURE_2D, None);
+        uploaded
     }
 
     pub(super) fn bind(&self, gl: &Gl) {
