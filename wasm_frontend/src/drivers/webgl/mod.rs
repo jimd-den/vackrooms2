@@ -29,7 +29,7 @@ use crate::drivers::gl::upload_scene_lights::SceneLightTexture;
 use crate::drivers::shaders::raymarch;
 
 use draw_voxel_scene::ChunkUniformBuffers;
-use upload_voxel_atlas::AtlasTexture;
+use upload_voxel_atlas::{AtlasTexture, BrickVoxelTexture};
 
 /// Shared camera FOV state for the raymarcher, raster drivers, and CPU path.
 /// Both backends read one source of truth: `webgpu::camera_state` owns the
@@ -63,6 +63,7 @@ struct Uniforms {
     dynamic_pos_radius: Option<WebGlUniformLocation>,
     dynamic_color_intensity: Option<WebGlUniformLocation>,
     node_texture: Option<WebGlUniformLocation>,
+    brick_texture: Option<WebGlUniformLocation>,
     num_chunks: Option<WebGlUniformLocation>,
     chunk_origins: Option<WebGlUniformLocation>,
     chunk_root_indices: Option<WebGlUniformLocation>,
@@ -100,6 +101,7 @@ impl Uniforms {
             dynamic_pos_radius: uniform("uDynamicPosRadius"),
             dynamic_color_intensity: uniform("uDynamicColorIntensity"),
             node_texture: uniform("uNodeTexture"),
+            brick_texture: uniform("uBrickTexture"),
             num_chunks: uniform("uNumChunks"),
             chunk_origins: uniform("uChunkOrigins"),
             chunk_root_indices: uniform("uChunkRootIndices"),
@@ -164,6 +166,7 @@ pub struct WebGl2Renderer {
     quad: FullscreenQuad,
     uniforms: Uniforms,
     atlas: AtlasTexture,
+    bricks: BrickVoxelTexture,
     scene_lights: SceneLightTexture,
     width: i32,
     height: i32,
@@ -190,6 +193,7 @@ impl WebGl2Renderer {
             quad,
             uniforms,
             atlas: AtlasTexture::new(),
+            bricks: BrickVoxelTexture::new(),
             scene_lights,
             width: canvas.width() as i32,
             height: canvas.height() as i32,

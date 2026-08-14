@@ -117,7 +117,10 @@ impl RendererPort for DriverRenderer {
             // Discs only. The surfel driver has no shadow pass, so unlike
             // the splat driver it never needs the indexed mesh alongside.
             DriverRenderer::Surfel(_) => RenderArtifactNeeds::SURFEL,
-            DriverRenderer::Raymarch(_) => RenderArtifactNeeds::RAYMARCH,
+            // WebGL2's fullscreen marcher now reads the bricked hierarchy,
+            // matching the WebGPU strategy below -- see
+            // `drivers/webgl::atlas::BrickVoxelTexture`.
+            DriverRenderer::Raymarch(_) => RenderArtifactNeeds::BRICKS,
             DriverRenderer::Cpu(_) => RenderArtifactNeeds::CPU,
             DriverRenderer::WebGpu(r) => r.artifact_needs(),
         }
@@ -183,6 +186,14 @@ impl RendererPort for DriverRenderer {
             DriverRenderer::Cpu(r) => r.upload_atlas_rows(first_row, texels),
             DriverRenderer::WebGpu(r) => r.upload_atlas_rows(first_row, texels),
             _ => false,
+        }
+    }
+
+    fn upload_brick_voxels(&mut self, words: &[u32]) {
+        match self {
+            DriverRenderer::Raymarch(r) => r.upload_brick_voxels(words),
+            DriverRenderer::WebGpu(r) => r.upload_brick_voxels(words),
+            _ => {}
         }
     }
 

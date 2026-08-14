@@ -200,6 +200,10 @@ impl RendererPort for WebGl2Renderer {
         self.atlas.update_rows(&self.gl, first_row, texels)
     }
 
+    fn upload_brick_voxels(&mut self, words: &[u32]) {
+        self.bricks.replace(&self.gl, words);
+    }
+
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         let toggles = crate::get_render_toggles();
         self.timer.poll(&self.gl);
@@ -255,6 +259,9 @@ impl RendererPort for WebGl2Renderer {
             gl.active_texture(Gl::TEXTURE0);
             self.atlas.bind(gl);
             gl.uniform1i(self.uniforms.node_texture.as_ref(), 0);
+            gl.active_texture(Gl::TEXTURE2);
+            self.bricks.bind(gl);
+            gl.uniform1i(self.uniforms.brick_texture.as_ref(), 2);
             gl.bind_vertex_array(Some(&self.quad.vao));
             gl.draw_arrays(Gl::TRIANGLES, 0, 6);
             gl.bind_vertex_array(None);

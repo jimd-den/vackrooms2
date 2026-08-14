@@ -4,10 +4,23 @@
 //! removes the fragile mutable stack/pop state that caused cracks and phantom
 //! boxes. A masked-out child returns its exact empty octant bounds without a
 //! texture fetch; the optimization can then jump over that whole region.
+//!
+//! The atlas may hold either the plain SVO encoding or the bricked one --
+//! they are bit-identical for internal and leaf nodes and differ only by an
+//! extra node kind, so `lookupVoxelLeaf` needs no mode switch: it recognizes
+//! a brick pointer when it meets one and every caller keeps seeing the same
+//! `VoxelLeaf` contract. `readBrickVoxel` (`decode_brick_voxel.rs`) is only
+//! prototyped here; concatenation order in `fragment_source` puts its
+//! definition after this file, mirroring `intersect_voxel_scene.rs`'s own
+//! forward-declared `traceChunkDda`/`traceChunkSkippingEmptyLeaves`.
 
 pub const GLSL: &str = r#"
+const uint NODE_KIND_INTERNAL = 0u;
+const uint NODE_KIND_LEAF = 1u;
+const uint NODE_KIND_BRICK = 2u;
+
 struct AtlasNode {
-    bool leaf;
+    uint kind;
     uint payload;
     uint colorOrMask;
     uint lightWord;
@@ -21,10 +34,12 @@ struct VoxelLeaf {
     vec3 boundsMax;
 };
 
+VoxelLeaf readBrickVoxel(uint wordBase, vec3 point, vec3 boundsMin, vec3 boundsMax);
+
 AtlasNode readAtlasNode(int nodeIndex) {
     ivec2 texel = ivec2(nodeIndex % 1024, nodeIndex / 1024);
     uvec4 packed = texelFetch(uNodeTexture, texel, 0);
-    return AtlasNode(packed.x == 1u, packed.y, packed.z, packed.w);
+    return AtlasNode(packed.x, packed.y, packed.z, packed.w);
 }
 
 VoxelLeaf lookupVoxelLeaf(
@@ -41,8 +56,11 @@ VoxelLeaf lookupVoxelLeaf(
     // this statically bounded loop for ordinary 6/8-level chunks.
     for (int level = 0; level <= 10; ++level) {
         AtlasNode node = readAtlasNode(nodeIndex);
-        if (node.leaf || level >= svoDepth) {
+        if (node.kind == NODE_KIND_LEAF || level >= svoDepth) {
             return VoxelLeaf(node.payload, node.colorOrMask, node.lightWord, boundsMin, boundsMax);
+        }
+        if (node.kind == NODE_KIND_BRICK) {
+            return readBrickVoxel(node.payload, point, boundsMin, boundsMax);
         }
 
         vec3 center = (boundsMin + boundsMax) * 0.5;

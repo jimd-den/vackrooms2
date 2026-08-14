@@ -6,6 +6,7 @@
 
 mod collect_ordered_chunk_intervals;
 mod construct_camera_ray;
+mod decode_brick_voxel;
 mod decode_voxel_atlas;
 mod intersect_voxel_scene;
 mod present_voxel_frame;
@@ -62,6 +63,7 @@ uniform vec4 uDynamicPosRadius[4];
 uniform vec4 uDynamicColorIntensity[4];
 
 uniform usampler2D uNodeTexture;
+uniform usampler2D uBrickTexture;
 uniform int uNumChunks;
 uniform vec3 uChunkOrigins[25];
 uniform int uChunkRootIndices[25];
@@ -82,6 +84,7 @@ pub fn fragment_source() -> String {
         sample_scene_lights::GLSL,
         apply_distance_fog::GLSL,
         decode_voxel_atlas::GLSL,
+        decode_brick_voxel::GLSL,
         intersect_voxel_scene::GLSL,
         trace_direct_light_visibility::GLSL,
         construct_camera_ray::GLSL,
@@ -138,5 +141,30 @@ mod tests {
         assert!(source.contains("applyDistanceFog"));
         assert!(source.contains("isDownwardEmittingFace"));
         assert!(!source.contains("vignette"));
+    }
+
+    /// The bricked atlas encoding must be transparent to every caller above
+    /// `lookupVoxelLeaf`, exactly as the WebGPU raymarcher's `lookup_leaf`
+    /// is documented to be -- no separate brick-aware trace path.
+    #[test]
+    fn brick_nodes_decode_through_the_same_lookup_every_caller_uses() {
+        let source = fragment_source();
+        assert!(source.contains("uniform usampler2D uBrickTexture"));
+        assert!(source.contains("NODE_KIND_BRICK"));
+        assert!(source.contains("readBrickVoxel(node.payload, point, boundsMin, boundsMax)"));
+        assert!(source.contains("VoxelLeaf readBrickVoxel(uint wordBase"));
+        // The prototype in decode_voxel_atlas.rs must precede its call site,
+        // and the real definition must exist somewhere after it.
+        let prototype = source
+            .find("VoxelLeaf readBrickVoxel(uint wordBase, vec3 point, vec3 boundsMin, vec3 boundsMax);")
+            .expect("missing brick-read forward declaration");
+        let call_site = source
+            .find("readBrickVoxel(node.payload")
+            .expect("missing brick-read call site");
+        let definition = source
+            .find("VoxelLeaf readBrickVoxel(uint wordBase, vec3 point, vec3 boundsMin, vec3 boundsMax) {")
+            .expect("missing brick-read definition");
+        assert!(prototype < call_site, "prototype must precede its call");
+        assert!(call_site < definition, "definition may follow its call, matching traceChunkDda's own forward declaration");
     }
 }
