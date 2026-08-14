@@ -108,38 +108,42 @@ impl AtlasTexture {
     }
 }
 
-/// RG32UI dense brick-voxel arena. Empty (no texture bound) whenever the
-/// resident chunks hold the plain SVO encoding instead of bricks -- the
-/// decoder never reaches a brick node then, so nothing samples it.
+/// RG32UI dense brick-voxel arena.
+///
+/// Always has a complete texture bound -- a 1x1 zero-filled placeholder
+/// whenever the resident chunks hold zero bricks -- mirroring the WebGPU
+/// pipeline's own `create_brick_buffer(device, &[0, 0])` placeholder
+/// (`drivers/webgpu/pipelines/raymarch.rs`). A genuinely unbound
+/// `usampler2D` reads back undefined per the WebGL spec; leaving this `None`
+/// between construction and the first upload, or on any frame where every
+/// resident chunk happens to hold zero bricks, showed up as real frame
+/// corruption rather than harmless (unreached) sampling.
 pub(super) struct BrickVoxelTexture {
-    texture: Option<WebGlTexture>,
+    texture: WebGlTexture,
 }
 
 impl BrickVoxelTexture {
-    pub(super) fn new() -> Self {
-        Self { texture: None }
+    pub(super) fn new(gl: &Gl) -> Self {
+        let texture = gl.create_texture().expect("create brick voxel texture");
+        upload_placeholder(gl, &texture);
+        Self { texture }
     }
 
     /// Replaces the whole arena. `RendererPort` has no incremental brick
-    /// upload (WebGPU's own pipeline replaces its whole buffer too, per
-    /// `raymarch.rs::upload_brick_voxels`), so unlike the node atlas this
-    /// texture only ever fully reallocates. An empty stream intentionally
-    /// releases the previous texture so level transitions cannot sample
-    /// stale voxels.
+    /// upload (WebGPU's own pipeline replaces its whole buffer too), so
+    /// unlike the node atlas this texture only ever fully reallocates. An
+    /// empty stream falls back to the placeholder rather than unbinding.
     pub(super) fn replace(&mut self, gl: &Gl, words: &[u32]) {
-        if let Some(old) = self.texture.take() {
-            gl.delete_texture(Some(&old));
-        }
         if words.is_empty() {
+            upload_placeholder(gl, &self.texture);
             return;
         }
 
         debug_assert_eq!(words.len() % 2, 0, "brick voxels are two u32 words each");
         let texel_count = (words.len() / 2) as i32;
         let rows = (texel_count + BRICK_ATLAS_WIDTH - 1) / BRICK_ATLAS_WIDTH;
-        let texture = gl.create_texture().expect("create brick voxel texture");
 
-        gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
+        gl.bind_texture(Gl::TEXTURE_2D, Some(&self.texture));
         gl.pixel_storei(Gl::UNPACK_ALIGNMENT, 4);
         let view = js_sys::Uint32Array::from(words);
         gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_array_buffer_view(
@@ -154,16 +158,42 @@ impl BrickVoxelTexture {
             Some(&view),
         )
         .expect("brick voxel texture upload failed");
-        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::NEAREST as i32);
-        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::NEAREST as i32);
-        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
-        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
+        set_nearest_clamped(gl);
         gl.bind_texture(Gl::TEXTURE_2D, None);
-
-        self.texture = Some(texture);
     }
 
     pub(super) fn bind(&self, gl: &Gl) {
-        gl.bind_texture(Gl::TEXTURE_2D, self.texture.as_ref());
+        gl.bind_texture(Gl::TEXTURE_2D, Some(&self.texture));
     }
+}
+
+/// Uploads a 1x1 zero texel. Deliberately not expressed as `replace(gl, &[0,
+/// 0])`: that would ask for a `BRICK_ATLAS_WIDTH`-wide row (matching real,
+/// row-padded uploads from `AtlasPool::full_brick_words`) while supplying
+/// only one texel of data, an undersized-buffer mismatch WebGL rejects.
+fn upload_placeholder(gl: &Gl, texture: &WebGlTexture) {
+    gl.bind_texture(Gl::TEXTURE_2D, Some(texture));
+    gl.pixel_storei(Gl::UNPACK_ALIGNMENT, 4);
+    let view = js_sys::Uint32Array::from([0u32, 0u32].as_slice());
+    gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_array_buffer_view(
+        Gl::TEXTURE_2D,
+        0,
+        Gl::RG32UI as i32,
+        1,
+        1,
+        0,
+        Gl::RG_INTEGER,
+        Gl::UNSIGNED_INT,
+        Some(&view),
+    )
+    .expect("brick placeholder texture upload failed");
+    set_nearest_clamped(gl);
+    gl.bind_texture(Gl::TEXTURE_2D, None);
+}
+
+fn set_nearest_clamped(gl: &Gl) {
+    gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::NEAREST as i32);
+    gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::NEAREST as i32);
+    gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
+    gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
 }

@@ -184,6 +184,7 @@ impl WebGl2Renderer {
         let quad = FullscreenQuad::create(&gl, &program)?;
         let timer = GpuFrameTimer::new(&gl);
         let scene_lights = SceneLightTexture::create(&gl)?;
+        let bricks = BrickVoxelTexture::new(&gl);
 
         gl.use_program(Some(&program));
 
@@ -193,7 +194,7 @@ impl WebGl2Renderer {
             quad,
             uniforms,
             atlas: AtlasTexture::new(),
-            bricks: BrickVoxelTexture::new(),
+            bricks,
             scene_lights,
             width: canvas.width() as i32,
             height: canvas.height() as i32,
