@@ -172,10 +172,21 @@ pub struct WebGl2Renderer {
     height: i32,
     chunk_uniforms: ChunkUniformBuffers,
     timer: GpuFrameTimer,
+    /// Which encoding to ask the chunk source for. The shader decodes both
+    /// -- `lookupVoxelLeaf` recognizes a brick node when it meets one and is
+    /// otherwise bit-identical -- so this is a live A/B switch, not two code
+    /// paths: `?bricks=0` puts the marcher back on the plain SVDAG it shipped
+    /// on before the brick pool was wired in, against the same scene, same
+    /// program, same frame.
+    bricks_enabled: bool,
 }
 
 impl WebGl2Renderer {
     pub fn new(canvas: &HtmlCanvasElement) -> Result<Self, JsValue> {
+        Self::with_bricks(canvas, true)
+    }
+
+    pub fn with_bricks(canvas: &HtmlCanvasElement, bricks_enabled: bool) -> Result<Self, JsValue> {
         // Visibility is resolved in the fragment shader, so a fixed-function
         // depth attachment would consume memory without affecting the image.
         let gl = create_context(canvas, ContextOptions { depth: false })?;
@@ -200,7 +211,17 @@ impl WebGl2Renderer {
             height: canvas.height() as i32,
             chunk_uniforms: ChunkUniformBuffers::with_capacity(MAX_CHUNKS),
             timer,
+            bricks_enabled,
         })
+    }
+
+    /// Which node encoding this renderer's chunk payloads must carry.
+    pub fn artifact_needs(&self) -> crate::application::ports::RenderArtifactNeeds {
+        if self.bricks_enabled {
+            crate::application::ports::RenderArtifactNeeds::BRICKS
+        } else {
+            crate::application::ports::RenderArtifactNeeds::RAYMARCH
+        }
     }
 
     /// Updates the canvas backing-store dimensions used by the viewport and

@@ -1,10 +1,16 @@
 //! RGBA32UI SVO node-atlas lifecycle, and the RG32UI dense brick-voxel
 //! arena that sits alongside it once a chunk is delivered bricked.
 //!
-//! The serializer pads every atlas row to [`ATLAS_WIDTH`], which makes both a
-//! full replacement and an incremental row overwrite exact typed-array
-//! copies for the node atlas. The brick arena has no incremental path (see
-//! [`BrickVoxelTexture::replace`]) and only ever fully reallocates.
+//! The serializers pad every row -- the node atlas to [`ATLAS_WIDTH`]
+//! texels, the brick arena to `BRICK_ROW_WORDS` words -- so both a full
+//! replacement and an incremental row overwrite are exact typed-array
+//! copies on either texture, and one pool slot maps to a whole number of
+//! rows in both.
+//!
+//! Both uploads verify with `gl.get_error()` rather than trusting the call:
+//! WebGL reports a rejected allocation by leaving the texture incomplete,
+//! which samples as zero, so the failure arrives as a world made of air
+//! rather than as an error.
 
 use web_sys::{WebGl2RenderingContext as Gl, WebGlTexture};
 
@@ -62,11 +68,24 @@ impl AtlasTexture {
             Some(&view),
         )
         .expect("SVO atlas texture upload failed");
-        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::NEAREST as i32);
-        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::NEAREST as i32);
-        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
-        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
+        set_nearest_clamped(gl);
         gl.bind_texture(Gl::TEXTURE_2D, None);
+
+        // See `BrickVoxelTexture::replace`: a rejected allocation is silent
+        // and samples as zero, which here means every node reads as air.
+        let error = gl.get_error();
+        if error != Gl::NO_ERROR {
+            web_sys::console::warn_1(
+                &format!(
+                    "node atlas upload rejected: {ATLAS_WIDTH}x{rows} RGBA32UI \
+                     ({} texels), gl error 0x{error:x}",
+                    texels.len() / 4
+                )
+                .into(),
+            );
+            gl.delete_texture(Some(&texture));
+            return;
+        }
 
         self.texture = Some(texture);
         self.rows = rows;
@@ -163,6 +182,42 @@ impl BrickVoxelTexture {
         .expect("brick voxel texture upload failed");
         set_nearest_clamped(gl);
         gl.bind_texture(Gl::TEXTURE_2D, None);
+        // A rejected allocation is silent: `tex_image_2d` only returns `Err`
+        // for a JS exception, and an over-large or out-of-memory texture
+        // instead leaves the object incomplete, which samples as zero --
+        // every brick reads as air and the world renders as the handful of
+        // uniform nodes above the brick level. Ask GL directly rather than
+        // trust the call, and refuse to treat the arena as patchable when it
+        // did not land.
+        let error = gl.get_error();
+        if error != Gl::NO_ERROR {
+            web_sys::console::warn_1(
+                &format!(
+                    "brick arena upload rejected: {BRICK_ATLAS_WIDTH}x{rows} RG32UI \
+                     ({} words), gl error 0x{error:x}",
+                    words.len()
+                )
+                .into(),
+            );
+            self.rows = 0;
+            return;
+        }
+        if rows != self.rows {
+            // Shape changes are rare (a relayout), so this is a handful of
+            // lines per session and says which half of the pipeline to
+            // suspect when bricks render as air: a zero arena is a
+            // generation or pooling fault, a populated one that still
+            // renders empty is a sampling fault.
+            let occupied = words.iter().filter(|&&w| w != 0).count();
+            web_sys::console::log_1(
+                &format!(
+                    "brick arena {BRICK_ATLAS_WIDTH}x{rows} RG32UI, {} words, \
+                     {occupied} non-zero",
+                    words.len()
+                )
+                .into(),
+            );
+        }
         self.rows = rows;
     }
 

@@ -135,6 +135,39 @@ mod tests {
         assert_eq!(source.matches("void main()").count(), 1);
     }
 
+    /// The assembled program is only ever compiled by a browser's GL driver,
+    /// where a syntax or type error is a black screen and nothing else.
+    /// `glslangValidator` compiles the real ES 3.00 source and turns that
+    /// into an ordinary test failure with a line number.
+    ///
+    /// naga cannot stand in for it: its GLSL front end accepts only desktop
+    /// 440/450/460, and even rewritten to those it rejects the combined
+    /// `sampler2D`/`usampler2D` types that are the *only* sampler form
+    /// WebGL has. The check is skipped, not failed, where the tool is
+    /// absent -- an environment without it must not turn every run red.
+    #[test]
+    fn assembled_glsl_compiles_as_es_300() {
+        let source = fragment_source();
+        let mut path = std::env::temp_dir();
+        path.push(format!("vackrooms-raymarch-{}.frag", std::process::id()));
+        if std::fs::write(&path, &source).is_err() {
+            return;
+        }
+        let compiled = std::process::Command::new("glslangValidator")
+            .arg("-S")
+            .arg("frag")
+            .arg(&path)
+            .output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(output) = compiled else { return };
+        assert!(
+            output.status.success(),
+            "raymarch GLSL failed to compile:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn fog_is_not_multiplied_by_a_vignette() {
         let source = fragment_source();

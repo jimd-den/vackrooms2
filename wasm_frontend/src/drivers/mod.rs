@@ -6,7 +6,11 @@ pub mod console_telemetry;
 pub mod cpu_canvas;
 #[cfg(target_arch = "wasm32")]
 pub mod gl;
-#[cfg(target_arch = "wasm32")]
+// Pure GLSL source assembly -- string constants and `concat`, no web-sys.
+// Gated for `test` too so the assembled program can be parsed and validated
+// natively: a GLSL syntax or type error is otherwise only observable as a
+// black screen in a browser, which no test in this workspace can reach.
+#[cfg(any(target_arch = "wasm32", test))]
 pub mod shaders;
 #[cfg(target_arch = "wasm32")]
 pub mod splat_webgl;

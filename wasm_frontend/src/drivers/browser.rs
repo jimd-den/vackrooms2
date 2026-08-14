@@ -117,10 +117,11 @@ impl RendererPort for DriverRenderer {
             // Discs only. The surfel driver has no shadow pass, so unlike
             // the splat driver it never needs the indexed mesh alongside.
             DriverRenderer::Surfel(_) => RenderArtifactNeeds::SURFEL,
-            // WebGL2's fullscreen marcher now reads the bricked hierarchy,
-            // matching the WebGPU strategy below -- see
-            // `drivers/webgl::atlas::BrickVoxelTexture`.
-            DriverRenderer::Raymarch(_) => RenderArtifactNeeds::BRICKS,
+            // WebGL2's fullscreen marcher reads the bricked hierarchy by
+            // default, matching the WebGPU strategy below -- see
+            // `drivers/webgl::atlas::BrickVoxelTexture`. `?bricks=0` puts it
+            // back on the plain SVDAG for comparison.
+            DriverRenderer::Raymarch(r) => r.artifact_needs(),
             DriverRenderer::Cpu(_) => RenderArtifactNeeds::CPU,
             DriverRenderer::WebGpu(r) => r.artifact_needs(),
         }
@@ -358,7 +359,9 @@ async fn create_renderer(
         return Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?));
     }
     if renderer_choice == Some("raymarch") {
-        return WebGl2Renderer::new(canvas).map(DriverRenderer::Raymarch);
+        // Default on; `?bricks=0` selects the plain SVDAG encoding instead.
+        let bricks = query_param(query, "bricks") != Some("0");
+        return WebGl2Renderer::with_bricks(canvas, bricks).map(DriverRenderer::Raymarch);
     }
     if renderer_choice == Some("surfel") {
         let profile = if quality == GpuQualityProfile::High {

@@ -337,6 +337,320 @@ fn a_brick_reports_voxel_sized_bounds() {
     );
 }
 
+/// The traversal the WebGL2 raymarcher actually runs, ported from
+/// `drivers/shaders/trace_voxel_scene/intersect_voxel_scene.rs`.
+///
+/// `lookup_leaf` agreeing point-for-point is necessary but not sufficient:
+/// the empty-space walk consumes the *bounds* a leaf reports, and bricking
+/// changes those even where the material is identical -- a brick hands back
+/// one voxel where the plain SVO hands back a whole collapsed octant. That
+/// is the difference a step budget can turn into missing geometry, and it is
+/// invisible to a per-point fetch comparison.
+mod trace {
+    use super::{Leaf, lookup_leaf};
+
+    const TRACE_MIN_TIE_EPSILON: f32 = 1e-7;
+    /// The shader's own fixed per-chunk step budget, in both walks.
+    pub const MAX_STEPS: usize = 768;
+
+    pub struct Chunk<'a> {
+        pub nodes: &'a [u32],
+        pub bricks: &'a [u32],
+        pub root: usize,
+        pub depth: u32,
+        pub world_size: f32,
+        pub voxel_size: f32,
+    }
+
+    impl Chunk<'_> {
+        fn leaf(&self, point: [f32; 3]) -> Leaf {
+            lookup_leaf(
+                self.nodes,
+                self.bricks,
+                self.root,
+                self.depth,
+                self.world_size,
+                point,
+            )
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Hit {
+        pub distance: f32,
+        pub material: u32,
+        /// Steps the walk consumed before it hit, missed, or ran out.
+        pub steps: usize,
+        /// True when the walk exhausted [`MAX_STEPS`] rather than finishing.
+        pub exhausted: bool,
+    }
+
+    fn sample_bias(voxel_size: f32) -> f32 {
+        (voxel_size * 1e-5).max(TRACE_MIN_TIE_EPSILON)
+    }
+
+    fn tie_tolerance(distance: f32) -> f32 {
+        (distance.abs() * 1e-6).max(TRACE_MIN_TIE_EPSILON)
+    }
+
+    fn at(ro: [f32; 3], rd: [f32; 3], t: f32) -> [f32; 3] {
+        [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t]
+    }
+
+    fn exit_distance(ro: [f32; 3], rd: [f32; 3], min: [f32; 3], max: [f32; 3]) -> f32 {
+        let mut nearest = f32::INFINITY;
+        for a in 0..3 {
+            if rd[a].abs() >= 1e-20 {
+                let plane = if rd[a] > 0.0 { max[a] } else { min[a] };
+                nearest = nearest.min((plane - ro[a]) / rd[a]);
+            }
+        }
+        nearest
+    }
+
+    /// `traceChunkDda`: exact finest-cell stepping, the canonical resolver.
+    pub fn dda(
+        chunk: &Chunk<'_>,
+        ro: [f32; 3],
+        rd: [f32; 3],
+        entry: f32,
+        exit: f32,
+    ) -> Option<Hit> {
+        let bias = sample_bias(chunk.voxel_size);
+        let mut distance = entry;
+        let sample = at(ro, rd, (distance + bias).min(exit));
+        let mut cell = [
+            (sample[0] / chunk.voxel_size).floor(),
+            (sample[1] / chunk.voxel_size).floor(),
+            (sample[2] / chunk.voxel_size).floor(),
+        ];
+        let step = [rd[0].signum(), rd[1].signum(), rd[2].signum()];
+
+        for taken in 0..MAX_STEPS {
+            if distance > exit {
+                return None;
+            }
+            let sample = at(ro, rd, (distance + bias).min(exit));
+            let leaf = chunk.leaf(sample);
+            if leaf.material != 0 {
+                return Some(Hit {
+                    distance,
+                    material: leaf.material,
+                    steps: taken,
+                    exhausted: false,
+                });
+            }
+
+            let mut next_times = [f32::INFINITY; 3];
+            for a in 0..3 {
+                if rd[a].abs() >= 1e-20 {
+                    let boundary = (cell[a] + step[a].max(0.0)) * chunk.voxel_size;
+                    next_times[a] = (boundary - ro[a]) / rd[a];
+                }
+            }
+            let next = next_times[0].min(next_times[1]).min(next_times[2]);
+            if next > exit {
+                return None;
+            }
+            let epsilon = tie_tolerance(next);
+            for a in 0..3 {
+                if (next_times[a] - next).abs() <= epsilon {
+                    cell[a] += step[a];
+                }
+            }
+            distance = next;
+        }
+        Some(Hit {
+            distance,
+            material: 0,
+            steps: MAX_STEPS,
+            exhausted: true,
+        })
+    }
+
+    /// `traceChunkSkippingEmptyLeaves`: the coarse walk, which proves
+    /// emptiness only and hands any hit to [`dda`] to resolve exactly.
+    pub fn skipping(
+        chunk: &Chunk<'_>,
+        ro: [f32; 3],
+        rd: [f32; 3],
+        entry: f32,
+        exit: f32,
+    ) -> Option<Hit> {
+        let bias = sample_bias(chunk.voxel_size);
+        let mut distance = entry;
+        let mut refinement_entry = entry;
+
+        for taken in 0..MAX_STEPS {
+            if distance > exit {
+                return None;
+            }
+            let sample = at(ro, rd, (distance + bias).min(exit));
+            let leaf = chunk.leaf(sample);
+            if leaf.material != 0 {
+                return dda(chunk, ro, rd, refinement_entry, exit).map(|hit| Hit {
+                    steps: taken + hit.steps,
+                    ..hit
+                });
+            }
+
+            let mut next = exit_distance(ro, rd, leaf.bounds_min, leaf.bounds_max);
+            if next <= distance + bias * 0.25 {
+                next = distance + bias;
+            }
+            refinement_entry = distance.max(next - chunk.voxel_size);
+            distance = next;
+        }
+        Some(Hit {
+            distance,
+            material: 0,
+            steps: MAX_STEPS,
+            exhausted: true,
+        })
+    }
+}
+
+/// Rays fanned across the chunk from an interior eye, in chunk-local space.
+fn fan(world_size: f32) -> Vec<([f32; 3], [f32; 3])> {
+    let eye = [world_size * 0.5, world_size * 0.25, world_size * 0.5];
+    let mut rays = Vec::new();
+    for yaw_step in 0..48 {
+        let yaw = yaw_step as f32 / 48.0 * std::f32::consts::TAU;
+        for pitch_step in -6..=6 {
+            let pitch = pitch_step as f32 / 6.0 * 0.9;
+            let direction = [
+                yaw.cos() * pitch.cos(),
+                pitch.sin(),
+                yaw.sin() * pitch.cos(),
+            ];
+            rays.push((eye, direction));
+        }
+    }
+    rays
+}
+
+/// The load-bearing traversal test: a ray must find the same surface at the
+/// same distance whichever encoding it walks, and must not need more of the
+/// shader's fixed step budget to do it.
+///
+/// Exhausting that budget is the failure mode worth naming: the walk then
+/// reports *no hit at all*, so a wall silently becomes sky. That reads on
+/// screen as a fast renderer drawing almost nothing, which is exactly the
+/// shape of a bricking regression.
+#[test]
+fn a_ray_finds_the_same_surface_through_bricks_as_through_the_plain_svo() {
+    let config = GeneratorConfig::low_spec();
+    let source = LocalChunkSource::new(SimpleNoiseProvider::new(), 42, config);
+    let reality = RealitySnapshot::empty();
+    let origins = [(0.0f32, 0.0f32)];
+
+    let bricked =
+        source.load_with_artifacts(0.0, 0.0, 0, 0, &reality, RenderArtifactNeeds::BRICKS);
+    let plain = source.load_with_artifacts(0.0, 0.0, 0, 0, &reality, RenderArtifactNeeds::RAYMARCH);
+    let brick_atlas = build_atlas(std::slice::from_ref(&bricked), &origins);
+    let plain_atlas = build_atlas(std::slice::from_ref(&plain), &origins);
+    let world_size = config.svo_world_size();
+
+    let brick_chunk = trace::Chunk {
+        nodes: &brick_atlas.nodes,
+        bricks: &brick_atlas.bricks,
+        root: brick_atlas.roots[0],
+        depth: bricked.svo_depth as u32,
+        world_size,
+        voxel_size: config.voxel_scale,
+    };
+    let plain_chunk = trace::Chunk {
+        nodes: &plain_atlas.nodes,
+        bricks: &plain_atlas.bricks,
+        root: plain_atlas.roots[0],
+        depth: plain.svo_depth as u32,
+        world_size,
+        voxel_size: config.voxel_scale,
+    };
+
+    let mut hits = 0usize;
+    let mut brick_exhausted = 0usize;
+    let mut plain_exhausted = 0usize;
+    let mut worst_step_ratio = 0.0f32;
+    let mut disagreements = Vec::new();
+
+    for (ro, rd) in fan(world_size) {
+        // `traceChunk` is only ever handed the ray's span *inside* the chunk
+        // box, so the walk terminates at the far wall rather than marching
+        // through unbounded air outside the atlas.
+        let mut exit = f32::INFINITY;
+        for a in 0..3 {
+            if rd[a].abs() >= 1e-20 {
+                let plane = if rd[a] > 0.0 { world_size } else { 0.0 };
+                exit = exit.min((plane - ro[a]) / rd[a]);
+            }
+        }
+        let from_bricks = trace::skipping(&brick_chunk, ro, rd, 0.0, exit);
+        let from_svo = trace::skipping(&plain_chunk, ro, rd, 0.0, exit);
+
+        if from_bricks.is_some_and(|h| h.exhausted) {
+            brick_exhausted += 1;
+        }
+        if from_svo.is_some_and(|h| h.exhausted) {
+            plain_exhausted += 1;
+        }
+        if let (Some(b), Some(p)) = (from_bricks, from_svo) {
+            if !b.exhausted && !p.exhausted {
+                hits += 1;
+                if b.material != p.material || (b.distance - p.distance).abs() > config.voxel_scale
+                {
+                    disagreements.push((ro, rd, b, p));
+                }
+                worst_step_ratio = worst_step_ratio.max(b.steps as f32 / p.steps.max(1) as f32);
+            }
+        } else if from_bricks.is_some() != from_svo.is_some() {
+            disagreements.push((
+                ro,
+                rd,
+                from_bricks.unwrap_or(trace::Hit {
+                    distance: 0.0,
+                    material: 0,
+                    steps: 0,
+                    exhausted: false,
+                }),
+                from_svo.unwrap_or(trace::Hit {
+                    distance: 0.0,
+                    material: 0,
+                    steps: 0,
+                    exhausted: false,
+                }),
+            ));
+        }
+    }
+
+    assert!(
+        hits > 100,
+        "sanity: the fan must actually strike geometry, got {hits}"
+    );
+    assert!(
+        disagreements.is_empty(),
+        "{} of the fan's rays resolved differently through bricks; first: {:?}",
+        disagreements.len(),
+        disagreements.first()
+    );
+    // Some rays exhaust the budget in *both* encodings -- grazing, nearly
+    // axis-parallel ones that inch along a wall. That is a pre-existing
+    // property of the walk, not a bricking regression, so what is pinned
+    // here is that bricking does not make it worse.
+    assert!(
+        brick_exhausted <= plain_exhausted,
+        "bricking exhausted the {}-step budget on more rays than the plain SVO \
+         ({brick_exhausted} vs {plain_exhausted}): geometry those rays cross \
+         renders as sky",
+        trace::MAX_STEPS
+    );
+    assert!(
+        worst_step_ratio <= 4.0,
+        "bricking cost {worst_step_ratio:.1}x the steps on some ray; the walk \
+         has a fixed budget, so a large multiplier turns into missing geometry"
+    );
+}
+
 /// Records what bricking actually buys against the path it replaces, which
 /// is not what the brick pool's own doc table suggests.
 ///
