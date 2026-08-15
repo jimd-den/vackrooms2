@@ -1483,12 +1483,41 @@ mod tests {
         assert!(text.contains("§ SUBJECT"), "{text}");
         assert!(text.contains("§ ROUTE"), "{text}");
         assert!(text.contains("§ AWARENESS"), "{text}");
+        assert!(text.contains("§ RAYMARCH"), "{text}");
         assert!(text.contains("§ FIELD"), "{text}");
         assert!(text.contains("pulse"), "{text}");
         assert!(
             text.contains("door"),
             "resident door must be reported: {text}"
         );
+    }
+
+    /// `§ RAYMARCH` is a node-hierarchy renderer's own pipeline counters --
+    /// atlas pool occupancy and brick word counts mean nothing to a mesh
+    /// renderer, which holds no atlas at all. It must not appear for one.
+    #[test]
+    fn raymarch_section_is_absent_for_a_surface_renderer() {
+        struct SurfaceOnly;
+        impl RendererPort for SurfaceOnly {
+            fn artifact_needs(&self) -> RenderArtifactNeeds {
+                RenderArtifactNeeds::SURFACE
+            }
+            fn uses_surface_meshes(&self) -> bool {
+                true
+            }
+            fn upload_atlas(&mut self, _texels: &[u32]) {}
+            fn draw(&mut self, _frame: &FrameParams, _chunks: &[ChunkDraw]) {}
+        }
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(SurfaceOnly),
+            Box::new(ProvisionedChunkSource),
+        );
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        let text = engine.diagnostic_text();
+        assert!(!text.contains("§ RAYMARCH"), "{text}");
+        assert!(text.contains("§ FIELD"), "{text}");
     }
 
     #[test]

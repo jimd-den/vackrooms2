@@ -295,7 +295,11 @@
         }
         .diag-section pre {
             margin: 0;
-            font-family: var(--mono);
+            /* The diagnostic aperture is a dense reading surface, like the
+               settings menu -- Bytesized's pixel grid is legible for HUD
+               labels at a glance but fights a paragraph of numbers, so this
+               follows --ui rather than the rest of the field-terminal chrome. */
+            font-family: var(--ui);
             font-size: var(--fs-small);
             line-height: 1.5;
             white-space: pre-wrap;
@@ -1091,7 +1095,7 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
         <!-- Debug Tab -->
         <div id="tab-debug" class="tab-content" style="display: none;">
             <div class="setting-row inline-switch">
-                <label for="setting-anomaly-debug">Diagnostic aperture (F3)</label>
+                <label for="setting-anomaly-debug">Diagnostic aperture (F3, scroll PageUp/PageDown)</label>
                 <input type="checkbox" id="setting-anomaly-debug">
             </div>
             <div class="setting-row">

@@ -42,8 +42,15 @@ pub(super) fn attach_input_listeners(
     touch: &Rc<RefCell<TouchState>>,
 ) -> Result<(), JsValue> {
     // Keyboard: KeyboardEvent.code -> MoveIntent, mapped by the input adapter.
+    // The diagnostic aperture is deliberately `pointer-events: none` (a
+    // click-through HUD, like the rest of the overlay chrome), which also
+    // takes the mouse wheel with it -- there is no click target to scroll.
+    // Script-driven `scrollTop` is unaffected by that CSS property, so
+    // PageUp/PageDown scroll it directly instead.
+    let diagnostics_panel: Option<HtmlElement> = element(document, "diagnostics").ok();
     for (event, pressed) in [("keydown", true), ("keyup", false)] {
         let input = input.clone();
+        let diagnostics_panel = diagnostics_panel.clone();
         let closure = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
             // F3 toggles the anomaly debug overlay (and never reaches the
             // browser's own F3 find shortcut).
@@ -54,6 +61,20 @@ pub(super) fn attach_input_listeners(
                     crate::ANOMALY_DEBUG.store(!on, std::sync::atomic::Ordering::Relaxed);
                 }
                 return;
+            }
+            // Held-key repeat is wanted here (continuous scroll), unlike
+            // every other binding below, and only while the panel the user
+            // is looking at is actually open -- otherwise PageUp/PageDown
+            // fall through to whatever the page would normally do with them.
+            if pressed && matches!(e.code().as_str(), "PageUp" | "PageDown") {
+                if let Some(panel) = &diagnostics_panel {
+                    if crate::ANOMALY_DEBUG.load(std::sync::atomic::Ordering::Relaxed) {
+                        e.prevent_default();
+                        let step = if e.code() == "PageDown" { 240 } else { -240 };
+                        panel.set_scroll_top(panel.scroll_top() + step);
+                        return;
+                    }
+                }
             }
             if !e.repeat() {
                 input.borrow_mut().key_event(&e.code(), pressed);

@@ -37,47 +37,6 @@ impl Engine {
             self.completed_backlog.len(),
             self.forced_reloads.len(),
         );
-        // A resident chunk that never reaches `draws` never appears on
-        // screen, whatever generation and streaming already did for it --
-        // `draws` requires both a store entry *and* a pool slot
-        // (`AtlasPool::node_offset_of`). When `resident` climbs but `drawn`
-        // stalls, the fault is downstream of streaming: the atlas pool is
-        // either full or the upload it needed failed. That split is
-        // otherwise invisible -- the two counts read identically from
-        // outside the engine.
-        let _ = writeln!(
-            out,
-            "drawn {} of {} resident | atlas pool {}/{} slot(s) occupied",
-            self.draws.len(),
-            self.store.len(),
-            self.pool.occupied_slots(),
-            self.pool.slot_count(),
-        );
-        // Splits the brick pipeline itself: this counts what the *payloads*
-        // actually carry, straight from `ChunkStore`, upstream of the pool,
-        // the atlas texture, and the shader entirely. If a brick node reads
-        // as air in the render, this line says whether there was ever
-        // anything there to read -- zero brick words with brick nodes
-        // present is a pooling/upload fault; brick words present but still
-        // rendering as air is a GPU sampling fault, and the console's
-        // "brick arena upload rejected"/"brick arena WxH..." lines (driver
-        // logging, not this panel) say which.
-        let (brick_nodes, brick_words) = self.store.iter_ordered().fold(
-            (0usize, 0usize),
-            |(nodes, words), chunk| {
-                let kind_brick = chunk
-                    .payload
-                    .nodes
-                    .chunks_exact(4)
-                    .filter(|node| node[0] == 2)
-                    .count();
-                (nodes + kind_brick, words + chunk.payload.brick_voxels.len())
-            },
-        );
-        let _ = writeln!(
-            out,
-            "brick nodes {brick_nodes} | brick arena {brick_words} word(s) in payloads",
-        );
         let _ = writeln!(
             out,
             "flares {} | push {:.2}s",
@@ -318,8 +277,73 @@ impl Engine {
             }
         }
 
+        // Only a node-hierarchy renderer (raymarch, in either encoding) ever
+        // consults the atlas pool or a brick arena -- a surface/splat/surfel
+        // renderer holds its own meshes and this section would just be a
+        // wall of zeros for it. `needs_node_arena` is exactly the bit that
+        // distinguishes them, so it also decides whether this section
+        // exists at all.
+        if self.artifact_needs.needs_node_arena() {
+            let _ = writeln!(out, "§ RAYMARCH");
+            out.push_str(&self.raymarch_debug_text());
+        }
+
         let _ = writeln!(out, "§ FIELD");
         out.push_str(&self.anomaly_debug_text());
+        out
+    }
+
+    /// Raymarch-specific pipeline counters, upstream to downstream: what the
+    /// payloads carry, whether it reached the atlas pool, and whether it
+    /// reached the GPU-visible draw table. Reading resident/drawn together
+    /// pinpoints which stage lost a chunk -- something otherwise invisible
+    /// because every stage before the screen looks the same from outside.
+    /// Only meaningful when `artifact_needs.needs_node_arena()` is true, and
+    /// only ever shown there (see [`Self::diagnostic_text`]).
+    pub fn raymarch_debug_text(&self) -> String {
+        let mut out = String::with_capacity(256);
+        // A resident chunk that never reaches `draws` never appears on
+        // screen, whatever generation and streaming already did for it --
+        // `draws` requires both a store entry *and* a pool slot
+        // (`AtlasPool::node_offset_of`). When `resident` climbs but `drawn`
+        // stalls, the fault is downstream of streaming: the atlas pool is
+        // either full or the upload it needed failed. That split is
+        // otherwise invisible -- the two counts read identically from
+        // outside the engine.
+        let _ = writeln!(
+            out,
+            "drawn {} of {} resident | atlas pool {}/{} slot(s) occupied",
+            self.draws.len(),
+            self.store.len(),
+            self.pool.occupied_slots(),
+            self.pool.slot_count(),
+        );
+        // Splits the brick pipeline itself: this counts what the *payloads*
+        // actually carry, straight from `ChunkStore`, upstream of the pool,
+        // the atlas texture, and the shader entirely. If a brick node reads
+        // as air in the render, this line says whether there was ever
+        // anything there to read -- zero brick words with brick nodes
+        // present is a pooling/upload fault; brick words present but still
+        // rendering as air is a GPU sampling fault, and the console's
+        // "brick arena upload rejected"/"brick arena WxH..." lines (driver
+        // logging, not this panel) say which.
+        let (brick_nodes, brick_words) =
+            self.store
+                .iter_ordered()
+                .fold((0usize, 0usize), |(nodes, words), chunk| {
+                    let kind_brick = chunk
+                        .payload
+                        .nodes
+                        .chunks_exact(4)
+                        .filter(|node| node[0] == 2)
+                        .count();
+                    (nodes + kind_brick, words + chunk.payload.brick_voxels.len())
+                });
+        let _ = writeln!(
+            out,
+            "brick nodes {brick_nodes} | brick arena {brick_words} word(s) in payloads",
+        );
+        let _ = writeln!(out, "atlas node texels {}", self.atlas_nodes);
         out
     }
 }
