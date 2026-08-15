@@ -444,6 +444,52 @@ mod tests {
         }
     }
 
+    /// `RenderArtifactNeeds::ALL` deliberately excludes bricks (both
+    /// encodings share `ChunkPayload::nodes`), so every other round-trip
+    /// test in this file -- including `generated_chunk_roundtrips_exactly`
+    /// -- generates through `load`/`load_with_reality`, which hard-code
+    /// `ALL`, and never once puts a byte of `brick_voxels` through the wire
+    /// format. That is the exact path a generation worker sends the WebGL2
+    /// raymarcher's chunks through today: this is the transport the
+    /// brick arena crosses on every real load, and until now nothing here
+    /// tested it.
+    #[test]
+    fn a_bricked_chunk_roundtrips_its_voxel_arena_exactly() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let reality = RealitySnapshot::default();
+        let payload =
+            source.load_with_artifacts(0.0, 30.0, 0, 0, &reality, RenderArtifactNeeds::BRICKS);
+        assert!(
+            !payload.brick_voxels.is_empty(),
+            "sanity: this chunk must actually carry bricks"
+        );
+
+        let bytes = encode_chunk_payload(&payload);
+        let decoded = decode_chunk_payload(&bytes).expect("decodes");
+
+        assert_eq!(decoded.nodes, payload.nodes);
+        assert_eq!(
+            decoded.brick_voxels.len(),
+            payload.brick_voxels.len(),
+            "brick arena length changed across the wire"
+        );
+        assert_eq!(
+            decoded.brick_voxels, payload.brick_voxels,
+            "brick arena content changed across the wire"
+        );
+
+        // The failure mode this test exists to catch: a field boundary that
+        // shifted, so the arena decodes to *some* buffer of the right shape
+        // but the wrong bytes -- every voxel that used to be solid material
+        // is now zero, i.e. air, exactly what a bricked chunk that renders
+        // as an empty room would produce upstream of any GPU code.
+        let nonzero_before = payload.brick_voxels.iter().filter(|&&w| w != 0).count();
+        let nonzero_after = decoded.brick_voxels.iter().filter(|&&w| w != 0).count();
+        assert_eq!(nonzero_before, nonzero_after);
+        assert!(nonzero_before > 0, "sanity: real geometry must be non-air");
+    }
+
     #[test]
     fn selected_artifacts_stay_omitted_across_worker_encoding() {
         let source =

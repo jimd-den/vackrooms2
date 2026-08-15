@@ -53,6 +53,31 @@ impl Engine {
             self.pool.occupied_slots(),
             self.pool.slot_count(),
         );
+        // Splits the brick pipeline itself: this counts what the *payloads*
+        // actually carry, straight from `ChunkStore`, upstream of the pool,
+        // the atlas texture, and the shader entirely. If a brick node reads
+        // as air in the render, this line says whether there was ever
+        // anything there to read -- zero brick words with brick nodes
+        // present is a pooling/upload fault; brick words present but still
+        // rendering as air is a GPU sampling fault, and the console's
+        // "brick arena upload rejected"/"brick arena WxH..." lines (driver
+        // logging, not this panel) say which.
+        let (brick_nodes, brick_words) = self.store.iter_ordered().fold(
+            (0usize, 0usize),
+            |(nodes, words), chunk| {
+                let kind_brick = chunk
+                    .payload
+                    .nodes
+                    .chunks_exact(4)
+                    .filter(|node| node[0] == 2)
+                    .count();
+                (nodes + kind_brick, words + chunk.payload.brick_voxels.len())
+            },
+        );
+        let _ = writeln!(
+            out,
+            "brick nodes {brick_nodes} | brick arena {brick_words} word(s) in payloads",
+        );
         let _ = writeln!(
             out,
             "flares {} | push {:.2}s",
