@@ -12,6 +12,8 @@ pub mod face_instances;
 pub mod input;
 pub mod local_chunk_source;
 pub mod query_config;
+pub mod render_band_scheduler;
+pub mod render_frame_codec;
 pub mod section_locator;
 pub mod surface_mesh;
 pub mod surfel_cloud;

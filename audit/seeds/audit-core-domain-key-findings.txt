@@ -1,0 +1,4 @@
+- SVO set_recursive: mask bit never cleared when writing air -> stale mask bits point at air leaves (wasted traversal, not correctness per GPU-side handling).
+- SVO collapse leaves dead nodes in arena -> unbounded arena growth over repeated edits.
+- path_tracer bake: O(V*R*S) ~ 1920 ops per solid voxel; 256x8x256 grid ~500M iterations (one-time bake, note only).
+- compress_svdag canonicalizes all 8 children regardless of child_mask (wasteful but safe).

@@ -1,0 +1,5 @@
+- resolve_hero_light_visibility has a cache keyed by ??? - verify eviction.
+- write_depth_tested_splats request_may_contribute / write_splat - verify per-splat cost and atomicity of depth writes.
+- raycast.rs raymarch_svo_single with traversal_step_budget; svo_segment_is_occluded at line ~444 - verify budget semantics.
+- update_atlas_rows - verify per-frame cost, row locking, copy semantics.
+- recursion in traverse_voxel_node bounded by SVO depth + max_virtual_depth - verify depth cap prevents stack overflow.

@@ -1,0 +1,4 @@
+- TOP: GLSL shade_voxel_hit loops over ALL lightCount lights per hit; each visibility eval (directSampleIsVisible) can cost up to 4096 steps x uNumChunks chunks -> O(pixels x lights x steps x chunks).
+- WebGPU SurfacePipeline: draw [0, light_count] passes ALL frame lights for every chunk -> per-fragment loop over all lights.
+- surface_webgl/draw.rs prepare_visible_draws (262-312): O(V x L) - for each visible mesh calls append_lights_reaching_bounds over ALL frame lights.
+- cluster_scene_lights append_lights_reaching_bounds O(L) per chunk -> O(C x L) per frame; LightSelectionCache previous_ids.contains() O(L^2)?

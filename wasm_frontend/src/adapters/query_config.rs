@@ -54,6 +54,20 @@ pub fn query_flag(query: &str, key: &str) -> bool {
     query_param(query, key) == Some("1")
 }
 
+/// Reads `key=<non-negative integer>`, matching the key case-insensitively.
+///
+/// These are typed by hand into an address bar, and silently ignoring
+/// `?renderworkers=` because it was not spelled `?renderWorkers=` makes a
+/// deliberate override look like it simply did nothing.
+pub fn query_count(query: &str, key: &str) -> Option<u32> {
+    query
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .and_then(|(_, value)| value.trim().parse::<u32>().ok())
+}
+
 /// Parses `window.location.search` (with or without the leading `?`).
 /// Unknown keys are ignored; malformed values fall back to defaults.
 pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationParams {
@@ -198,6 +212,33 @@ fn hash_seed(text: &str) -> u32 {
         h = h.wrapping_mul(0x0100_0193);
     }
     h
+}
+
+#[cfg(test)]
+mod query_count_tests {
+    use super::query_count;
+
+    #[test]
+    fn matches_a_key_however_it_was_capitalised() {
+        let query = "?seed=kkh&renderer=cpu&renderworkers=2";
+        assert_eq!(query_count(query, "renderWorkers"), Some(2));
+        assert_eq!(query_count(query, "RENDERWORKERS"), Some(2));
+    }
+
+    #[test]
+    fn does_not_match_a_different_key_that_shares_a_prefix() {
+        // `?workers=` sizes the generation pool and must not be mistaken
+        // for the render pool.
+        assert_eq!(query_count("?workers=32", "renderWorkers"), None);
+    }
+
+    #[test]
+    fn ignores_a_value_that_is_not_a_count() {
+        assert_eq!(query_count("?renderWorkers=lots", "renderWorkers"), None);
+        assert_eq!(query_count("?renderWorkers=-1", "renderWorkers"), None);
+        assert_eq!(query_count("?renderWorkers=", "renderWorkers"), None);
+        assert_eq!(query_count("?other=3", "renderWorkers"), None);
+    }
 }
 
 #[cfg(test)]

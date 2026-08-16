@@ -1,0 +1,5 @@
+- wfc3d solve_wfc: lowest_entropy_cell scans ALL N cells each iteration -> O(N^2) total.
+- build_octree: recursion visits every node, O(8^depth) worst case = O(N) for full grid, with PRUNE_OUTSIDE short-circuit.
+- compress_svdag canonicalize: HashMap<[CanonNode;8], u32> interning, 128-byte keys, recurses all 8 slots regardless of mask.
+- region_plan/layout.rs lay_out_suites: rounds x program x legs x anchors x sides candidates, each checked vs taken.iter().any() O(|taken|).
+- MAJOR: level_zero/generate.rs:331 RecursiveLevelWindow::around_chunk built on EVERY chunk generation inside generate_from_plans -> re-plans region window (incl red room commitment) per chunk; potentially O(regions x chunks) work.

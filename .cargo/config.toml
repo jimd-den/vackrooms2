@@ -1,0 +1,10 @@
+# Browser builds enable wasm SIMD128 unconditionally: it is supported by every
+# engine this app targets (Firefox 89+, Chrome 91+, Safari 16.4+) and needs no
+# cross-origin isolation, unlike threads/SharedArrayBuffer.
+#
+# The section is target-scoped on purpose. Native `cargo test` builds for the
+# host triple, never matches this key, and so keeps compiling the scalar
+# fallbacks in `cpu_splatter/rasterizer/simd_row_ops.rs` — which is what makes
+# the host test suite a meaningful check on the reference path.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

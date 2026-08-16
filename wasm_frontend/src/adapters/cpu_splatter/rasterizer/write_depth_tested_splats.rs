@@ -6,9 +6,10 @@
 //! coarse occlusion summary when requested.
 
 use super::super::surface_geometry::ProjectedSurfaceDepth;
+use super::simd_row_ops::{LANES, depth_pass_mask};
 
 /// Coarse hierarchical-Z tile edge in pixels.
-const COARSE_TILE: usize = 8;
+pub(super) const COARSE_TILE: usize = 8;
 
 /// One depth-tested square request in target coordinates.
 pub(super) struct SquareSplat {
@@ -55,9 +56,21 @@ pub(super) struct SplatWrite {
 /// Reusable CPU render target. Reciprocal depth is affine under perspective,
 /// so zero means uncovered and larger finite values are nearer. A zero coarse
 /// value likewise means that the tile is not yet fully covered.
+///
+/// A target may back either the whole framebuffer or one horizontal band of
+/// it. Splats are always submitted in absolute framebuffer coordinates and
+/// clipped against the full height, so a band clips a footprint exactly as
+/// the unpartitioned target would; only the rows it actually stores differ.
+/// `row_offset == 0 && height == total_height` is the unpartitioned case and
+/// behaves identically to the pre-band code.
 pub(super) struct DepthTestedSplatTarget {
     width: usize,
+    /// Rows this target stores.
     height: usize,
+    /// Rows in the whole framebuffer, which is what footprints clip against.
+    total_height: usize,
+    /// First absolute framebuffer row backed by this target's buffers.
+    row_offset: usize,
     rgba: Vec<u8>,
     reciprocal_depth: Vec<f32>,
     /// Smallest (farthest) reciprocal fine depth in each fully covered tile.
@@ -73,6 +86,8 @@ impl DepthTestedSplatTarget {
         let mut target = Self {
             width: 0,
             height: 0,
+            total_height: 0,
+            row_offset: 0,
             rgba: Vec::new(),
             reciprocal_depth: Vec::new(),
             coarse_reciprocal_depth: Vec::new(),
@@ -85,8 +100,23 @@ impl DepthTestedSplatTarget {
     }
 
     pub(super) fn resize(&mut self, width: usize, height: usize) {
+        let height = height.max(1);
+        self.resize_band(width, height, 0, height);
+    }
+
+    /// Resizes to back `band_height` rows starting at absolute `row_offset`
+    /// of a `total_height`-row framebuffer.
+    pub(super) fn resize_band(
+        &mut self,
+        width: usize,
+        total_height: usize,
+        row_offset: usize,
+        band_height: usize,
+    ) {
         self.width = width.max(1);
-        self.height = height.max(1);
+        self.total_height = total_height.max(1);
+        self.row_offset = row_offset.min(self.total_height - 1);
+        self.height = band_height.max(1).min(self.total_height - self.row_offset);
         self.rgba = vec![0; self.width * self.height * 4];
         self.reciprocal_depth = vec![0.0; self.width * self.height];
         self.coarse_width = self.width.div_ceil(COARSE_TILE);
@@ -99,8 +129,15 @@ impl DepthTestedSplatTarget {
         self.width
     }
 
+    /// Rows this target stores, which for a band is the band height.
     pub(super) fn height(&self) -> usize {
         self.height
+    }
+
+    /// Rows in the whole framebuffer. Culling and clipping use this, never
+    /// [`Self::height`], so a band clips exactly as the full target would.
+    pub(super) fn total_height(&self) -> usize {
+        self.total_height
     }
 
     pub(super) fn rgba(&self) -> &[u8] {
@@ -140,33 +177,71 @@ impl DepthTestedSplatTarget {
         let [x0, x1, y0, y1] = self.clipped_square_bounds(splat.center, splat.half);
         for y in y0..y1 {
             let row = y * self.width;
-            for x in x0..x1 {
-                let Some(reciprocal_depth) = splat
-                    .depth
-                    .reciprocal_at_pixel([x as f32 + 0.5, y as f32 + 0.5])
-                else {
-                    continue;
-                };
-                let stored = self.reciprocal_depth[row + x];
-                if reciprocal_depth > stored
-                    || (splat.equal_depth_wins && reciprocal_depth == stored)
-                {
+            // The plane is expressed in absolute framebuffer coordinates, so
+            // a band evaluates the same depth for a pixel as the whole-frame
+            // target would, even though it stores that pixel at a lower row.
+            let row_bias = splat.depth.row_bias(self.absolute_row(y) as f32 + 0.5);
+            let mut x = x0;
+            while x < x1 {
+                let lanes = LANES.min(x1 - x);
+                let (candidate, valid) = self.evaluate_lanes(splat, x, lanes, row_bias);
+                let stored = self.load_stored_lanes(row + x, lanes);
+                let mask = depth_pass_mask(stored, candidate, valid, splat.equal_depth_wins);
+                if mask[..lanes].iter().any(|passed| *passed) {
                     return true;
                 }
+                x += lanes;
             }
         }
         false
     }
 
+    /// Evaluates up to [`LANES`] consecutive candidate depths on one scanline.
+    ///
+    /// Lanes past `lanes` are filled with a rejected sentinel so a short tail
+    /// batch cannot read or write outside the requested span.
+    fn evaluate_lanes(
+        &self,
+        splat: &SquareSplat,
+        x: usize,
+        lanes: usize,
+        row_bias: f32,
+    ) -> ([f32; LANES], [bool; LANES]) {
+        let mut candidate = [0.0; LANES];
+        let mut valid = [false; LANES];
+        for lane in 0..lanes {
+            if let Some(depth) = splat
+                .depth
+                .reciprocal_at_row_pixel((x + lane) as f32 + 0.5, row_bias)
+            {
+                candidate[lane] = depth;
+                valid[lane] = true;
+            }
+        }
+        (candidate, valid)
+    }
+
+    fn load_stored_lanes(&self, idx: usize, lanes: usize) -> [f32; LANES] {
+        let mut stored = [0.0; LANES];
+        stored[..lanes].copy_from_slice(&self.reciprocal_depth[idx..idx + lanes]);
+        stored
+    }
+
     /// Fills a depth-tested square. `half` is its half-extent in pixels.
     ///
     /// The budget check lives inside the depth-passing branch: rejected
-    /// pixels cost no writes, while the first additional visible pixel after
-    /// the budget is exhausted stops the splat and reports exhaustion.
+    /// pixels cost no writes, while a visible pixel with no allowance left
+    /// is skipped and reported as exhaustion.
+    ///
+    /// `zone_budgets` is indexed by **absolute** coarse-tile row, so a zone's
+    /// allowance is the same value however the framebuffer is split into
+    /// bands. Exhausting one zone skips that zone's rows and lets the fill
+    /// continue into the next — the alternative, aborting the whole splat,
+    /// would make one zone's spending decide another zone's contents.
     pub(super) fn write_splat(
         &mut self,
         splat: SquareSplat,
-        write_budget: usize,
+        zone_budgets: &mut [usize],
         maintain_coarse: bool,
     ) -> SplatWrite {
         // Traversal normally subdivides large footprints. Camera-plane and
@@ -176,35 +251,53 @@ impl DepthTestedSplatTarget {
 
         let mut pixel_writes = 0;
         let mut budget_exhausted = false;
-        'pixels: for y in y0..y1 {
+        for y in y0..y1 {
             let row = y * self.width;
-            for x in x0..x1 {
-                let idx = row + x;
-                let Some(reciprocal_depth) = splat
-                    .depth
-                    .reciprocal_at_pixel([x as f32 + 0.5, y as f32 + 0.5])
-                else {
-                    continue;
-                };
-                let stored = self.reciprocal_depth[idx];
-                if reciprocal_depth > stored
-                    || (splat.equal_depth_wins && reciprocal_depth == stored)
-                {
-                    if pixel_writes >= write_budget {
-                        budget_exhausted = true;
-                        break 'pixels;
+            let absolute_row = self.absolute_row(y);
+            let zone = absolute_row / COARSE_TILE;
+            let Some(zone_budget) = zone_budgets.get(zone).copied() else {
+                continue;
+            };
+            if zone_budget == 0 {
+                budget_exhausted = true;
+                continue;
+            }
+            // The plane is expressed in absolute framebuffer coordinates, so
+            // a band evaluates the same depth for a pixel as the whole-frame
+            // target would, even though it stores that pixel at a lower row.
+            let row_bias = splat.depth.row_bias(absolute_row as f32 + 0.5);
+            let mut x = x0;
+            'row: while x < x1 {
+                let lanes = LANES.min(x1 - x);
+                let (candidate, valid) = self.evaluate_lanes(&splat, x, lanes, row_bias);
+                let stored = self.load_stored_lanes(row + x, lanes);
+                let mask = depth_pass_mask(stored, candidate, valid, splat.equal_depth_wins);
+
+                // Everything past the verdict stays scalar and in lane order,
+                // so the pixel a budget-exhausted splat tears at is exactly
+                // the one it tore at before batching.
+                for lane in 0..lanes {
+                    if !mask[lane] {
+                        continue;
                     }
-                    let was_uncovered = stored == 0.0;
-                    self.reciprocal_depth[idx] = reciprocal_depth;
+                    if zone_budgets[zone] == 0 {
+                        budget_exhausted = true;
+                        break 'row;
+                    }
+                    let idx = row + x + lane;
+                    let was_uncovered = stored[lane] == 0.0;
+                    self.reciprocal_depth[idx] = candidate[lane];
                     let rgba_index = idx * 4;
                     self.rgba[rgba_index] = splat.color[0];
                     self.rgba[rgba_index + 1] = splat.color[1];
                     self.rgba[rgba_index + 2] = splat.color[2];
                     pixel_writes += 1;
+                    zone_budgets[zone] -= 1;
                     if maintain_coarse && was_uncovered {
-                        self.record_first_coverage(x, y);
+                        self.record_first_coverage(x + lane, y);
                     }
                 }
+                x += lanes;
             }
         }
 
@@ -214,6 +307,13 @@ impl DepthTestedSplatTarget {
         }
     }
 
+    /// Clips a splat to this target, returning `[x0, x1, y0, y1]` where the
+    /// y pair is **local** to the stored rows and the x pair is absolute.
+    ///
+    /// Clipping happens against the full framebuffer height first, so a band
+    /// selects exactly the subset of the rows the unpartitioned target would
+    /// have written. Translating afterwards can leave an empty range, which
+    /// is the cheap early-out for a splat that misses this band entirely.
     fn clipped_square_bounds(&self, center: [f32; 2], half: f32) -> [usize; 4] {
         // Traversal normally subdivides to the configured maximum radius,
         // but camera-plane intersections and explicit budget fallbacks can
@@ -225,14 +325,26 @@ impl DepthTestedSplatTarget {
         let half = if half.is_finite() {
             half.max(0.0)
         } else {
-            self.width.max(self.height) as f32
+            self.width.max(self.total_height) as f32
         };
+        let y0_absolute = (center[1] - half).floor().max(0.0) as usize;
+        let y1_absolute = ((center[1] + half).ceil() as usize).min(self.total_height);
+        let y0 = y0_absolute.max(self.row_offset) - self.row_offset;
+        let y1 = y1_absolute
+            .min(self.row_offset + self.height)
+            .saturating_sub(self.row_offset);
         [
             (center[0] - half).floor().max(0.0) as usize,
             ((center[0] + half).ceil() as usize).min(self.width),
-            (center[1] - half).floor().max(0.0) as usize,
-            ((center[1] + half).ceil() as usize).min(self.height),
+            y0.min(y1),
+            y1,
         ]
+    }
+
+    /// Absolute framebuffer row of a locally-indexed row, for the coarse
+    /// bookkeeping that reports in band-local space.
+    fn absolute_row(&self, local_row: usize) -> usize {
+        self.row_offset + local_row
     }
 
     /// True only when every coarse tile under the screen rect is fully
@@ -261,10 +373,28 @@ impl DepthTestedSplatTarget {
             ((value.ceil().max(0.0) as usize).saturating_sub(1) / COARSE_TILE)
                 .min(tiles.saturating_sub(1))
         };
+        // Rows arrive absolute; this target only stores its own band. A
+        // footprint reaching past the band covers tiles this target cannot
+        // see, and answering from the visible half could claim an occlusion
+        // the whole-frame target would not — so decline. When the footprint
+        // does fit, the band holds exactly the tiles the unpartitioned
+        // target would have examined, and answers identically.
+        // Rows outside the *framebuffer* are still fine to clamp, exactly as
+        // an unpartitioned target does; only rows that exist in a sibling
+        // band are the problem.
+        let top = (center[1] - half_extent[1]).floor();
+        let bottom = center[1] + half_extent[1];
+        let row_end = self.row_offset + self.height;
+        if (self.row_offset > 0 && top < self.row_offset as f32)
+            || (row_end < self.total_height && bottom > row_end as f32)
+        {
+            return false;
+        }
         let x0 = lower_tile((center[0] - half_extent[0]).floor(), self.coarse_width);
         let x1 = upper_tile(center[0] + half_extent[0], self.coarse_width);
-        let y0 = lower_tile((center[1] - half_extent[1]).floor(), self.coarse_height);
-        let y1 = upper_tile(center[1] + half_extent[1], self.coarse_height);
+        let row_offset = self.row_offset as f32;
+        let y0 = lower_tile(top - row_offset, self.coarse_height);
+        let y1 = upper_tile(bottom - row_offset, self.coarse_height);
         if !z_near.is_finite() || z_near <= 0.0 {
             return false;
         }
@@ -322,13 +452,20 @@ impl DepthTestedSplatTarget {
 mod tests {
     use super::{DepthTestedSplatTarget, SquareSplat};
 
+    /// Zone allowances large enough never to bind, for the tests that are
+    /// about depth and coverage rather than about budgeting.
+    fn unlimited() -> Vec<usize> {
+        vec![usize::MAX; 64]
+    }
+
+
     #[test]
     fn a_partially_covered_tile_never_occludes_a_subtree() {
         let mut target = DepthTestedSplatTarget::new(8, 8);
         target.clear([0; 3]);
         target.write_splat(
             SquareSplat::new(1.0, 1.0, 0.4, 1.0, [255; 3]),
-            usize::MAX,
+            &mut unlimited(),
             true,
         );
 
@@ -344,7 +481,7 @@ mod tests {
         target.clear([0; 3]);
         target.write_splat(
             SquareSplat::new(4.0, 4.0, 4.0, 1.0, [255; 3]),
-            usize::MAX,
+            &mut unlimited(),
             true,
         );
 
@@ -358,7 +495,7 @@ mod tests {
         // The bottom-right coarse tile is only 2x2, not 8x8.
         target.write_splat(
             SquareSplat::new(9.0, 9.0, 1.0, 1.0, [255; 3]),
-            usize::MAX,
+            &mut unlimited(),
             true,
         );
 
@@ -371,12 +508,12 @@ mod tests {
         target.clear([0; 3]);
         target.write_splat(
             SquareSplat::new(4.0, 4.0, 4.0, 5.0, [100; 3]),
-            usize::MAX,
+            &mut unlimited(),
             true,
         );
         target.write_splat(
             SquareSplat::new(4.0, 4.0, 4.0, 1.0, [255; 3]),
-            usize::MAX,
+            &mut unlimited(),
             true,
         );
 
@@ -393,7 +530,7 @@ mod tests {
         target.clear([0; 3]);
         target.write_splat(
             SquareSplat::new(4.0, 4.0, 4.0, 1.0, [255; 3]),
-            usize::MAX,
+            &mut unlimited(),
             true,
         );
 
@@ -405,10 +542,18 @@ mod tests {
     fn pixel_write_budget_stops_inside_the_splat_loop() {
         let mut target = DepthTestedSplatTarget::new(8, 8);
         target.clear([0; 3]);
-        let write = target.write_splat(SquareSplat::new(4.0, 4.0, 4.0, 1.0, [255; 3]), 7, true);
+        // An 8x8 target is exactly one zone, so a single zone allowance
+        // reproduces the frame-wide cap this test has always pinned.
+        let mut budgets = vec![7];
+        let write = target.write_splat(
+            SquareSplat::new(4.0, 4.0, 4.0, 1.0, [255; 3]),
+            &mut budgets,
+            true,
+        );
 
         assert_eq!(write.pixel_writes, 7);
         assert!(write.budget_exhausted);
+        assert_eq!(budgets[0], 0, "the allowance is spent, not merely capped");
         assert_eq!(
             target
                 .rgba()
@@ -425,7 +570,7 @@ mod tests {
         target.clear([0; 3]);
         target.write_splat(
             SquareSplat::new(4.0, 4.0, 4.0, 2.0, [20; 3]),
-            usize::MAX,
+            &mut unlimited(),
             true,
         );
 
@@ -442,7 +587,7 @@ mod tests {
 
         let write = target.write_splat(
             SquareSplat::new(48.0, 4.0, 48.0, 1.0, [255; 3]),
-            usize::MAX,
+            &mut unlimited(),
             false,
         );
 
@@ -458,34 +603,34 @@ mod tests {
 
         assert_eq!(
             target
-                .write_splat(ordinary(2.0, [20, 0, 0]), usize::MAX, false)
+                .write_splat(ordinary(2.0, [20, 0, 0]), &mut unlimited(), false)
                 .pixel_writes,
             4
         );
         assert_eq!(
             target
-                .write_splat(ordinary(2.0, [0, 20, 0]), usize::MAX, false)
+                .write_splat(ordinary(2.0, [0, 20, 0]), &mut unlimited(), false)
                 .pixel_writes,
             0,
             "ordinary equal-depth reconstruction keeps the existing material"
         );
         assert_eq!(
             target
-                .write_splat(emitter(2.0, [255, 240, 200]), usize::MAX, false)
+                .write_splat(emitter(2.0, [255, 240, 200]), &mut unlimited(), false)
                 .pixel_writes,
             4,
             "an emitter owns its exact coplanar material tie"
         );
         assert_eq!(
             target
-                .write_splat(emitter(3.0, [0, 0, 255]), usize::MAX, false)
+                .write_splat(emitter(3.0, [0, 0, 255]), &mut unlimited(), false)
                 .pixel_writes,
             0,
             "priority never lets farther geometry pass"
         );
         assert_eq!(
             target
-                .write_splat(ordinary(1.0, [255, 0, 0]), usize::MAX, false)
+                .write_splat(ordinary(1.0, [255, 0, 0]), &mut unlimited(), false)
                 .pixel_writes,
             4,
             "ordinary nearer geometry still wins"

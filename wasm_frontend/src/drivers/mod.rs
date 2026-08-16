@@ -13,6 +13,8 @@ pub mod gl;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod shaders;
 #[cfg(target_arch = "wasm32")]
+pub mod render_worker_pool;
+#[cfg(target_arch = "wasm32")]
 pub mod splat_webgl;
 #[cfg(target_arch = "wasm32")]
 pub mod surface_webgl;

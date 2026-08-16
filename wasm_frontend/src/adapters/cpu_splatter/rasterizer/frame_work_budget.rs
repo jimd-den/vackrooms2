@@ -70,6 +70,24 @@ impl FrameWorkBudget {
         }
     }
 
+    /// Narrows this frame envelope to one chunk's pre-computed allowance.
+    ///
+    /// Traversal keeps consulting the same predicates; only what they are
+    /// measured against changes, from "everything drawn so far this frame"
+    /// to "this chunk". That is what removes the order dependence — a chunk
+    /// can no longer be starved by whatever was drawn before it.
+    pub(super) fn for_chunk(self, node_visit_limit: usize, pixel_write_limit: usize) -> Self {
+        let node_visit_limit = node_visit_limit.min(self.node_visit_limit);
+        Self {
+            node_visit_limit,
+            soft_node_visit_limit: ((node_visit_limit as f64 * FOCUS_RESERVE_FRACTION).floor()
+                as usize)
+                .max(1)
+                .min(node_visit_limit),
+            pixel_write_limit: pixel_write_limit.min(self.pixel_write_limit),
+        }
+    }
+
     pub(super) const fn node_visit_limit(self) -> usize {
         self.node_visit_limit
     }
@@ -94,9 +112,6 @@ impl FrameWorkBudget {
         pixel_writes >= self.pixel_write_limit
     }
 
-    pub(super) const fn remaining_pixel_writes(self, pixel_writes: usize) -> usize {
-        self.pixel_write_limit.saturating_sub(pixel_writes)
-    }
 }
 
 impl Default for FrameWorkBudget {

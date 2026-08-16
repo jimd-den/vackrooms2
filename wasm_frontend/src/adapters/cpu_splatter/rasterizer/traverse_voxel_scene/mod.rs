@@ -107,8 +107,11 @@ impl SoftwareRasterizer {
         // decode, lighting, or a secondary visibility ray. In particular,
         // reaching the pixel-write cap must not leave an invisible tail of
         // expensive shading work in the recursion.
-        if self.frame_work_budget.writes_exhausted(self.pixel_writes)
-            || self.frame_work_budget.nodes_exhausted(self.visited_nodes)
+        // The write test is per-zone, not against a running total: a total
+        // would be the sum of whatever zones this band happens to own, so a
+        // taller band would traverse further than a short one and the frame
+        // would depend on how it was partitioned.
+        if self.band_zone_budgets_spent() || self.frame_work_budget.nodes_exhausted(self.visited_nodes)
         {
             self.budget_exhausted = true;
             return;

@@ -1,0 +1,4 @@
+- prepare_frame_lighting select_scene_lights: O(L) HashMap dedup + O(L log L) sort, allocations PER FRAME.
+- streaming.rs desired_origins_in_view: O(N log N) per call with per-frame Vec alloc, N=(2R+1)^2 ~1089 for R=16.
+- CRITICAL CANDIDATE: RecordKey has NO level field, but worker archive identity includes config.level -> level switch at runtime can fetch chunks from wrong level's archive (cross-level staleness).
+- src/main.rs thread-per-connection HTTP server (std::thread::spawn) - unbounded threads under load, dev server so Medium/Low.

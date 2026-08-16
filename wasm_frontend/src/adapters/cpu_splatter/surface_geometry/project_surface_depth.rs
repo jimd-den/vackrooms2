@@ -35,18 +35,35 @@ impl ProjectedSurfaceDepth {
         self.representative_depth
     }
 
-    /// Exact positive reciprocal camera depth at a target-space sample.
-    /// Fine depth comparison consumes this directly, avoiding a division for
-    /// every candidate pixel.
-    pub(crate) fn reciprocal_at_pixel(self, pixel: [f32; 2]) -> Option<f32> {
-        let inverse_depth = self.reciprocal_depth[0].mul_add(
-            pixel[0],
-            self.reciprocal_depth[1].mul_add(pixel[1], self.reciprocal_depth[2]),
-        );
+    /// The `by + c` half of the plane, which is constant along a scanline.
+    ///
+    /// Splat fills walk x fastest, so hoisting this out of the inner loop
+    /// removes one `mul_add` per pixel. That matters more than it looks:
+    /// wasm has no FMA instruction, so `mul_add` lowers to a call into
+    /// libm's correctly-rounded `fmaf` rather than a single op.
+    pub(crate) fn row_bias(self, y: f32) -> f32 {
+        self.reciprocal_depth[1].mul_add(y, self.reciprocal_depth[2])
+    }
+
+    /// Exact positive reciprocal camera depth at a sample whose row bias has
+    /// already been evaluated by [`Self::row_bias`].
+    pub(crate) fn reciprocal_at_row_pixel(self, x: f32, row_bias: f32) -> Option<f32> {
+        let inverse_depth = self.reciprocal_depth[0].mul_add(x, row_bias);
         if !inverse_depth.is_finite() || inverse_depth <= 0.0 {
             return None;
         }
         Some(inverse_depth)
+    }
+
+    /// Exact positive reciprocal camera depth at a target-space sample.
+    ///
+    /// The fill loops walk scanlines and use the hoisted pair above; this
+    /// whole-sample form remains for tests and one-off queries. It is defined
+    /// through that pair so the two cannot drift into computing subtly
+    /// different floats.
+    #[cfg(test)]
+    pub(crate) fn reciprocal_at_pixel(self, pixel: [f32; 2]) -> Option<f32> {
+        self.reciprocal_at_row_pixel(pixel[0], self.row_bias(pixel[1]))
     }
 }
 

@@ -60,6 +60,45 @@ export function get_large_voxel_blueprint_svg(seed: number, rx_val: number, rz_v
  */
 export function render_toggle_enabled(name: string): boolean | undefined;
 
+/**
+ * First framebuffer row this worker's band occupies, so the compositor
+ * knows where to draw the bitmap it sends back.
+ */
+export function render_worker_band_row_offset(): number;
+
+/**
+ * Draws one frame and returns this band's rows as RGBA8, top-down.
+ *
+ * An undecodable request returns an empty buffer: the JS side skips the
+ * reply, the scheduler never sees that frame complete, and the previous
+ * complete frame stays on screen. One bad message costs one frame, not
+ * the worker.
+ */
+export function render_worker_draw_band(request: Uint8Array): Uint8Array;
+
+/**
+ * Prepares this worker to draw band `band_index` of `band_count`.
+ */
+export function render_worker_init(band_index: number, band_count: number, width: number, height: number): void;
+
+/**
+ * This band's telemetry, packed for the HUD's cross-worker sum.
+ */
+export function render_worker_telemetry(): Uint32Array;
+
+/**
+ * Replaces this worker's whole atlas copy.
+ */
+export function render_worker_upload_atlas(texels: Uint32Array): void;
+
+/**
+ * Applies one incremental atlas row block, mirroring the main thread's
+ * `upload_atlas_rows`. Returns false if the block failed validation, in
+ * which case the caller should resend the whole atlas rather than let
+ * this worker drift.
+ */
+export function render_worker_upload_atlas_rows(first_row: number, texels: Uint32Array): boolean;
+
 export function set_anomaly_debug(enabled: boolean): void;
 
 export function set_assisted_consumption(enabled: boolean): void;
@@ -115,6 +154,8 @@ export function set_render_scale(scale: number): void;
  */
 export function set_render_toggle(name: string, enabled: boolean): void;
 
+export function set_render_worker_count(count: number): void;
+
 /**
  * Composition root. Runs automatically when the wasm module is
  * instantiated by `static/index.html`.
@@ -137,8 +178,17 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly render_worker_band_row_offset: () => number;
+    readonly render_worker_draw_band: (a: number, b: number) => [number, number];
+    readonly render_worker_init: (a: number, b: number, c: number, d: number) => void;
+    readonly render_worker_telemetry: () => [number, number];
+    readonly render_worker_upload_atlas: (a: number, b: number) => void;
+    readonly render_worker_upload_atlas_rows: (a: number, b: number, c: number) => number;
     readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly worker_init: (a: number, b: number, c: number) => void;
+    readonly set_fov: (a: number) => void;
+    readonly boot_world: () => void;
+    readonly start: () => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -161,10 +211,8 @@ export interface InitOutput {
     readonly set_cpu_virtual_depth: (a: number) => void;
     readonly set_cpu_max_draw_distance: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
+    readonly set_render_worker_count: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
-    readonly set_fov: (a: number) => void;
-    readonly boot_world: () => void;
-    readonly start: () => void;
     readonly wasm_bindgen__convert__closures_____invoke__h537f5492ae6045f0: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h2e918718a0f885a1: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h0d9e5b7dd5e62e9d: (a: number, b: number, c: any) => [number, number];

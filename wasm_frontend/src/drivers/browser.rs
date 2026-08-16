@@ -494,6 +494,16 @@ pub async fn boot() -> Result<(), JsValue> {
     // Renderer optimization switchboard (?rt_<name>=0|1); see
     // application::render_settings for the catalog of switches.
     crate::init_render_toggles(&query);
+    // ?renderWorkers=N caps the CPU splatter's render worker pool. Parsed
+    // here, before any renderer is built, because the pool is created with
+    // the renderer and cannot be resized afterwards.
+    // `0` and `1` both mean "draw on this thread"; anything higher is a
+    // pool size. Absent means choose from `hardwareConcurrency`.
+    if let Some(count) =
+        crate::adapters::query_config::query_count(&query, "renderWorkers")
+    {
+        crate::set_render_worker_count(count.max(1));
+    }
     // This resolver is also called inside every worker. Keeping the actual
     // GeneratorConfig behind one adapter prevents a rejected voxel override
     // from producing different worlds on the main and worker threads.

@@ -879,3 +879,277 @@ fn flashlight_is_blocked_by_a_wall() {
     assert!(hit.is_some(), "near wall must occlude");
     assert!(hit.unwrap().t < 2.0, "the NEAR wall is the occluder");
 }
+
+// ---------------------------------------------------------------------------
+// Band partitioning
+//
+// Bands are how the renderer is split across threads, so the whole design
+// rests on one property: how many bands a frame is cut into must not change
+// the frame. These tests are that property, checked on the pixels.
+//
+// They run with hierarchical-Z off, and that is a real caveat rather than a
+// convenience. HZ culls a node when every coarse tile under its footprint is
+// already fully covered and nearer. A band only stores its own rows, so for a
+// footprint straddling a band edge it cannot answer and declines to cull —
+// while the unpartitioned target, holding every row, still culls. Bands
+// therefore draw a few extra splats that the fine depth test then rejects.
+// Those splats would be invisible were it not for the coplanar tie rule
+// (`equal_depth_wins`), which makes *which* splats were submitted, and in
+// what order, observable in the final colour.
+//
+// So: exact across band counts with HZ off, and conservative-but-not-
+// identical with HZ on. `hierarchical_z_culls_more_when_unpartitioned` below
+// pins that difference so it cannot drift unnoticed.
+// ---------------------------------------------------------------------------
+
+/// A denser scene than the single-voxel fixtures: a filled 8^3 block, so
+/// splats actually overlap, occlude each other, and span several bands.
+fn dense_block_atlas() -> (Vec<u32>, u32) {
+    let mut svo = SparseVoxelOctree::new(3, 8.0);
+    for z in 0..8 {
+        for y in 0..8 {
+            for x in 0..8 {
+                // A hollow shell leaves interior surfaces to depth-test
+                // against, rather than one flat exterior face.
+                let shell = x == 0 || y == 0 || z == 0 || x == 7 || y == 7 || z == 7;
+                if shell || (x + y + z) % 3 == 0 {
+                    let colour = 0x20_40_80 + (x * 16 + y * 8 + z) as u32;
+                    svo.set(x, y, z, 1, colour, [((x + y) % 16) as u8; 3], 0);
+                }
+            }
+        }
+    }
+    let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
+    (gpu.texel_data, svo.root as u32)
+}
+
+fn band_equivalence_chunks(root: u32) -> [ChunkDraw; 2] {
+    [
+        ChunkDraw {
+            origin: [0.0, 0.0, 0.0],
+            root_index: root as i32,
+            world_size: 8.0,
+            voxel_size: 1.0,
+            svo_depth: 3,
+        },
+        ChunkDraw {
+            origin: [8.0, 0.0, 0.0],
+            root_index: root as i32,
+            world_size: 8.0,
+            voxel_size: 1.0,
+            svo_depth: 3,
+        },
+    ]
+}
+
+/// Renders one scene at `band_count` and returns the composed framebuffer.
+fn render_in_bands(
+    band_count: usize,
+    width: usize,
+    height: usize,
+    settings: CpuRenderSettings,
+    frame: &FrameParams,
+    atlas: &[u32],
+    chunks: &[ChunkDraw],
+) -> Vec<u8> {
+    let mut r = SoftwareRasterizer::new(width, height);
+    r.settings = settings;
+    r.set_band_count(band_count);
+    debug_assert!(
+        !r.settings.toggles.hierarchical_z,
+        "band equivalence is exact only without hierarchical-Z; see the module note"
+    );
+    r.upload_atlas(atlas);
+    r.draw(frame, chunks);
+    let mut composed = Vec::new();
+    r.compose_into(&mut composed);
+    composed
+}
+
+#[test]
+fn band_count_does_not_change_the_composited_frame() {
+    let (atlas, root) = dense_block_atlas();
+    let chunks = band_equivalence_chunks(root);
+    let frame = frame_at([4.0, 4.0, -6.0], std::f32::consts::PI);
+    let mut settings = CpuRenderSettings::default();
+    settings.toggles.hierarchical_z = false;
+
+    let reference = render_in_bands(1, 96, 64, settings, &frame, &atlas, &chunks);
+    assert!(
+        reference.iter().any(|byte| *byte != reference[0]),
+        "fixture must actually draw something for this test to mean anything"
+    );
+
+    // 3 and 7 do not divide 64/8 evenly, and 16 asks for more bands than
+    // there are coarse-tile rows, so the layout has to clamp.
+    for band_count in [2, 3, 4, 5, 7, 8, 16] {
+        let banded = render_in_bands(band_count, 96, 64, settings, &frame, &atlas, &chunks);
+        assert_eq!(
+            banded.len(),
+            reference.len(),
+            "{band_count} bands changed the framebuffer size"
+        );
+        let first_difference = banded
+            .iter()
+            .zip(reference.iter())
+            .position(|(a, b)| a != b);
+        assert_eq!(
+            first_difference, None,
+            "{band_count} bands diverged from the single-band reference at byte {first_difference:?}"
+        );
+    }
+}
+
+#[test]
+fn band_count_does_not_change_a_hero_shadowed_frame() {
+    let (atlas, root) = dense_block_atlas();
+    let chunks = band_equivalence_chunks(root);
+    let mut frame = frame_at([4.0, 4.0, -6.0], std::f32::consts::PI);
+    frame.scene_lights = vec![LightSource {
+        id: 1,
+        position: [8.0, 7.0, 4.0],
+        half_size: [2.0, 2.0],
+        color: [1.0, 0.9, 0.7],
+        radius: 24.0,
+        intensity: 12.0,
+        kind: LightKind::CeilingPanel,
+        flicker_mode: 0,
+        enabled: true,
+    }];
+    let mut settings = CpuRenderSettings::default();
+    settings.toggles.hierarchical_z = false;
+    settings.shadows = CpuShadowMode::Hero;
+
+    let reference = render_in_bands(1, 96, 64, settings, &frame, &atlas, &chunks);
+    for band_count in [2, 3, 5, 8] {
+        assert_eq!(
+            render_in_bands(band_count, 96, 64, settings, &frame, &atlas, &chunks),
+            reference,
+            "{band_count} bands changed hero-shadowed shading"
+        );
+    }
+}
+
+#[test]
+fn band_count_does_not_change_a_write_starved_frame() {
+    let (atlas, root) = dense_block_atlas();
+    let chunks = band_equivalence_chunks(root);
+    let frame = frame_at([4.0, 4.0, -6.0], std::f32::consts::PI);
+
+    // Squeeze the pixel-write envelope hard enough that zones actually run
+    // out mid-frame. This is the regime the old running counter made
+    // order-dependent, so it is the one worth pinning.
+    let mut settings = CpuRenderSettings::default();
+    settings.toggles.hierarchical_z = false;
+    settings.max_splat_radius_px = 32.0;
+    settings.lod_cutoff_px = 8.0;
+
+    let reference = render_in_bands(1, 96, 64, settings, &frame, &atlas, &chunks);
+    for band_count in [2, 3, 4, 8] {
+        assert_eq!(
+            render_in_bands(band_count, 96, 64, settings, &frame, &atlas, &chunks),
+            reference,
+            "{band_count} bands changed a write-starved frame"
+        );
+    }
+}
+
+// The front-to-back toggle is intentionally not tested here. It re-sorts the
+// chunk list, and the property that matters — that sorting cannot move work
+// between chunks — is a property of the allowance split, tested directly in
+// `frame_work_plan` (`a_chunks_allowance_does_not_depend_on_slice_order`).
+// The image itself is *not* order-neutral and never was: front-to-back exists
+// precisely so near geometry rejects far writes, and coplanar splats from
+// touching chunks resolve by first-writer-wins.
+
+#[test]
+fn one_band_composes_to_exactly_the_borrowed_framebuffer() {
+    let (atlas, root) = dense_block_atlas();
+    let chunks = band_equivalence_chunks(root);
+    let mut r = SoftwareRasterizer::new(96, 64);
+    r.upload_atlas(&atlas);
+    r.draw(&frame_at([4.0, 4.0, -6.0], std::f32::consts::PI), &chunks);
+
+    let mut composed = Vec::new();
+    r.compose_into(&mut composed);
+    assert_eq!(composed, r.framebuffer(), "the unpartitioned path must not copy");
+}
+
+
+#[test]
+fn hierarchical_z_culls_more_when_unpartitioned() {
+    // The one place band count is observable, pinned deliberately so it
+    // cannot drift into something larger unnoticed. A band declines to cull
+    // footprints crossing its edge, so it submits *more* splats than the
+    // unpartitioned target — never fewer, and never fewer pixel writes.
+    let (atlas, root) = dense_block_atlas();
+    let chunks = band_equivalence_chunks(root);
+    let frame = frame_at([4.0, 4.0, -6.0], std::f32::consts::PI);
+
+    let telemetry_at = |bands: usize| {
+        let mut r = SoftwareRasterizer::new(96, 64);
+        r.set_band_count(bands);
+        r.upload_atlas(&atlas);
+        r.draw(&frame, &chunks);
+        r.telemetry()
+    };
+
+    let whole = telemetry_at(1);
+    let banded = telemetry_at(4);
+    assert!(
+        banded.splat_count > whole.splat_count,
+        "bands cull less, so they must submit at least as many splats: {} vs {}",
+        banded.splat_count,
+        whole.splat_count
+    );
+    assert!(
+        banded.pixel_writes >= whole.pixel_writes,
+        "the extra splats may add coverage but must never remove it: {} vs {}",
+        banded.pixel_writes,
+        whole.pixel_writes
+    );
+}
+
+
+#[test]
+fn separate_rasterizers_each_owning_one_band_rebuild_the_whole_frame() {
+    // This is the worker pool's correctness argument, checked without a
+    // browser. Each rasterizer here stands for one worker: its own atlas,
+    // its own hero-visibility cache, no shared state with the others — the
+    // real no-SharedArrayBuffer situation. Composited, they must reproduce
+    // the frame a single thread draws.
+    let (atlas, root) = dense_block_atlas();
+    let chunks = band_equivalence_chunks(root);
+    let frame = frame_at([4.0, 4.0, -6.0], std::f32::consts::PI);
+    let mut settings = CpuRenderSettings::default();
+    settings.toggles.hierarchical_z = false;
+
+    let reference = render_in_bands(1, 96, 64, settings, &frame, &atlas, &chunks);
+
+    for band_count in [2usize, 3, 4, 5] {
+        let stride = 96 * 4;
+        let mut composed = vec![0u8; stride * 64];
+        for band_index in 0..band_count {
+            let mut worker = SoftwareRasterizer::new(96, 64);
+            worker.settings = settings;
+            worker.set_band_assignment(band_count, band_index);
+            worker.upload_atlas(&atlas);
+            worker.draw(&frame, &chunks);
+
+            let mut bands = worker.bands_rgba();
+            let (row_offset, rgba) = bands.next().expect("its assigned band");
+            assert!(
+                bands.next().is_none(),
+                "an assigned worker must expose exactly one band"
+            );
+            composed[row_offset * stride..row_offset * stride + rgba.len()]
+                .copy_from_slice(rgba);
+        }
+        assert_eq!(
+            composed, reference,
+            "{band_count} independent single-band rasterizers did not \
+             reconstruct the single-threaded frame"
+        );
+    }
+}
+

@@ -14,12 +14,15 @@
 //! Color remains in [`super::shading`], secondary rays in
 //! [`super::raycast`], and per-frame camera math in [`super::camera`].
 
+mod band_layout;
 mod draw_visible_flare_cores;
 mod frame_work_budget;
+mod frame_work_plan;
 mod project_aabb_footprint;
 mod render_cpu_frame;
 mod resolve_hero_light_visibility;
 mod select_lights_for_chunk;
+mod simd_row_ops;
 mod traverse_voxel_scene;
 mod write_depth_tested_splats;
 
@@ -32,9 +35,11 @@ use super::settings::CpuRenderSettings;
 use super::shading::{self, FrameLighting, SplatSurface};
 use super::surface_geometry::{ProjectedSurfaceDepth, SurfaceExposure};
 use super::update_atlas_rows::update_prepared_atlas_rows;
+use band_layout::{BandLayout, partition_bands};
 use frame_work_budget::FrameWorkBudget;
+use frame_work_plan::FrameWorkPlan;
 use resolve_hero_light_visibility::HeroLightVisibilityCache;
-use write_depth_tested_splats::{DepthTestedSplatTarget, SquareSplat};
+use write_depth_tested_splats::{COARSE_TILE, DepthTestedSplatTarget, SquareSplat};
 
 /// Per-frame counters for the HUD; tests also use them to prove termination
 /// and safety-cap behavior.
@@ -55,7 +60,33 @@ pub struct SoftwareRasterizerTelemetry {
 /// Persistent state for the CPU renderer. The struct is intentionally the
 /// allocation-owning facade; rendering algorithms live in focused modules.
 pub struct SoftwareRasterizer {
+    /// The band currently being rendered. Between bands its storage is
+    /// swapped out to `band_targets`, so every operation below sees one
+    /// ordinary target and needs no knowledge of the partitioning.
     target: DepthTestedSplatTarget,
+    /// Parked storage for the bands that are not currently active. Empty
+    /// when the frame is rendered unpartitioned.
+    band_targets: Vec<DepthTestedSplatTarget>,
+    bands: Vec<BandLayout>,
+    /// Requested band count. One reproduces the unpartitioned renderer.
+    band_count: usize,
+    /// Remaining pixel writes for the current chunk, indexed by absolute
+    /// coarse-tile row. Sized once per frame and refilled per chunk.
+    zone_budgets: Vec<usize>,
+    /// Zones owned by the band being rendered, as `first..first + count`.
+    band_zones: (usize, usize),
+    /// Which band is currently swapped into `target`.
+    active_band: usize,
+    /// When set, only this band is allocated and drawn; the others exist as
+    /// geometry alone. That is how a render worker owns one slice of a frame
+    /// it never holds in full — it still needs the whole partition, because
+    /// zone allowances and clipping are defined against the whole frame.
+    assigned_band: Option<usize>,
+    /// Hero shadow rays this chunk may trace, and how many it has traced.
+    /// Replaces the old frame-global pixel-write threshold, which made a
+    /// splat's shading depend on how much had already been drawn.
+    shadow_ray_budget: usize,
+    shadow_rays_traced: usize,
     /// SVO atlas texels: four `u32`s per node.
     atlas: Vec<u32>,
     mips: Vec<MipNode>,
@@ -71,7 +102,13 @@ pub struct SoftwareRasterizer {
     pub max_virtual_depth_reached: usize,
     pub splat_count: usize,
     pub pixel_writes: usize,
+    /// The chunk currently being traversed. Narrowed from `frame_envelope`
+    /// once per chunk, never from itself — deriving it from the previous
+    /// chunk's value would ratchet the allowance down as a frame progressed
+    /// and reintroduce exactly the order dependence bands must not have.
     frame_work_budget: FrameWorkBudget,
+    /// The whole frame's envelope, fixed for the frame and reported to the HUD.
+    frame_envelope: FrameWorkBudget,
 
     pub settings: CpuRenderSettings,
     hero_light_visibility: HeroLightVisibilityCache,
@@ -83,8 +120,17 @@ impl SoftwareRasterizer {
     pub fn new(width: usize, height: usize) -> Self {
         let settings = CpuRenderSettings::default();
         let frame_work_budget = FrameWorkBudget::for_target(&settings, width, height);
-        Self {
+        let mut rasterizer = Self {
             target: DepthTestedSplatTarget::new(width, height),
+            band_targets: Vec::new(),
+            bands: Vec::new(),
+            band_count: 1,
+            zone_budgets: Vec::new(),
+            band_zones: (0, 0),
+            active_band: 0,
+            assigned_band: None,
+            shadow_ray_budget: 0,
+            shadow_rays_traced: 0,
             atlas: Vec::new(),
             mips: Vec::new(),
             mip_update_scratch: Vec::new(),
@@ -95,46 +141,174 @@ impl SoftwareRasterizer {
             splat_count: 0,
             pixel_writes: 0,
             frame_work_budget,
+            frame_envelope: frame_work_budget,
             settings,
             hero_light_visibility: HeroLightVisibilityCache::new(),
             environment: Environment::default(),
-        }
+        };
+        // The band layout is the single source of truth for the frame's
+        // geometry, so build it here rather than leaving `new` and `resize`
+        // to agree by coincidence.
+        rasterizer.rebuild_bands(width.max(1), height.max(1));
+        rasterizer
     }
 
     pub fn resize(&mut self, width: usize, height: usize) {
-        self.target.resize(width, height);
+        self.rebuild_bands(width.max(1), height.max(1));
+    }
+
+    /// Splits subsequent frames across `band_count` horizontal bands.
+    ///
+    /// Bands are the unit of parallelism, but they are also meaningful with
+    /// one thread: rendering N bands sequentially must produce exactly the
+    /// frame that one band does, which is what the equivalence test pins.
+    pub fn set_band_count(&mut self, band_count: usize) {
+        let band_count = band_count.max(1);
+        if band_count == self.band_count {
+            return;
+        }
+        self.band_count = band_count;
+        self.assigned_band = None;
+        self.rebuild_bands(self.width(), self.total_height());
+    }
+
+    /// Renders only `band_index` of a `band_count`-way partition.
+    ///
+    /// For a render worker, which draws one slice of a frame that lives
+    /// nowhere in its address space. The unassigned bands are still part of
+    /// the partition — allowances and clipping are defined against the whole
+    /// framebuffer — they just carry no pixels here.
+    pub fn set_band_assignment(&mut self, band_count: usize, band_index: usize) {
+        self.band_count = band_count.max(1);
+        let bands = partition_bands(self.total_height(), self.band_count);
+        self.assigned_band = Some(band_index.min(bands.len() - 1));
+        self.rebuild_bands(self.width(), self.total_height());
+    }
+
+    /// The bands this rasterizer actually draws, in frame order.
+    fn rendered_bands(&self) -> std::ops::Range<usize> {
+        match self.assigned_band {
+            Some(band) => band..band + 1,
+            None => 0..self.bands.len(),
+        }
+    }
+
+    fn rebuild_bands(&mut self, width: usize, total_height: usize) {
+        self.bands = partition_bands(total_height, self.band_count);
+        if let Some(assigned) = self.assigned_band {
+            self.assigned_band = Some(assigned.min(self.bands.len() - 1));
+        }
+        // Unbounded at rest. `begin_chunk` installs the real allowance for
+        // every chunk of a real frame; leaving zeros here would silently
+        // reject writes from the direct splat seams the shading tests use.
+        self.zone_budgets = vec![usize::MAX; total_height.div_ceil(COARSE_TILE)];
+        // A band this rasterizer will never draw still needs a slot, so the
+        // swap indices line up, but not the pixels — one row is enough to
+        // keep it a valid target.
+        let rows_for = |index: usize, band: BandLayout| match self.assigned_band {
+            Some(assigned) if assigned != index => 1,
+            _ => band.height,
+        };
+        // The first band lives in `target`; the rest are parked.
+        self.target.resize_band(
+            width,
+            total_height,
+            self.bands[0].row_offset,
+            rows_for(0, self.bands[0]),
+        );
+        self.band_zones = (0, self.zone_budgets.len());
+        self.active_band = 0;
+        self.band_targets = self.bands[1..]
+            .iter()
+            .enumerate()
+            .map(|(offset, band)| {
+                let mut target = DepthTestedSplatTarget::new(width, total_height);
+                target.resize_band(
+                    width,
+                    total_height,
+                    band.row_offset,
+                    rows_for(offset + 1, *band),
+                );
+                target
+            })
+            .collect();
     }
 
     pub fn width(&self) -> usize {
         self.target.width()
     }
 
+    /// Height of the whole framebuffer, not of the active band.
     pub fn height(&self) -> usize {
-        self.target.height()
+        self.total_height()
+    }
+
+    fn total_height(&self) -> usize {
+        self.bands
+            .last()
+            .map_or_else(|| self.target.height(), |band| band.row_end())
     }
 
     /// The finished frame as top-down RGBA8 rows.
+    ///
+    /// Contiguous when unpartitioned; otherwise the bands are concatenated
+    /// into a reusable buffer, since they own separate allocations. Callers
+    /// that can present per band should use [`Self::bands_rgba`] instead and
+    /// skip the copy — that is what the worker present path does.
     pub fn framebuffer(&self) -> &[u8] {
+        debug_assert_eq!(
+            self.bands.len(),
+            1,
+            "a partitioned frame has no single contiguous buffer; use \
+             compose_into or bands_rgba"
+        );
         self.target.rgba()
+    }
+
+    /// Copies every band's rows into `out` in framebuffer order.
+    pub fn compose_into(&self, out: &mut Vec<u8>) {
+        debug_assert!(
+            self.assigned_band.is_none(),
+            "a worker rasterizer holds one band, not a frame; use bands_rgba"
+        );
+        let stride = self.width() * 4;
+        out.clear();
+        out.resize(stride * self.total_height(), 0);
+        for (row_offset, rgba) in self.bands_rgba() {
+            let start = row_offset * stride;
+            out[start..start + rgba.len()].copy_from_slice(rgba);
+        }
+    }
+
+    /// Each band's first framebuffer row paired with its own RGBA rows, in
+    /// frame order. Presenting per band avoids the [`Self::compose_into`]
+    /// copy entirely, which is what the worker present path wants.
+    pub fn bands_rgba(&self) -> impl Iterator<Item = (usize, &[u8])> {
+        self.rendered_bands().map(|index| {
+            let rgba = if index == 0 {
+                self.target.rgba()
+            } else {
+                self.band_targets[index - 1].rgba()
+            };
+            (self.bands[index].row_offset, rgba)
+        })
     }
 
     pub fn telemetry(&self) -> SoftwareRasterizerTelemetry {
         let node_budget_limited = self.budget_exhausted
-            && self
-                .frame_work_budget
-                .outside_focus_reserve(self.visited_nodes);
+            && self.frame_envelope.outside_focus_reserve(self.visited_nodes);
         let pixel_budget_limited =
-            self.budget_exhausted && self.frame_work_budget.writes_exhausted(self.pixel_writes);
+            self.budget_exhausted && self.frame_envelope.writes_exhausted(self.pixel_writes);
         SoftwareRasterizerTelemetry {
             visited_nodes: self.visited_nodes,
-            node_soft_limit: self.frame_work_budget.soft_node_visit_limit(),
-            node_visit_limit: self.frame_work_budget.node_visit_limit(),
+            node_soft_limit: self.frame_envelope.soft_node_visit_limit(),
+            node_visit_limit: self.frame_envelope.node_visit_limit(),
             node_budget_limited,
             budget_exhausted: self.budget_exhausted,
             max_virtual_depth: self.max_virtual_depth_reached,
             splat_count: self.splat_count,
             pixel_writes: self.pixel_writes,
-            pixel_write_limit: self.frame_work_budget.pixel_write_limit(),
+            pixel_write_limit: self.frame_envelope.pixel_write_limit(),
             pixel_budget_limited,
         }
     }
@@ -150,6 +324,9 @@ impl SoftwareRasterizer {
         let background = encode_display_color(background_radiance)
             .map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8);
         self.target.clear(background);
+        for target in &mut self.band_targets {
+            target.clear(background);
+        }
     }
 
     /// Frame-policy wrapper around the pixel-only target operation. It keeps
@@ -178,7 +355,7 @@ impl SoftwareRasterizer {
     }
 
     fn write_splat_request(&mut self, splat: SquareSplat) {
-        if self.frame_work_budget.writes_exhausted(self.pixel_writes) {
+        if self.band_zone_budgets_spent() {
             self.budget_exhausted = true;
             return;
         }
@@ -186,12 +363,77 @@ impl SoftwareRasterizer {
 
         let result = self.target.write_splat(
             splat,
-            self.frame_work_budget
-                .remaining_pixel_writes(self.pixel_writes),
+            &mut self.zone_budgets,
             self.settings.toggles.hierarchical_z,
         );
         self.pixel_writes += result.pixel_writes;
         self.budget_exhausted |= result.budget_exhausted;
+    }
+
+    /// Swaps band `band_index` into `target` so the rest of the renderer can
+    /// keep treating it as the one and only render target.
+    ///
+    /// Band 0 lives in `target` at rest, so activating it is a no-op and the
+    /// unpartitioned case never touches `band_targets` at all.
+    pub(super) fn activate_band(&mut self, band_index: usize) {
+        // Restore first. The parked slots only line up with their bands when
+        // nothing is checked out, so swapping a second band in on top of the
+        // first would leave each one in the wrong slot.
+        self.finish_bands();
+        let band = self.bands[band_index];
+        self.band_zones = (
+            band.row_offset / COARSE_TILE,
+            band.height.div_ceil(COARSE_TILE),
+        );
+        if band_index > 0 {
+            std::mem::swap(&mut self.target, &mut self.band_targets[band_index - 1]);
+        }
+        self.active_band = band_index;
+    }
+
+    /// Returns the checked-out band to its slot, leaving band 0 in `target`
+    /// and `band_targets[i - 1]` holding band `i` — the at-rest invariant
+    /// every reader of the framebuffer depends on.
+    pub(super) fn finish_bands(&mut self) {
+        if self.active_band > 0 {
+            std::mem::swap(&mut self.target, &mut self.band_targets[self.active_band - 1]);
+        }
+        self.active_band = 0;
+        self.band_zones = (0, self.zone_budgets.len());
+    }
+
+    /// Loads one chunk's pre-computed allowances and zeroes the counters they
+    /// are measured against, so traversal sees a per-chunk envelope.
+    fn begin_chunk(&mut self, plan: &FrameWorkPlan, chunk_index: usize) {
+        let (first_zone, zone_count) = self.band_zones;
+        self.zone_budgets.fill(0);
+        for zone in first_zone..(first_zone + zone_count).min(self.zone_budgets.len()) {
+            self.zone_budgets[zone] = plan.zone_pixel_writes(chunk_index, zone);
+        }
+        self.frame_work_budget = self.frame_envelope.for_chunk(
+            plan.chunk_node_visits(chunk_index),
+            plan.band_pixel_writes(chunk_index, first_zone, zone_count),
+        );
+        self.shadow_ray_budget = plan.chunk_shadow_rays(chunk_index);
+        self.shadow_rays_traced = 0;
+        self.visited_nodes = 0;
+        self.pixel_writes = 0;
+    }
+
+    /// True once every zone the active band owns has spent this chunk's
+    /// write allowance, so no further splat from it can change a pixel.
+    ///
+    /// This is scoped to the band's own zones rather than the whole frame on
+    /// purpose: a zone outside this band still having allowance says nothing
+    /// about whether this band can write, and consulting it would make the
+    /// early-out depend on how the frame happens to be partitioned.
+    pub(super) fn band_zone_budgets_spent(&self) -> bool {
+        let (first, count) = self.band_zones;
+        self.zone_budgets
+            .iter()
+            .skip(first)
+            .take(count)
+            .all(|remaining| *remaining == 0)
     }
 
     /// Exact pre-shading fine-depth rejection. This deliberately lives at the
@@ -205,7 +447,7 @@ impl SoftwareRasterizer {
         depth: ProjectedSurfaceDepth,
         emissive: bool,
     ) -> bool {
-        if self.frame_work_budget.writes_exhausted(self.pixel_writes) {
+        if self.band_zone_budgets_spent() {
             return false;
         }
         let mut splat = SquareSplat::new(cx, cy, half, depth.representative_depth(), [0; 3])

@@ -10,16 +10,19 @@ use crate::application::ports::{ChunkDraw, FrameParams};
 use super::super::camera::{Camera, dot};
 use super::SoftwareRasterizer;
 use super::frame_work_budget::FrameWorkBudget;
+use super::frame_work_plan::FrameWorkPlan;
 use super::project_aabb_footprint::{
     NEAR_PLANE_DEPTH, aabb_camera_depth_interval, project_screen_footprint,
 };
+use super::resolve_hero_light_visibility::SHADOW_PIXEL_BUDGET;
 use super::select_lights_for_chunk::select_lights_for_chunk;
 
 impl SoftwareRasterizer {
     pub(super) fn render_cpu_frame(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         self.environment = frame.environment;
-        self.frame_work_budget =
+        self.frame_envelope =
             FrameWorkBudget::for_target(&self.settings, self.width(), self.height());
+        self.frame_work_budget = self.frame_envelope;
         self.clear();
         self.reset_frame_telemetry();
         if self.atlas.is_empty() {
@@ -32,37 +35,65 @@ impl SoftwareRasterizer {
             frame.camera_pos,
             self.settings.toggles.front_to_back,
         );
+        // Allowances are fixed before anything is drawn, from the camera and
+        // chunk list alone. Nothing below can change what another chunk or
+        // another band is allowed to spend.
+        let plan = FrameWorkPlan::build(
+            self.frame_envelope,
+            SHADOW_PIXEL_BUDGET,
+            &camera,
+            &ordered_chunks,
+            self.width(),
+            self.height(),
+        );
         // Reused across chunks: one world-fixture scan per chunk, no
         // per-splat allocation and no truncation of overlapping lights.
         let mut chunk_scene_lights = std::mem::take(&mut self.chunk_light_scratch);
         let global_hero_id = frame.active_scene_lights().first().map(|light| light.id);
-
-        for chunk in ordered_chunks {
-            // Do not keep scanning fixtures/chunks after an absolute work
-            // budget has ended traversal for this frame.
-            if self.frame_work_budget.writes_exhausted(self.pixel_writes)
-                || self.frame_work_budget.nodes_exhausted(self.visited_nodes)
-            {
-                self.budget_exhausted = true;
-                break;
-            }
-            if self.settings.toggles.distance_cull
-                && !chunk_can_contribute(
+        let mut visited_nodes = 0;
+        let mut pixel_writes = 0;
+        for band_index in self.rendered_bands() {
+            self.activate_band(band_index);
+            for (chunk_index, chunk) in ordered_chunks.iter().enumerate() {
+                // Culling a whole chunk is safe because a chunk's allowance
+                // is its own. Culling individual *nodes* against the band
+                // would not be: it would change the node count and so move
+                // where a node-starved traversal stops.
+                if self.settings.toggles.distance_cull
+                    && !chunk_can_contribute(
+                        chunk,
+                        &camera,
+                        self.width(),
+                        self.height(),
+                        self.settings.max_draw_distance,
+                    )
+                {
+                    continue;
+                }
+                self.begin_chunk(&plan, chunk_index);
+                select_lights_for_chunk(
+                    frame.active_scene_lights(),
                     chunk,
+                    &mut chunk_scene_lights,
+                );
+                self.traverse_voxel_chunk(
                     &camera,
-                    self.width(),
-                    self.height(),
-                    self.settings.max_draw_distance,
-                )
-            {
-                continue;
+                    chunks,
+                    chunk,
+                    &chunk_scene_lights,
+                    global_hero_id,
+                );
+                visited_nodes += self.visited_nodes;
+                pixel_writes += self.pixel_writes;
             }
-            select_lights_for_chunk(frame.active_scene_lights(), chunk, &mut chunk_scene_lights);
-            self.traverse_voxel_chunk(&camera, chunks, chunk, &chunk_scene_lights, global_hero_id);
+            self.draw_visible_flare_cores(frame, &camera);
         }
+        self.finish_bands();
 
+        self.frame_work_budget = self.frame_envelope;
+        self.visited_nodes = visited_nodes;
+        self.pixel_writes = pixel_writes;
         self.chunk_light_scratch = chunk_scene_lights;
-        self.draw_visible_flare_cores(frame, &camera);
         self.hero_light_visibility.advance_frame();
     }
 

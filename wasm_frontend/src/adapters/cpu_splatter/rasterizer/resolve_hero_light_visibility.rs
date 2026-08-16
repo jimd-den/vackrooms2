@@ -19,8 +19,11 @@ const RETRACE_PERIOD_FRAMES: usize = 4;
 const MAX_RECEIVER_DISTANCE: f32 = 24.0;
 const RECEIVER_EXIT_BIAS: f32 = 0.02;
 const EMITTER_ENDPOINT_BIAS: f32 = 0.02;
-/// Above this write level, hero shadow rays are no longer affordable.
-const SHADOW_PIXEL_BUDGET: usize = 1_500_000;
+/// Frame-wide hero shadow ray envelope, divided across chunks before the
+/// frame starts. It used to be compared against the running pixel-write
+/// total, which meant a splat's *shading* depended on how much geometry
+/// happened to be drawn before it — order-dependent, and unsplittable.
+pub(super) const SHADOW_PIXEL_BUDGET: usize = 1_500_000;
 
 /// Persistent visibility samples and the staggered refresh clock.
 pub(super) struct HeroLightVisibilityCache {
@@ -61,8 +64,8 @@ impl SoftwareRasterizer {
         hero: Option<&LightSource>,
     ) -> Option<HeroLightVisibility> {
         let hero = hero?;
-        let affordable =
-            receiver_distance <= MAX_RECEIVER_DISTANCE && self.pixel_writes < SHADOW_PIXEL_BUDGET;
+        let affordable = receiver_distance <= MAX_RECEIVER_DISTANCE
+            && self.shadow_rays_traced < self.shadow_ray_budget;
         if self.settings.shadows != CpuShadowMode::Hero || is_emissive || !affordable {
             return None;
         }
@@ -79,6 +82,9 @@ impl SoftwareRasterizer {
             });
         }
 
+        // Only a real trace is charged. A cache hit costs nothing and never
+        // did, so counting one would change how far the allowance stretches.
+        self.shadow_rays_traced += 1;
         let visibility = trace_hero_fixture(
             &self.atlas,
             chunks,

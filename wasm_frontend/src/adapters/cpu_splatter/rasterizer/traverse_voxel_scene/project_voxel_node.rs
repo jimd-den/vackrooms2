@@ -42,7 +42,12 @@ pub(super) fn project_voxel_node(
 
     let footprint = project_screen_footprint(camera, visit.min, visit.size, depth_interval[0])?;
 
-    if footprint.outside_framebuffer(renderer.target.width(), renderer.target.height()) {
+    // Deliberately the *whole* framebuffer, not the active band. Rejecting a
+    // node because it misses this band would change the node count, and the
+    // node allowance is what decides where a starved traversal stops — so a
+    // banded frame would diverge from an unbanded one. Out-of-band pixels
+    // cost nothing anyway: the band target clips them to an empty range.
+    if footprint.outside_framebuffer(renderer.target.width(), renderer.target.total_height()) {
         return None;
     }
 

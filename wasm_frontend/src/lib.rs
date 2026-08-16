@@ -176,6 +176,41 @@ pub fn set_cpu_max_draw_distance(dist: f32) {
     update_cpu_settings(|settings| settings.max_draw_distance = dist);
 }
 
+/// Render workers for the CPU splatter, or 0/1 for single-threaded.
+///
+/// Each worker holds its own atlas copy, so this is a memory knob as well as
+/// a parallelism one; `RenderWorkerPool` clamps it to `MAX_RENDER_WORKERS`.
+/// Zero means "not chosen yet" and the driver picks from
+/// `navigator.hardwareConcurrency`.
+#[cfg(target_arch = "wasm32")]
+pub static RENDER_WORKER_COUNT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_render_worker_count(count: u32) {
+    RENDER_WORKER_COUNT.store(count, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Workers to spawn: the explicit setting when given, otherwise half of
+/// `hardwareConcurrency` capped at four.
+///
+/// Half, not all: the main thread still runs the game loop, chunk streaming,
+/// and the generation worker pool, and starving those to render one more
+/// band trades a smoother picture for a less responsive one.
+#[cfg(target_arch = "wasm32")]
+pub fn render_worker_count() -> usize {
+    let configured = RENDER_WORKER_COUNT.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    // 1 is an explicit "no pool", distinct from 0 meaning "not chosen".
+    if configured > 0 {
+        return configured.min(crate::drivers::render_worker_pool::MAX_RENDER_WORKERS);
+    }
+    let cores = web_sys::window()
+        .map(|window| window.navigator().hardware_concurrency() as usize)
+        .unwrap_or(1);
+    (cores / 2).clamp(1, crate::drivers::render_worker_pool::MAX_RENDER_WORKERS)
+}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_shadows(mode: u32) {
@@ -1174,6 +1209,166 @@ mod worker_entry {
             encode_chunk_payload(
                 &source.load_with_artifacts(origin_x, origin_z, level, lod, &reality, artifacts),
             )
+        })
+    }
+}
+
+/// Render-worker entry points.
+///
+/// A render worker owns one horizontal band of the framebuffer and draws it
+/// with the same platform-free `SoftwareRasterizer` the main thread uses —
+/// there is no separate "worker renderer" to keep in step. What it does not
+/// share is memory: without cross-origin isolation there is no
+/// `SharedArrayBuffer`, so every worker holds its own copy of the SVO atlas,
+/// synced by the same incremental row uploads the main thread applies.
+///
+/// `render_band_into` returns the band's RGBA rows as a transferable buffer;
+/// the JS side wraps them in `ImageData`, paints an `OffscreenCanvas`, and
+/// transfers an `ImageBitmap` back. See `static/render_worker.js`.
+#[cfg(target_arch = "wasm32")]
+mod render_worker_entry {
+    use std::cell::RefCell;
+
+    use wasm_bindgen::prelude::*;
+
+    use crate::adapters::cpu_splatter::SoftwareRasterizer;
+    use crate::adapters::render_frame_codec::decode_render_frame;
+    use crate::application::ports::{ChunkDraw, RendererPort};
+
+    thread_local! {
+        static BAND: RefCell<Option<BandRenderer>> = const { RefCell::new(None) };
+    }
+
+    struct BandRenderer {
+        rasterizer: SoftwareRasterizer,
+        band_index: usize,
+        band_count: usize,
+        /// The draw table the main thread last sent, kept so steady-state
+        /// frames can omit it entirely.
+        chunks: Vec<ChunkDraw>,
+        chunks_version: u32,
+    }
+
+    /// Prepares this worker to draw band `band_index` of `band_count`.
+    #[wasm_bindgen]
+    pub fn render_worker_init(band_index: u32, band_count: u32, width: u32, height: u32) {
+        let mut rasterizer = SoftwareRasterizer::new(width.max(1) as usize, height.max(1) as usize);
+        rasterizer.set_band_assignment(band_count.max(1) as usize, band_index as usize);
+        BAND.with(|band| {
+            *band.borrow_mut() = Some(BandRenderer {
+                rasterizer,
+                band_index: band_index as usize,
+                band_count: band_count.max(1) as usize,
+                chunks: Vec::new(),
+                chunks_version: 0,
+            });
+        });
+    }
+
+    /// Replaces this worker's whole atlas copy.
+    #[wasm_bindgen]
+    pub fn render_worker_upload_atlas(texels: Vec<u32>) {
+        BAND.with(|band| {
+            if let Some(band) = band.borrow_mut().as_mut() {
+                band.rasterizer.upload_atlas(&texels);
+            }
+        });
+    }
+
+    /// Applies one incremental atlas row block, mirroring the main thread's
+    /// `upload_atlas_rows`. Returns false if the block failed validation, in
+    /// which case the caller should resend the whole atlas rather than let
+    /// this worker drift.
+    #[wasm_bindgen]
+    pub fn render_worker_upload_atlas_rows(first_row: u32, texels: Vec<u32>) -> bool {
+        BAND.with(|band| {
+            band.borrow_mut()
+                .as_mut()
+                .is_some_and(|band| band.rasterizer.upload_atlas_rows(first_row, &texels))
+        })
+    }
+
+    /// Draws one frame and returns this band's rows as RGBA8, top-down.
+    ///
+    /// An undecodable request returns an empty buffer: the JS side skips the
+    /// reply, the scheduler never sees that frame complete, and the previous
+    /// complete frame stays on screen. One bad message costs one frame, not
+    /// the worker.
+    #[wasm_bindgen]
+    pub fn render_worker_draw_band(request: Vec<u8>) -> Vec<u8> {
+        let Some(request) = decode_render_frame(&request) else {
+            return Vec::new();
+        };
+        BAND.with(|band| {
+            let mut band = band.borrow_mut();
+            let Some(band) = band.as_mut() else {
+                return Vec::new();
+            };
+
+            if request.width as usize != band.rasterizer.width()
+                || request.height as usize != band.rasterizer.height()
+                || request.band_count as usize != band.band_count
+            {
+                band.rasterizer
+                    .resize(request.width.max(1) as usize, request.height.max(1) as usize);
+                band.band_count = request.band_count.max(1) as usize;
+                band.rasterizer
+                    .set_band_assignment(band.band_count, band.band_index);
+            }
+
+            match request.chunks {
+                Some(chunks) => {
+                    band.chunks = chunks;
+                    band.chunks_version = request.chunks_version;
+                }
+                None if request.chunks_version != band.chunks_version => {
+                    // The main thread believes this worker holds a table it
+                    // does not. Drawing with a stale one would put geometry
+                    // in the wrong place; skipping costs a frame.
+                    return Vec::new();
+                }
+                None => {}
+            }
+
+            // From the request, never from this instance's globals: the
+            // settings atomics live in the main thread's memory and this
+            // worker's copy is whatever `Default` left there.
+            band.rasterizer.settings = request.settings;
+            band.rasterizer.draw(&request.frame, &band.chunks);
+
+            band.rasterizer
+                .bands_rgba()
+                .next()
+                .map_or_else(Vec::new, |(_, rgba)| rgba.to_vec())
+        })
+    }
+
+    /// First framebuffer row this worker's band occupies, so the compositor
+    /// knows where to draw the bitmap it sends back.
+    #[wasm_bindgen]
+    pub fn render_worker_band_row_offset() -> u32 {
+        BAND.with(|band| {
+            band.borrow()
+                .as_ref()
+                .and_then(|band| band.rasterizer.bands_rgba().next().map(|(row, _)| row as u32))
+                .unwrap_or(0)
+        })
+    }
+
+    /// This band's telemetry, packed for the HUD's cross-worker sum.
+    #[wasm_bindgen]
+    pub fn render_worker_telemetry() -> Vec<u32> {
+        BAND.with(|band| {
+            band.borrow().as_ref().map_or_else(Vec::new, |band| {
+                let stats = band.rasterizer.telemetry();
+                vec![
+                    stats.visited_nodes as u32,
+                    stats.splat_count as u32,
+                    stats.pixel_writes as u32,
+                    stats.max_virtual_depth as u32,
+                    u32::from(stats.budget_exhausted),
+                ]
+            })
         })
     }
 }
