@@ -37,13 +37,6 @@ struct BoxHit {
     normal: vec3<f32>,
 };
 
-struct VoxelLeaf {
-    material: u32,
-    color: u32,
-    light_word: u32,
-    bounds_min: vec3<f32>,
-    bounds_max: vec3<f32>,
-};
 
 struct VoxelHit {
     hit: bool,
@@ -134,44 +127,6 @@ fn box_intersection(
     return BoxHit(true, max(entry, 0.0), exit, normal);
 }
 
-fn lookup_leaf(point: vec3<f32>, chunk: RayChunk) -> VoxelLeaf {
-    var node_index = chunk.indices.x;
-    var bounds_min = vec3<f32>(0.0);
-    var bounds_max = vec3<f32>(chunk.origin_world_size.w);
-    let depth = u32(chunk.voxel_depth.y);
-    for (var level = 0u; level <= 10u; level += 1u) {
-        let word = node_index * 4u;
-        let node_type = atlas_words[word];
-        let payload = atlas_words[word + 1u];
-        let color_or_mask = atlas_words[word + 2u];
-        let light_word = atlas_words[word + 3u];
-        if node_type == 1u || level >= depth {
-            return VoxelLeaf(payload, color_or_mask, light_word, bounds_min, bounds_max);
-        }
-        let center = (bounds_min + bounds_max) * 0.5;
-        let child_x = select(0u, 1u, point.x >= center.x);
-        let child_y = select(0u, 1u, point.y >= center.y);
-        let child_z = select(0u, 1u, point.z >= center.z);
-        let child = (child_z << 2u) | (child_y << 1u) | child_x;
-        let child_min = vec3<f32>(
-            select(bounds_min.x, center.x, child_x == 1u),
-            select(bounds_min.y, center.y, child_y == 1u),
-            select(bounds_min.z, center.z, child_z == 1u)
-        );
-        let child_max = vec3<f32>(
-            select(center.x, bounds_max.x, child_x == 1u),
-            select(center.y, bounds_max.y, child_y == 1u),
-            select(center.z, bounds_max.z, child_z == 1u)
-        );
-        if (color_or_mask & (1u << child)) == 0u {
-            return VoxelLeaf(0u, 0u, 0u, child_min, child_max);
-        }
-        node_index = payload + child;
-        bounds_min = child_min;
-        bounds_max = child_max;
-    }
-    return VoxelLeaf(0u, 0u, 0u, bounds_min, bounds_max);
-}
 
 fn next_leaf_exit(
     ray_origin: vec3<f32>,
@@ -202,121 +157,162 @@ fn next_leaf_exit(
     return vec4<f32>(nearest, 0.0, 0.0, -sign(ray_direction.z));
 }
 
-fn trace_chunk_dda(
+
+
+struct SvoStackFrame {
+    node_index: u32,
+    bounds_min: vec3<f32>,
+    bounds_max: vec3<f32>,
+    level: u32,
+};
+
+struct SvoWalkResult {
+    found: bool,
+    distance: f32,
+    normal: vec3<f32>,
+    material: u32,
+    color: u32,
+    light_word: u32,
+    steps: u32,
+};
+
+// One stack walk over a chunk's SVO, shared by primary rays and shadow
+// rays. The descent path lives on the stack, so the walk never re-descends
+// from the root: advancing past an empty leaf costs one pop and one
+// re-descent from the parent, not a fresh walk from the root. A solid leaf
+// is resolved by its own box intersection, which gives the same exact
+// entry distance and entry-face normal the finest-voxel DDA used to
+// reconstruct — the DDA's refinement re-walk disappears with it.
+//
+// `step_budget` bounds the walk: exhaustion reports "not found" with
+// steps >= budget, and the caller decides what that means (a primary ray
+// misses; a shadow ray is conservatively opaque).
+fn svo_stack_walk(
     ray_origin: vec3<f32>,
     ray_direction: vec3<f32>,
     chunk: RayChunk,
     interval: BoxHit,
-) -> VoxelHit {
+    step_budget: u32,
+) -> SvoWalkResult {
     let voxel_size = chunk.voxel_depth.x;
+    let depth = u32(chunk.voxel_depth.y);
     let bias = traversal_sample_bias(voxel_size);
-    var distance = interval.entry;
-    var normal = interval.normal;
-    var sample = ray_origin + ray_direction * min(distance + bias, interval.exit);
-    var cell = floor(sample / voxel_size);
-    let direction_step = sign(ray_direction);
-    let budget = clamp(frame.render_options.w, 1u, 4096u);
-    for (var step = 0u; step < 4096u; step += 1u) {
-        if step >= budget || distance > interval.exit {
+
+    // Sample slightly past the interval entry, mirroring the DDA's
+    // distance + bias sample: a ray starting exactly on a voxel boundary
+    // resolves to the voxel ahead, never the one behind.
+    var t = interval.entry;
+    var p = ray_origin + ray_direction * min(t + bias, interval.exit);
+    var node_index = chunk.indices.x;
+    var bounds_min = vec3<f32>(0.0);
+    var bounds_max = vec3<f32>(chunk.origin_world_size.w);
+    var level = 0u;
+    var stack: array<SvoStackFrame, 12>;
+    var stack_ptr = 0u;
+    var steps = 0u;
+
+    for (var iter = 0u; iter < 4096u; iter += 1u) {
+        if iter >= step_budget || t > interval.exit {
             break;
         }
-        sample = ray_origin + ray_direction * min(distance + bias, interval.exit);
-        let leaf = lookup_leaf(sample, chunk);
-        if leaf.material != 0u {
-            return VoxelHit(
-                true,
-                distance,
-                normal,
-                leaf.material,
-                leaf.color,
-                leaf.light_word,
-                voxel_size
-            );
-        }
-
-        let next_boundary = (cell + max(direction_step, vec3<f32>(0.0))) * voxel_size;
-        var next_times = vec3<f32>(TRACE_INFINITY);
-        if abs(ray_direction.x) >= 1e-20 { next_times.x = (next_boundary.x - ray_origin.x) / ray_direction.x; }
-        if abs(ray_direction.y) >= 1e-20 { next_times.y = (next_boundary.y - ray_origin.y) / ray_direction.y; }
-        if abs(ray_direction.z) >= 1e-20 { next_times.z = (next_boundary.z - ray_origin.z) / ray_direction.z; }
-        let next_distance = min(next_times.x, min(next_times.y, next_times.z));
-        if next_distance > interval.exit { break; }
-        let tolerance = distance_tie_tolerance(next_distance);
-        let cross_x = abs(next_times.x - next_distance) <= tolerance;
-        let cross_y = abs(next_times.y - next_distance) <= tolerance;
-        let cross_z = abs(next_times.z - next_distance) <= tolerance;
-        if cross_x { cell.x += direction_step.x; }
-        if cross_y { cell.y += direction_step.y; }
-        if cross_z { cell.z += direction_step.z; }
-        if cross_x {
-            normal = vec3<f32>(-direction_step.x, 0.0, 0.0);
-        } else if cross_y {
-            normal = vec3<f32>(0.0, -direction_step.y, 0.0);
+        steps += 1u;
+        let word = node_index * 4u;
+        let node_type = atlas_words[word];
+        let payload = atlas_words[word + 1u];
+        let color_or_mask = atlas_words[word + 2u];
+        let light_word = atlas_words[word + 3u];
+        // The box the ray must advance past when this node proves empty.
+        // Defaults to the current node's bounds (the empty-leaf case);
+        // the empty-child case overrides it below.
+        var exit_min = bounds_min;
+        var exit_max = bounds_max;
+        if node_type == 1u || level >= depth {
+            if payload != 0u {
+                let entry = box_intersection(
+                    ray_origin,
+                    ray_direction,
+                    bounds_min,
+                    bounds_max
+                );
+                return SvoWalkResult(
+                    true,
+                    max(entry.entry, interval.entry),
+                    entry.normal,
+                    payload,
+                    color_or_mask,
+                    light_word,
+                    steps
+                );
+            }
         } else {
-            normal = vec3<f32>(0.0, 0.0, -direction_step.z);
+            let center = (bounds_min + bounds_max) * 0.5;
+            let child_x = select(0u, 1u, p.x >= center.x);
+            let child_y = select(0u, 1u, p.y >= center.y);
+            let child_z = select(0u, 1u, p.z >= center.z);
+            let child = (child_z << 2u) | (child_y << 1u) | child_x;
+            let child_min = vec3<f32>(
+                select(bounds_min.x, center.x, child_x == 1u),
+                select(bounds_min.y, center.y, child_y == 1u),
+                select(bounds_min.z, center.z, child_z == 1u)
+            );
+            let child_max = vec3<f32>(
+                select(center.x, bounds_max.x, child_x == 1u),
+                select(center.y, bounds_max.y, child_y == 1u),
+                select(center.z, bounds_max.z, child_z == 1u)
+            );
+            if (color_or_mask & (1u << child)) != 0u {
+                if stack_ptr < 12u {
+                    stack[stack_ptr] = SvoStackFrame(
+                        node_index,
+                        bounds_min,
+                        bounds_max,
+                        level
+                    );
+                    stack_ptr += 1u;
+                }
+                node_index = payload + child;
+                bounds_min = child_min;
+                bounds_max = child_max;
+                level += 1u;
+                continue;
+            }
+            exit_min = child_min;
+            exit_max = child_max;
         }
-        distance = next_distance;
-    }
-    return VoxelHit(false, 0.0, vec3<f32>(0.0), 0u, 0u, 0u, 0.0);
-}
-
-fn trace_chunk_skipping_empty_leaves(
-    ray_origin: vec3<f32>,
-    ray_direction: vec3<f32>,
-    chunk: RayChunk,
-    interval: BoxHit,
-) -> VoxelHit {
-    let voxel_size = chunk.voxel_depth.x;
-    let bias = traversal_sample_bias(voxel_size);
-    var distance = interval.entry;
-    var normal = interval.normal;
-    var refinement_entry = interval.entry;
-    var refinement_entry_normal = interval.normal;
-    let budget = clamp(frame.render_options.w, 1u, 4096u);
-
-    for (var step = 0u; step < 4096u; step += 1u) {
-        if step >= budget || distance > interval.exit {
+        // Advance past the empty box, then climb to the smallest ancestor
+        // whose bounds still contain the advanced point. If there is none
+        // the ray has left the chunk.
+        let exit = next_leaf_exit(ray_origin, ray_direction, exit_min, exit_max);
+        var next_t = exit.x;
+        if next_t <= t + bias * 0.25 {
+            next_t = t + bias;
+        }
+        t = next_t;
+        // Nudge past the exit plane along the ray so the point is strictly
+        // beyond the boundary, never exactly on it.
+        p = ray_origin + ray_direction * t - exit.yzw * bias;
+        var inside_ancestor = false;
+        for (var climb = 0u; climb < 12u; climb += 1u) {
+            if p.x >= bounds_min.x && p.x <= bounds_max.x
+                && p.y >= bounds_min.y && p.y <= bounds_max.y
+                && p.z >= bounds_min.z && p.z <= bounds_max.z {
+                inside_ancestor = true;
+                break;
+            }
+            if stack_ptr == 0u {
+                break;
+            }
+            stack_ptr -= 1u;
+            node_index = stack[stack_ptr].node_index;
+            bounds_min = stack[stack_ptr].bounds_min;
+            bounds_max = stack[stack_ptr].bounds_max;
+            level = stack[stack_ptr].level;
+        }
+        if !inside_ancestor {
             break;
         }
-        let sample = ray_origin + ray_direction * min(distance + bias, interval.exit);
-        let leaf = lookup_leaf(sample, chunk);
-        if leaf.material != 0u {
-            // The coarse walk proves emptiness only. Re-run the canonical
-            // finest-cell DDA over the final short interval so skip on/off
-            // returns one distance, material, and normal contract.
-            let refinement_interval = BoxHit(
-                true,
-                refinement_entry,
-                interval.exit,
-                refinement_entry_normal
-            );
-            return trace_chunk_dda(
-                ray_origin,
-                ray_direction,
-                chunk,
-                refinement_interval
-            );
-        }
-
-        let exit = next_leaf_exit(
-            ray_origin,
-            ray_direction,
-            leaf.bounds_min,
-            leaf.bounds_max
-        );
-        var next_distance = exit.x;
-        if next_distance <= distance + bias * 0.25 {
-            next_distance = distance + bias;
-        }
-        // A normalized ray travels at most one finest voxel per axis over
-        // this retained interval, which is enough for DDA to reconstruct all
-        // potentially competing boundary crossings.
-        refinement_entry = max(distance, next_distance - voxel_size);
-        refinement_entry_normal = normal;
-        distance = next_distance;
-        normal = exit.yzw;
     }
-    return VoxelHit(false, 0.0, vec3<f32>(0.0), 0u, 0u, 0u, 0.0);
+    return SvoWalkResult(false, 0.0, vec3<f32>(0.0), 0u, 0u, 0u, steps);
 }
 
 fn trace_chunk(
@@ -325,15 +321,20 @@ fn trace_chunk(
     chunk: RayChunk,
     interval: BoxHit,
 ) -> VoxelHit {
-    if ray_policy_enabled(RAY_POLICY_EMPTY_SPACE_SKIP) {
-        return trace_chunk_skipping_empty_leaves(
-            ray_origin,
-            ray_direction,
-            chunk,
-            interval
+    let budget = clamp(frame.render_options.w, 1u, 4096u);
+    let walk = svo_stack_walk(ray_origin, ray_direction, chunk, interval, budget);
+    if walk.found {
+        return VoxelHit(
+            true,
+            walk.distance,
+            walk.normal,
+            walk.material,
+            walk.color,
+            walk.light_word,
+            chunk.voxel_depth.x
         );
     }
-    return trace_chunk_dda(ray_origin, ray_direction, chunk, interval);
+    return VoxelHit(false, 0.0, vec3<f32>(0.0), 0u, 0u, 0u, 0.0);
 }
 
 fn direct_visibility_bias(voxel_size: f32) -> f32 {
@@ -342,119 +343,21 @@ fn direct_visibility_bias(voxel_size: f32) -> f32 {
 
 // Secondary visibility has its own hard budget. It deliberately does not
 // consult the primary-ray trace budget or empty-space policy toggle.
-fn trace_visibility_chunk_dda(
+fn trace_visibility_chunk_stack(
     ray_origin: vec3<f32>,
     ray_direction: vec3<f32>,
     chunk: RayChunk,
     interval: BoxHit,
     step_budget: u32,
 ) -> VisibilityTrace {
-    let voxel_size = chunk.voxel_depth.x;
-    let bias = traversal_sample_bias(voxel_size);
-    var distance = interval.entry;
-    var sample = ray_origin + ray_direction * min(distance + bias, interval.exit);
-    var cell = floor(sample / voxel_size);
-    let direction_step = sign(ray_direction);
-    var steps = 0u;
-
-    for (var iteration = 0u; iteration < DIRECT_VISIBILITY_TRACE_BUDGET; iteration += 1u) {
-        if distance > interval.exit {
-            return VisibilityTrace(false, steps);
-        }
-        if steps >= step_budget {
-            // Exhaustion is conservatively opaque, avoiding a light leak.
-            return VisibilityTrace(true, steps);
-        }
-        steps += 1u;
-        sample = ray_origin + ray_direction * min(distance + bias, interval.exit);
-        let leaf = lookup_leaf(sample, chunk);
-        if leaf.material != 0u {
-            return VisibilityTrace(true, steps);
-        }
-
-        let next_boundary = (cell + max(direction_step, vec3<f32>(0.0))) * voxel_size;
-        var next_times = vec3<f32>(TRACE_INFINITY);
-        if abs(ray_direction.x) >= 1e-20 { next_times.x = (next_boundary.x - ray_origin.x) / ray_direction.x; }
-        if abs(ray_direction.y) >= 1e-20 { next_times.y = (next_boundary.y - ray_origin.y) / ray_direction.y; }
-        if abs(ray_direction.z) >= 1e-20 { next_times.z = (next_boundary.z - ray_origin.z) / ray_direction.z; }
-        let next_distance = min(next_times.x, min(next_times.y, next_times.z));
-        if next_distance > interval.exit {
-            return VisibilityTrace(false, steps);
-        }
-        let tolerance = distance_tie_tolerance(next_distance);
-        let cross_x = abs(next_times.x - next_distance) <= tolerance;
-        let cross_y = abs(next_times.y - next_distance) <= tolerance;
-        let cross_z = abs(next_times.z - next_distance) <= tolerance;
-        if cross_x { cell.x += direction_step.x; }
-        if cross_y { cell.y += direction_step.y; }
-        if cross_z { cell.z += direction_step.z; }
-        distance = next_distance;
+    let walk = svo_stack_walk(ray_origin, ray_direction, chunk, interval, step_budget);
+    if walk.found {
+        return VisibilityTrace(true, walk.steps);
     }
-    return VisibilityTrace(true, steps);
+    // Exhaustion is conservatively opaque, avoiding a light leak.
+    return VisibilityTrace(walk.steps >= step_budget, walk.steps);
 }
 
-// Coarse leaves prove only that an interval is empty. A non-empty leaf is
-// resolved by the same finest-cell DDA contract as primary traversal, while
-// both phases share one caller-supplied secondary-ray budget.
-fn trace_visibility_chunk_skipping_empty_leaves(
-    ray_origin: vec3<f32>,
-    ray_direction: vec3<f32>,
-    chunk: RayChunk,
-    interval: BoxHit,
-    step_budget: u32,
-) -> VisibilityTrace {
-    let voxel_size = chunk.voxel_depth.x;
-    let bias = traversal_sample_bias(voxel_size);
-    var distance = interval.entry;
-    var normal = interval.normal;
-    var refinement_entry = interval.entry;
-    var refinement_entry_normal = interval.normal;
-    var steps = 0u;
-
-    for (var iteration = 0u; iteration < DIRECT_VISIBILITY_TRACE_BUDGET; iteration += 1u) {
-        if distance > interval.exit {
-            return VisibilityTrace(false, steps);
-        }
-        if steps >= step_budget {
-            return VisibilityTrace(true, steps);
-        }
-        steps += 1u;
-        let sample = ray_origin + ray_direction * min(distance + bias, interval.exit);
-        let leaf = lookup_leaf(sample, chunk);
-        if leaf.material != 0u {
-            let refinement_interval = BoxHit(
-                true,
-                refinement_entry,
-                interval.exit,
-                refinement_entry_normal
-            );
-            let refined = trace_visibility_chunk_dda(
-                ray_origin,
-                ray_direction,
-                chunk,
-                refinement_interval,
-                step_budget - steps
-            );
-            return VisibilityTrace(refined.blocked, steps + refined.steps);
-        }
-
-        let exit = next_leaf_exit(
-            ray_origin,
-            ray_direction,
-            leaf.bounds_min,
-            leaf.bounds_max
-        );
-        var next_distance = exit.x;
-        if next_distance <= distance + bias * 0.25 {
-            next_distance = distance + bias;
-        }
-        refinement_entry = max(distance, next_distance - voxel_size);
-        refinement_entry_normal = normal;
-        distance = next_distance;
-        normal = exit.yzw;
-    }
-    return VisibilityTrace(true, steps);
-}
 
 fn finite_segment_visible(
     receiver_world: vec3<f32>,
@@ -492,7 +395,7 @@ fn finite_segment_visible(
             continue;
         }
         let interval = BoxHit(true, slab.entry, finite_exit, slab.normal);
-        let trace = trace_visibility_chunk_skipping_empty_leaves(
+        let trace = trace_visibility_chunk_stack(
             local_origin,
             ray_direction,
             chunk,

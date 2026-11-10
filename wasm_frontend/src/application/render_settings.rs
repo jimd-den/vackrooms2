@@ -42,9 +42,10 @@ pub struct RenderToggles {
     /// z-rejection. Off retains each strategy's deterministic reference order.
     pub front_to_back: bool,
     /// OPTIMIZATION (raymarch): jump across the complete empty SVO leaf
-    /// containing the current sample. Off = diagnostic finest-voxel DDA;
-    /// both paths use the same exact point lookup and must report the same
-    /// nearest hit/material/normal.
+    /// containing the current sample. The WebGPU raymarcher traverses the
+    /// SVO with a stack and skips empty space structurally, so it no
+    /// longer consults this toggle; the toggle is retained for the scene
+    /// ABI and the other drivers.
     pub empty_space_skip: bool,
     /// OPTIMIZATION (CPU): coarse-to-fine LOD — a subtree whose projection
     /// fits in ~a pixel is drawn as one MIP-filtered splat instead of being

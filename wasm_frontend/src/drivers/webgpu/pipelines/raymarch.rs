@@ -543,16 +543,25 @@ mod tests {
         assert!(!direct_light_visibility_enabled(false, false));
     }
 
+    /// The traversal is one stack walk per chunk: the descent path lives on
+    /// a fixed-size stack, so no sample ever re-descends from the root. A
+    /// solid leaf is resolved by its own box intersection (exact entry
+    /// distance and entry-face normal), which is what the old finest-voxel
+    /// DDA refinement used to reconstruct — the DDA and its skip-walk
+    /// scaffolding are gone, not layered underneath.
     #[test]
-    fn shader_keeps_skip_as_coarse_proof_and_dda_as_canonical_resolver() {
+    fn shader_traverses_svo_with_one_stack_walk_and_no_re_descent() {
         let source = include_str!("../shaders/raymarch.wgsl");
-        assert!(source.contains("fn trace_chunk_dda("));
-        assert!(source.contains("fn trace_chunk_skipping_empty_leaves("));
-        assert!(source.contains("let refinement_interval = BoxHit("));
-        assert!(source.contains("return trace_chunk_dda("));
+        assert!(source.contains("fn svo_stack_walk("));
+        assert!(source.contains("array<SvoStackFrame, 12>"));
+        assert!(source.contains("fn trace_chunk("));
+        assert!(source.contains("let walk = svo_stack_walk("));
+        assert!(!source.contains("fn lookup_leaf("));
+        assert!(!source.contains("fn trace_chunk_dda("));
+        assert!(!source.contains("fn trace_chunk_skipping_empty_leaves("));
+        assert!(!source.contains("let refinement_interval = BoxHit("));
         assert!(source.contains("abs(times.x - nearest) <= tolerance"));
         assert!(source.contains("abs(times.y - nearest) <= tolerance"));
-        assert!(source.contains("ray_policy_enabled(RAY_POLICY_EMPTY_SPACE_SKIP)"));
         assert!(source.contains("chunk.indices.y < nearest_source_index"));
     }
 
@@ -577,16 +586,16 @@ mod tests {
     fn shader_secondary_rays_are_finite_exact_and_lazily_evaluated() {
         let source = include_str!("../shaders/raymarch.wgsl");
         let visibility_start = source
-            .find("fn trace_visibility_chunk_dda(")
-            .expect("secondary DDA");
+            .find("fn trace_visibility_chunk_stack(")
+            .expect("secondary stack trace");
         let visibility_end = source.find("fn camera_ray(").expect("camera ray");
         let visibility = &source[visibility_start..visibility_end];
 
         assert!(source.contains("DIRECT_VISIBILITY_TRACE_BUDGET: u32 = 4096u"));
         assert!(!visibility.contains("frame.render_options.w"));
         assert!(!visibility.contains("ray_policy_enabled(RAY_POLICY_EMPTY_SPACE_SKIP)"));
-        assert!(visibility.contains("fn trace_visibility_chunk_skipping_empty_leaves("));
-        assert!(visibility.contains("let refined = trace_visibility_chunk_dda("));
+        assert!(visibility.contains("fn trace_visibility_chunk_stack("));
+        assert!(visibility.contains("svo_stack_walk("));
         assert!(visibility.contains("let biased_origin = receiver_world + receiver_normal"));
         assert!(visibility.contains("let maximum_distance = endpoint_distance - endpoint_bias"));
         assert!(visibility.contains("for (var index = 0u; index < chunk_count; index += 1u)"));
