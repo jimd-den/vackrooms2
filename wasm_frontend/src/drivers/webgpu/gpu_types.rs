@@ -266,6 +266,16 @@ pub struct GpuRayScene {
     pub grid_cell: [f32; 2],
     /// Grid dimensions in x and z cells.
     pub grid_dims: [u32; 2],
+    /// Minimum corner of light-grid cell (0, 0); y is unused.
+    pub light_grid_origin: [f32; 2],
+    /// Light-grid cell size in x and z (square: both are the reach).
+    pub light_grid_cell: [f32; 2],
+    /// Light-grid dimensions in x and z cells.
+    pub light_grid_dims: [u32; 2],
+    /// Farthest a light can reach from its position (see LightGrid).
+    pub light_grid_reach: f32,
+    /// 1 when the light grid below is certified, 0 to iterate every light.
+    pub light_grid_valid: u32,
 }
 
 /// Certified top-level structure over the resident chunks: a regular
@@ -284,8 +294,10 @@ pub struct ChunkGrid {
 
 impl ChunkGrid {
     /// Largest grid the shader will walk; a sparser resident set falls
-    /// back to the per-chunk loop instead.
-    pub const MAX_CELLS: usize = 64;
+    /// back to the per-chunk loop instead. 256 cells cover a 15x15 chunk
+    /// neighborhood, so the grid DDA — not the chunk cap — bounds the
+    /// per-pixel cost as the world grows.
+    pub const MAX_CELLS: usize = 256;
 
     pub fn invalid() -> Self {
         Self {
@@ -295,6 +307,64 @@ impl ChunkGrid {
             dims: [0; 2],
             map: Vec::new(),
         }
+    }
+}
+
+/// Certified spatial index over the frame's lights: each light lives in
+/// exactly one cell (the cell containing its position), and a receiver
+/// looks up only the cells its reach can touch. The lookup set is a
+/// superset of the contributing set — every light within `reach` of the
+/// receiver is in it — so the shader's exact `light_can_contribute` cull
+/// stays the net and no pixel can change. The map is cell-major
+/// (index `z * dims[0] + x`); `offsets` holds one prefix sum per cell
+/// plus a sentinel, and `indices` holds the light indices cell by cell.
+#[derive(Debug, Clone)]
+pub struct LightGrid {
+    pub origin: [f32; 3],
+    pub cell: [f32; 2],
+    pub dims: [u32; 2],
+    /// Farthest a light in this grid can reach from its own position:
+    /// `radius + max(half_size)` over all lights. A contributing light
+    /// is always within `reach` of its receiver.
+    pub reach: f32,
+    pub offsets: Vec<u32>,
+    pub indices: Vec<u32>,
+}
+
+impl LightGrid {
+    /// Largest grid the shader will walk; a sparser light set falls back
+    /// to iterating every light instead. 1024 cells cover every world
+    /// the 256-chunk cap allows at the scene's 6-unit light range.
+    pub const MAX_CELLS: usize = 1024;
+    /// Largest light set the grid will index; more lights fall back to
+    /// the full loop. 1024 covers a 15x15 world twice over.
+    pub const MAX_LIGHTS: usize = 1024;
+
+    pub fn invalid() -> Self {
+        Self {
+            origin: [0.0; 3],
+            cell: [0.0; 2],
+            dims: [0; 2],
+            reach: 0.0,
+            offsets: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+
+    /// Number of cells in the grid.
+    pub fn cell_count(&self) -> usize {
+        self.dims[0] as usize * self.dims[1] as usize
+    }
+
+    /// Packed upload: the offsets (one per cell plus a sentinel) followed
+    /// by the light indices. The shader reads a cell's lights as
+    /// `indices[offsets[cell]..offsets[cell + 1]]` past the
+    /// `cell_count() + 1` header words.
+    pub fn packed(&self) -> Vec<u32> {
+        let mut packed = Vec::with_capacity(self.offsets.len() + self.indices.len());
+        packed.extend_from_slice(&self.offsets);
+        packed.extend_from_slice(&self.indices);
+        packed
     }
 }
 
@@ -310,6 +380,7 @@ impl GpuRayScene {
         direct_light_visibility: bool,
         area_light_visibility_samples: u8,
         grid: Option<&ChunkGrid>,
+        light_grid: Option<&LightGrid>,
     ) -> Self {
         let mut policy_flags = 0;
         if empty_space_skip {
@@ -332,6 +403,22 @@ impl GpuRayScene {
                 ),
                 None => ([0.0; 3], 0.0, [0.0; 2], [0; 2], 0u32),
             };
+        let (
+            light_grid_origin,
+            light_grid_cell,
+            light_grid_dims,
+            light_grid_reach,
+            light_grid_valid,
+        ) = match light_grid {
+            Some(light_grid) => (
+                [light_grid.origin[0], light_grid.origin[2]],
+                light_grid.cell,
+                light_grid.dims,
+                light_grid.reach,
+                1u32,
+            ),
+            None => ([0.0; 2], [0.0; 2], [0; 2], 0.0, 0u32),
+        };
         Self {
             chunk_count,
             policy_flags,
@@ -343,6 +430,11 @@ impl GpuRayScene {
             grid_cube_size,
             grid_cell,
             grid_dims,
+            light_grid_origin,
+            light_grid_cell,
+            light_grid_dims,
+            light_grid_reach,
+            light_grid_valid,
         }
     }
 }
@@ -385,7 +477,7 @@ mod tests {
         assert_eq!(size_of::<GpuPackedSurfaceVertex>(), 16);
         assert_eq!(size_of::<GpuPackedFace>(), 16);
         assert_eq!(size_of::<GpuRayChunk>(), 48);
-        assert_eq!(size_of::<GpuRayScene>(), 48);
+        assert_eq!(size_of::<GpuRayScene>(), 80);
         assert_eq!(size_of::<GpuSupplySprite>(), 16);
     }
 
@@ -423,7 +515,15 @@ mod tests {
             dims: [3, 3],
             map: vec![u32::MAX; 9],
         };
-        let scene = GpuRayScene::from_policy(7, true, true, true, 4, Some(&grid));
+        let light_grid = LightGrid {
+            origin: [-10.0, 0.0, -10.0],
+            cell: [6.0, 6.0],
+            dims: [3, 3],
+            reach: 6.0,
+            offsets: vec![0, 1, 1, 2, 2, 2, 2, 2, 2, 2],
+            indices: vec![0, 1],
+        };
+        let scene = GpuRayScene::from_policy(7, true, true, true, 4, Some(&grid), Some(&light_grid));
         assert_eq!(scene.chunk_count, 7);
         assert_eq!(
             scene.policy_flags,
@@ -436,13 +536,19 @@ mod tests {
         assert_eq!(scene.grid_cube_size, 12.8);
         assert_eq!(scene.grid_cell, [10.0, 10.0]);
         assert_eq!(scene.grid_dims, [3, 3]);
+        assert_eq!(scene.light_grid_origin, [-10.0, -10.0]);
+        assert_eq!(scene.light_grid_cell, [6.0, 6.0]);
+        assert_eq!(scene.light_grid_dims, [3, 3]);
+        assert_eq!(scene.light_grid_reach, 6.0);
+        assert_eq!(scene.light_grid_valid, 1);
 
-        let conservative = GpuRayScene::from_policy(2, false, false, false, 3, None);
+        let conservative = GpuRayScene::from_policy(2, false, false, false, 3, None, None);
         assert_eq!(conservative.policy_flags, 0);
         assert_eq!(conservative.reserved, [1, 0]);
         assert_eq!(conservative.grid_origin, [0.0; 3]);
         assert_eq!(conservative.grid_dims, [0; 2]);
-        assert_eq!(size_of::<GpuRayScene>(), 48);
+        assert_eq!(conservative.light_grid_valid, 0);
+        assert_eq!(size_of::<GpuRayScene>(), 80);
     }
 
     #[test]

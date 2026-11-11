@@ -4,12 +4,15 @@ use std::num::NonZeroU64;
 
 use wgpu::util::DeviceExt;
 
+use crate::adapters::cpu_splatter::atlas::{MipNode, build_mips};
 use crate::application::ports::{ChunkDraw, FrameParams};
 use crate::application::render_settings::RenderToggles;
 use crate::application::rendering::encode_display_color;
 
 use crate::drivers::webgpu::frame_resources::FrameResources;
-use crate::drivers::webgpu::gpu_types::{ChunkGrid, GpuRayChunk, GpuRayScene};
+use crate::drivers::webgpu::gpu_types::{
+    collect_frame_lights, ChunkGrid, GpuLight, GpuRayChunk, GpuRayScene, LightGrid,
+};
 use crate::drivers::webgpu::shader::ShaderProgram;
 
 const ATLAS_TEXELS_PER_ROW: u64 = 1024;
@@ -62,6 +65,12 @@ pub struct RaymarchPipeline {
     chunks: wgpu::Buffer,
     grid: wgpu::Buffer,
     scene: wgpu::Buffer,
+    /// Mip pyramid, one `vec4<u32>` per atlas node (see `pack_ray_mips`).
+    mips: wgpu::Buffer,
+    /// Light grid, packed offsets then indices (see `LightGrid::packed`).
+    light_grid: wgpu::Buffer,
+    /// CPU copy of the atlas words, so row updates can rebuild the mips.
+    atlas_words: Vec<u32>,
     bind_group: wgpu::BindGroup,
     atlas_word_capacity: usize,
     atlas_initialized: bool,
@@ -76,7 +85,7 @@ impl RaymarchPipeline {
         frame_layout: &wgpu::BindGroupLayout,
         max_chunks: usize,
     ) -> Self {
-        let max_chunks = max_chunks.clamp(1, 25);
+        let max_chunks = max_chunks.clamp(1, 256);
         let scene_layout = create_scene_layout(device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("webgpu.raymarch.pipeline-layout"),
@@ -129,7 +138,24 @@ impl RaymarchPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_group = create_bind_group(device, &scene_layout, &atlas, &chunks, &grid, &scene);
+        let mips = create_mip_buffer(device, &[0; WORDS_PER_NODE as usize]);
+        let light_grid = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("webgpu.raymarch.light-grid"),
+            size: ((LightGrid::MAX_CELLS + 1 + LightGrid::MAX_LIGHTS) * size_of::<u32>())
+                as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = create_bind_group(
+            device,
+            &scene_layout,
+            &atlas,
+            &chunks,
+            &grid,
+            &scene,
+            &mips,
+            &light_grid,
+        );
         Self {
             pipeline,
             scene_layout,
@@ -137,6 +163,9 @@ impl RaymarchPipeline {
             chunks,
             grid,
             scene,
+            mips,
+            light_grid,
+            atlas_words: Vec::new(),
             bind_group,
             atlas_word_capacity,
             atlas_initialized: false,
@@ -158,6 +187,8 @@ impl RaymarchPipeline {
         self.atlas = create_atlas_buffer(device, words);
         self.atlas_word_capacity = words.len();
         self.atlas_initialized = !texels.is_empty();
+        self.atlas_words = words.to_vec();
+        self.mips = create_mip_buffer(device, &pack_ray_mips(words));
         self.bind_group = create_bind_group(
             device,
             &self.scene_layout,
@@ -165,6 +196,8 @@ impl RaymarchPipeline {
             &self.chunks,
             &self.grid,
             &self.scene,
+            &self.mips,
+            &self.light_grid,
         );
     }
 
@@ -185,11 +218,25 @@ impl RaymarchPipeline {
         if end_word > self.atlas_word_capacity {
             return false;
         }
+        // Rebuild the mips from the updated words before writing anything,
+        // so a row update can never leave the pyramid stale. The node count
+        // cannot change on a row update, so the mip buffer keeps its size.
+        let mut words = self.atlas_words.clone();
+        if end_word > words.len() {
+            return false;
+        }
+        words[first_word..end_word].copy_from_slice(texels);
+        let mip_words = pack_ray_mips(&words);
+        if mip_words.len() * size_of::<u32>() != self.mips.size() as usize {
+            return false;
+        }
         queue.write_buffer(
             &self.atlas,
             (first_word * size_of::<u32>()) as u64,
             bytemuck::cast_slice(texels),
         );
+        queue.write_buffer(&self.mips, 0, bytemuck::cast_slice(&mip_words));
+        self.atlas_words = words;
         true
     }
 
@@ -222,6 +269,16 @@ impl RaymarchPipeline {
         if let Some(grid) = &grid {
             queue.write_buffer(&self.grid, 0, bytemuck::cast_slice(&grid.map));
         }
+        // The light grid is derived from the same frame lights the shared
+        // resources upload, so its indices address the lights buffer.
+        let light_grid = derive_light_grid(&collect_frame_lights(frame));
+        if let Some(light_grid) = &light_grid {
+            queue.write_buffer(
+                &self.light_grid,
+                0,
+                bytemuck::cast_slice(&light_grid.packed()),
+            );
+        }
         queue.write_buffer(
             &self.scene,
             0,
@@ -235,6 +292,7 @@ impl RaymarchPipeline {
                 ),
                 self.runtime_options.area_light_visibility_samples,
                 grid.as_ref(),
+                light_grid.as_ref(),
             )),
         );
 
@@ -360,6 +418,44 @@ fn pack_ray_chunk(source_index: usize, chunk: &ChunkDraw) -> GpuRayChunk {
     }
 }
 
+/// sRGB encode of one linear channel, 0..255. Mirrors the shader's
+/// `packed_srgb_to_linear` in reverse, so a mip hit shades exactly like
+/// a leaf whose packed color holds the same sRGB triple.
+fn linear_channel_to_srgb(channel: f32) -> u32 {
+    let clamped = channel.clamp(0.0, 1.0);
+    let encoded = if clamped <= 0.0031308 {
+        12.92 * clamped
+    } else {
+        1.055 * clamped.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u32
+}
+
+/// One mip node as the shader reads it: `vec4<u32>` per atlas node, same
+/// index as `atlas_words / 4`. x holds the packed sRGB albedo (0xRRGGBB,
+/// the leaf color format), y the dominant voxel material, z the emissive
+/// coverage as f32 bits, w is reserved.
+fn pack_ray_mip_node(mip: &MipNode) -> [u32; 4] {
+    let [r, g, b] = mip.linear_albedo;
+    let packed = (linear_channel_to_srgb(r) << 16)
+        | (linear_channel_to_srgb(g) << 8)
+        | linear_channel_to_srgb(b);
+    [
+        packed,
+        mip.dominant_voxel_type,
+        mip.emissive_coverage.to_bits(),
+        0,
+    ]
+}
+
+/// The whole mip pyramid as GPU words, one `vec4<u32>` per atlas node.
+fn pack_ray_mips(texels: &[u32]) -> Vec<u32> {
+    build_mips(texels)
+        .iter()
+        .flat_map(|mip| pack_ray_mip_node(mip))
+        .collect()
+}
+
 fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("webgpu.raymarch.scene-layout"),
@@ -404,6 +500,26 @@ fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(16),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<u32>() as u64),
+                },
+                count: None,
+            },
         ],
     })
 }
@@ -416,6 +532,15 @@ fn create_atlas_buffer(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
     })
 }
 
+fn create_mip_buffer(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("webgpu.raymarch.mips"),
+        contents: bytemuck::cast_slice(words),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn create_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -423,6 +548,8 @@ fn create_bind_group(
     chunks: &wgpu::Buffer,
     grid: &wgpu::Buffer,
     scene: &wgpu::Buffer,
+    mips: &wgpu::Buffer,
+    light_grid: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("webgpu.raymarch.scene-bind-group"),
@@ -444,6 +571,14 @@ fn create_bind_group(
                 binding: 3,
                 resource: grid.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: mips.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: light_grid.as_entire_binding(),
+            },
         ],
     })
 }
@@ -455,7 +590,7 @@ fn create_bind_group(
 /// or a bounding box too sparse to map — returns `None` and the shader
 /// falls back to box-testing every chunk.
 fn derive_chunk_grid(chunks: &[GpuRayChunk]) -> Option<ChunkGrid> {
-    if chunks.is_empty() || chunks.len() > 25 {
+    if chunks.is_empty() || chunks.len() > 256 {
         return None;
     }
     let cube_size = chunks[0].origin_world_size[3];
@@ -531,6 +666,118 @@ fn derive_chunk_grid(chunks: &[GpuRayChunk]) -> Option<ChunkGrid> {
         dims: [dims_x as u32, dims_z as u32],
         map,
     })
+}
+
+/// Certifies the frame's lights as a spatial index for the shader's
+/// direct-light loop: each light lives in exactly one cell (the cell
+/// containing its position), and a receiver looks up only the cells its
+/// reach can touch. Anything else — an empty set, too many lights, or a
+/// grid too sparse to map — returns `None` and the shader falls back to
+/// iterating every light.
+fn derive_light_grid(lights: &[GpuLight]) -> Option<LightGrid> {
+    if lights.is_empty() || lights.len() > LightGrid::MAX_LIGHTS {
+        return None;
+    }
+    // A light can only reach a receiver within `radius + max(half_size)`
+    // of its own position (the rect test measures to the fixture's AABB,
+    // which sits within half_size of the center), so the reach is the
+    // maximum of that sum over the set.
+    let mut reach = 0.0f32;
+    for light in lights {
+        if !light.position_radius[0].is_finite()
+            || !light.position_radius[1].is_finite()
+            || !light.position_radius[2].is_finite()
+            || !light.position_radius[3].is_finite()
+            || light.position_radius[3] < 0.0
+            || !light.half_size_kind[0].is_finite()
+            || !light.half_size_kind[1].is_finite()
+            || light.half_size_kind[0] < 0.0
+            || light.half_size_kind[1] < 0.0
+        {
+            return None;
+        }
+        let light_reach = light.position_radius[3]
+            + light.half_size_kind[0].max(light.half_size_kind[1]);
+        reach = reach.max(light_reach);
+    }
+    if !reach.is_finite() {
+        return None;
+    }
+    // One square cell per reach: a receiver's lookup is always its own
+    // cell plus one ring of neighbours, whatever the light range is.
+    let cell = reach.max(1.0);
+    let min_x = lights
+        .iter()
+        .map(|light| light.position_radius[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_x = lights
+        .iter()
+        .map(|light| light.position_radius[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_z = lights
+        .iter()
+        .map(|light| light.position_radius[2])
+        .fold(f32::INFINITY, f32::min);
+    let max_z = lights
+        .iter()
+        .map(|light| light.position_radius[2])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let dims_x = ((max_x - min_x) / cell).floor() as usize + 1;
+    let dims_z = ((max_z - min_z) / cell).floor() as usize + 1;
+    if dims_x == 0 || dims_z == 0 || dims_x * dims_z > LightGrid::MAX_CELLS {
+        return None;
+    }
+    let mut per_cell: Vec<Vec<u32>> = vec![Vec::new(); dims_x * dims_z];
+    for (index, light) in lights.iter().enumerate() {
+        let cell_x = ((light.position_radius[0] - min_x) / cell).floor() as usize;
+        let cell_z = ((light.position_radius[2] - min_z) / cell).floor() as usize;
+        if cell_x >= dims_x || cell_z >= dims_z {
+            return None;
+        }
+        per_cell[cell_z * dims_x + cell_x].push(index as u32);
+    }
+    let mut offsets = Vec::with_capacity(dims_x * dims_z + 1);
+    let mut indices = Vec::with_capacity(lights.len());
+    for cell_lights in &per_cell {
+        offsets.push(indices.len() as u32);
+        indices.extend_from_slice(cell_lights);
+    }
+    offsets.push(indices.len() as u32);
+    Some(LightGrid {
+        origin: [min_x, 0.0, min_z],
+        cell: [cell, cell],
+        dims: [dims_x as u32, dims_z as u32],
+        reach,
+        offsets,
+        indices,
+    })
+}
+
+/// Lights the shader's grid lookup would visit for a receiver: the
+/// indices in every cell the `[receiver ± reach]` square overlaps.
+/// This is the CPU mirror of the WGSL loop, used by the tests to prove
+/// the lookup set always contains every light within reach.
+#[cfg(test)]
+fn lights_near(grid: &LightGrid, receiver: [f32; 3]) -> Vec<u32> {
+    let dims_x = grid.dims[0] as i32;
+    let dims_z = grid.dims[1] as i32;
+    if dims_x <= 0 || dims_z <= 0 || grid.cell[0] <= 0.0 || grid.cell[1] <= 0.0 {
+        return Vec::new();
+    }
+    let min_cx = ((receiver[0] - grid.reach - grid.origin[0]) / grid.cell[0]).floor() as i32;
+    let max_cx = ((receiver[0] + grid.reach - grid.origin[0]) / grid.cell[0]).floor() as i32;
+    let min_cz = ((receiver[2] - grid.reach - grid.origin[2]) / grid.cell[1]).floor() as i32;
+    let max_cz = ((receiver[2] + grid.reach - grid.origin[2]) / grid.cell[1]).floor() as i32;
+    let mut out = Vec::new();
+    for cz in min_cz.max(0)..=max_cz.min(dims_z - 1) {
+        for cx in min_cx.max(0)..=max_cx.min(dims_x - 1) {
+            let cell = (cz * dims_x + cx) as usize;
+            let start = grid.offsets[cell] as usize;
+            let end = grid.offsets[cell + 1] as usize;
+            out.extend_from_slice(&grid.indices[start..end]);
+        }
+    }
+    out
 }
 
 /// Smallest positive gap between distinct coordinates, or `None` when
@@ -718,6 +965,22 @@ mod tests {
     }
 
     #[test]
+    fn chunk_grid_certifies_a_large_lattice_past_the_old_cap() {
+        // 6x6 = 36 chunks: past the old 25-chunk cap, inside the 256-cell
+        // grid. The DDA visits only crossed cells, so the per-pixel cost
+        // stays bounded as the world grows.
+        let chunks: Vec<_> = (-3..=2)
+            .flat_map(|dz| (-3..=2).map(move |dx| (dx, dz)))
+            .map(|(dx, dz)| packed([dx as f32 * 10.0, 0.0, dz as f32 * 10.0], 12.8))
+            .collect();
+        assert_eq!(chunks.len(), 36);
+        let grid = derive_chunk_grid(&chunks).expect("6x6 lattice certifies");
+        assert_eq!(grid.dims, [6, 6]);
+        assert_eq!(grid.map.len(), 36);
+        assert_eq!(grid.map.iter().filter(|cell| **cell != u32::MAX).count(), 36);
+    }
+
+    #[test]
     fn chunk_grid_leaves_a_hole_empty() {
         let chunks: Vec<_> = (-1..=1)
             .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
@@ -770,11 +1033,12 @@ mod tests {
 
     #[test]
     fn chunk_grid_rejects_an_oversized_bounding_box() {
+        // 18x18 origins at 1.0 spacing: 324 cells, past the 256-cell grid.
         let mut chunks = Vec::new();
-        for index in 0..9 {
+        for index in 0..18 {
             chunks.push(packed([index as f32, 0.0, 0.0], 12.8));
         }
-        for index in 1..9 {
+        for index in 1..18 {
             chunks.push(packed([0.0, 0.0, index as f32], 12.8));
         }
         assert!(derive_chunk_grid(&chunks).is_none());
@@ -895,5 +1159,222 @@ mod tests {
         assert!(helper.contains("if dot(normal, delta) <= 0.0"));
         assert!(helper.contains("if world.y >= light.position_radius.y"));
         assert!(helper.contains("if dx * dx + dy * dy + dz * dz >= range * range"));
+    }
+
+    #[test]
+    fn linear_channel_to_srgb_round_trips_through_the_leaf_format() {
+        assert_eq!(linear_channel_to_srgb(0.0), 0);
+        assert_eq!(linear_channel_to_srgb(1.0), 255);
+        assert_eq!(linear_channel_to_srgb(0.5), 188);
+        // 128/255 sRGB decodes to ~0.21586 linear (see decode_srgb_albedo).
+        assert_eq!(linear_channel_to_srgb(0.215_86), 128);
+        assert_eq!(linear_channel_to_srgb(-1.0), 0);
+        assert_eq!(linear_channel_to_srgb(2.0), 255);
+    }
+
+    #[test]
+    fn pack_ray_mips_round_trips_a_single_leaf() {
+        // One leaf node: type 1, material 1, packed mid-grey, no light.
+        let atlas = [1u32, 1, 0x808080, 0];
+        let packed = pack_ray_mips(&atlas);
+        assert_eq!(packed.len(), 4);
+        assert_eq!(packed[0], 0x808080);
+        assert_eq!(packed[1], 1);
+        assert_eq!(f32::from_bits(packed[2]), 0.0);
+        assert_eq!(packed[3], 0);
+    }
+
+    fn test_light(position: [f32; 3], radius: f32, half_size: [f32; 2]) -> GpuLight {
+        GpuLight {
+            position_radius: [position[0], position[1], position[2], radius],
+            color_intensity: [1.0, 1.0, 1.0, 1.0],
+            half_size_kind: [half_size[0], half_size[1], 1.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn light_grid_groups_lights_by_home_cell() {
+        let lights = [
+            test_light([0.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+            test_light([25.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+            test_light([0.0, 2.0, 25.0], 6.0, [0.0, 0.0]),
+        ];
+        let grid = derive_light_grid(&lights).expect("three lights certify");
+        assert_eq!(grid.reach, 6.0);
+        assert_eq!(grid.cell, [6.0, 6.0]);
+        assert_eq!(grid.dims, [5, 5]);
+        assert_eq!(grid.cell_count(), 25);
+        assert_eq!(grid.indices, vec![0, 1, 2]);
+        assert_eq!(grid.offsets[0], 0);
+        assert_eq!(grid.offsets[1], 1);
+        assert_eq!(grid.offsets[4], 1);
+        assert_eq!(grid.offsets[5], 2);
+        assert_eq!(grid.offsets[20], 2);
+        assert_eq!(grid.offsets[21], 3);
+        assert_eq!(grid.offsets[25], 3);
+        assert_eq!(grid.packed().len(), 26 + 3);
+    }
+
+    #[test]
+    fn light_grid_lookup_contains_every_light_within_reach() {
+        let lights = [
+            test_light([0.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+            test_light([10.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+            test_light([0.0, 2.0, 10.0], 6.0, [0.0, 0.0]),
+            test_light([40.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+        ];
+        let grid = derive_light_grid(&lights).expect("four lights certify");
+        // Receiver at (5, 0, 0): lights 0 and 1 are 5 units away, inside
+        // the 6-unit reach; light 3 is 35 away and must not be visited.
+        let near = lights_near(&grid, [5.0, 1.7, 0.0]);
+        assert!(near.contains(&0));
+        assert!(near.contains(&1));
+        assert!(!near.contains(&3));
+        // Every light within reach of any receiver on a sweep is found.
+        for receiver_x in [0.0, 5.0, 10.0, 20.0, 30.0, 40.0] {
+            let receiver = [receiver_x, 1.7, 0.0];
+            let near = lights_near(&grid, receiver);
+            for (index, light) in lights.iter().enumerate() {
+                let dx = light.position_radius[0] - receiver[0];
+                let dz = light.position_radius[2] - receiver[2];
+                if dx * dx + dz * dz <= grid.reach * grid.reach {
+                    assert!(
+                        near.contains(&(index as u32)),
+                        "light {index} within reach of {receiver_x} must be visited"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn light_grid_lookup_excludes_lights_far_beyond_reach() {
+        let lights = [
+            test_light([0.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+            test_light([100.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+        ];
+        let grid = derive_light_grid(&lights).expect("two lights certify");
+        assert_eq!(lights_near(&grid, [0.0, 1.7, 0.0]), vec![0]);
+        assert_eq!(lights_near(&grid, [100.0, 1.7, 0.0]), vec![1]);
+    }
+
+    #[test]
+    fn light_grid_rejects_an_empty_light_set() {
+        assert!(derive_light_grid(&[]).is_none());
+    }
+
+    #[test]
+    fn light_grid_rejects_too_many_lights() {
+        let lights: Vec<_> = (0..1025)
+            .map(|_| test_light([0.0, 2.0, 0.0], 6.0, [0.0, 0.0]))
+            .collect();
+        assert!(derive_light_grid(&lights).is_none());
+    }
+
+    #[test]
+    fn light_grid_rejects_a_grid_past_the_cell_cap() {
+        // 500 lights 4 units apart with a 0.5 reach: cell 1.0, so the
+        // grid would need ~2000 cells in x alone, past the 1024 cap.
+        let lights: Vec<_> = (0..500)
+            .map(|i| test_light([i as f32 * 4.0, 2.0, 0.0], 0.5, [0.0, 0.0]))
+            .collect();
+        assert!(derive_light_grid(&lights).is_none());
+    }
+
+    #[test]
+    fn light_grid_single_light_covers_its_cell() {
+        let lights = [test_light([3.0, 2.0, 4.0], 6.0, [0.0, 0.0])];
+        let grid = derive_light_grid(&lights).expect("one light certifies");
+        assert_eq!(grid.dims, [1, 1]);
+        assert_eq!(grid.offsets, vec![0, 1]);
+        assert_eq!(grid.indices, vec![0]);
+        assert_eq!(lights_near(&grid, [3.0, 1.7, 4.0]), vec![0]);
+        assert!(lights_near(&grid, [100.0, 1.7, 100.0]).is_empty());
+    }
+
+    #[test]
+    fn light_grid_cell_boundary_light_lands_in_one_cell() {
+        let lights = [
+            test_light([0.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+            test_light([6.0, 2.0, 0.0], 6.0, [0.0, 0.0]),
+        ];
+        let grid = derive_light_grid(&lights).expect("boundary lights certify");
+        assert_eq!(grid.dims, [2, 1]);
+        assert_eq!(grid.indices, vec![0, 1]);
+        assert_eq!(grid.offsets, vec![0, 1, 2]);
+        let near = lights_near(&grid, [0.0, 1.7, 0.0]);
+        assert_eq!(near.len(), 2);
+        assert!(near.contains(&0) && near.contains(&1));
+    }
+
+    #[test]
+    fn light_grid_reach_covers_a_rect_lights_half_size() {
+        // A strip light: radius 6 plus a 2-unit half-size reaches 8.
+        let lights = [test_light([0.0, 2.0, 0.0], 6.0, [2.0, 0.5])];
+        let grid = derive_light_grid(&lights).expect("strip light certifies");
+        assert_eq!(grid.reach, 8.0);
+        assert_eq!(grid.cell, [8.0, 8.0]);
+    }
+
+    #[test]
+    fn shader_light_grid_visits_only_nearby_lights() {
+        let source = include_str!("../shaders/raymarch.wgsl");
+        assert!(source.contains("@group(1) @binding(5) var<storage, read> light_grid:"));
+        assert!(source.contains("light_grid_valid"));
+        assert!(source.contains("light_grid_reach"));
+        let analytic_start = source
+            .find("fn raymarch_analytic_direct(")
+            .expect("analytic direct");
+        let analytic_end = source[analytic_start..]
+            .find("\n}\n")
+            .expect("analytic end")
+            + analytic_start;
+        let analytic = &source[analytic_start..analytic_end];
+        assert!(analytic.contains("light_grid_valid == 1u"));
+        assert!(analytic.contains("light_grid"));
+    }
+
+    #[test]
+    fn shader_stops_descent_at_a_pixel_matched_mip_node() {
+        let source = include_str!("../shaders/raymarch.wgsl");
+        assert!(source.contains("@group(1) @binding(4) var<storage, read> mip_nodes:"));
+        assert!(source.contains("fn svo_stack_walk("));
+        assert!(source.contains("lod_k: f32"));
+        let walk_start = source
+            .find("fn svo_stack_walk(")
+            .expect("stack walk");
+        let walk_end = source[walk_start..]
+            .find("\nfn trace_chunk(")
+            .expect("walk end")
+            + walk_start;
+        let walk = &source[walk_start..walk_end];
+        assert!(walk.contains("if node_size <= lod_k * max(t_entry, 0.0)"));
+        assert!(walk.contains("let mip = mip_nodes[node_index];"));
+        assert!(walk.contains("if emissive <= 0.0 || authored_emission_strength(mip.y) > 0.0"));
+        assert!(walk.contains("voxel_size,"));
+        let trace_start = source.find("fn trace_chunk(").expect("primary trace");
+        let trace_end = source[trace_start..]
+            .find("\nfn direct_visibility_bias(")
+            .expect("trace end")
+            + trace_start;
+        let trace = &source[trace_start..trace_end];
+        assert!(trace.contains("let lod_k = 2.0 * frame.viewport_fov_start.z"));
+        assert!(trace.contains("walk.voxel_size"));
+    }
+
+    #[test]
+    fn shader_keeps_shadow_rays_exact() {
+        let source = include_str!("../shaders/raymarch.wgsl");
+        let visibility_start = source
+            .find("fn trace_visibility_chunk_stack(")
+            .expect("visibility trace");
+        let visibility_end = source[visibility_start..]
+            .find("\n// Top-level chunk-grid walk")
+            .expect("visibility end")
+            + visibility_start;
+        let visibility = &source[visibility_start..visibility_end];
+        assert!(visibility.contains("step_budget, 0.0)"));
+        assert!(!visibility.contains("lod_k *"));
+        assert!(!visibility.contains("lod_k >"));
     }
 }

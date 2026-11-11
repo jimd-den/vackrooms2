@@ -26,6 +26,16 @@ struct RayScene {
     grid_cell: vec2<f32>,
     // Grid dimensions in x and z cells.
     grid_dims: vec2<u32>,
+    // Minimum corner of light-grid cell (0, 0); y is unused.
+    light_grid_origin: vec2<f32>,
+    // Light-grid cell size in x and z (square: both are the reach).
+    light_grid_cell: vec2<f32>,
+    // Light-grid dimensions in x and z cells.
+    light_grid_dims: vec2<u32>,
+    // Farthest a light can reach from its position (see LightGrid).
+    light_grid_reach: f32,
+    // 1 when the light grid below is certified, 0 to iterate every light.
+    light_grid_valid: u32,
 };
 
 const RAY_POLICY_EMPTY_SPACE_SKIP: u32 = 1u;
@@ -41,6 +51,14 @@ const DIRECT_VISIBILITY_TRACE_BUDGET: u32 = 4096u;
 // Cell-major map (index z * grid_dims.x + x) from grid cell to the index
 // of its chunk in ray_chunks, or 0xffffffffu for an empty cell.
 @group(1) @binding(3) var<storage, read> chunk_grid: array<u32>;
+// Mip pyramid, one vec4<u32> per atlas node, same index as atlas_words / 4:
+// x is the packed sRGB albedo (the leaf color format), y the dominant voxel
+// material, z the emissive coverage as f32 bits, w reserved.
+@group(1) @binding(4) var<storage, read> mip_nodes: array<vec4<u32>>;
+// Light grid, packed: one prefix-sum offset per cell plus a sentinel,
+// then the light indices cell by cell. A cell's lights are
+// light_grid[cell_count + 1 + offsets[cell] .. offsets[cell + 1]].
+@group(1) @binding(5) var<storage, read> light_grid: array<u32>;
 
 struct FullscreenVertex {
     @builtin(position) clip_position: vec4<f32>,
@@ -189,6 +207,7 @@ struct SvoWalkResult {
     material: u32,
     color: u32,
     light_word: u32,
+    voxel_size: f32,
     steps: u32,
 };
 
@@ -203,12 +222,23 @@ struct SvoWalkResult {
 // `step_budget` bounds the walk: exhaustion reports "not found" with
 // steps >= budget, and the caller decides what that means (a primary ray
 // misses; a shadow ray is conservatively opaque).
+//
+// `lod_k` is the pixel footprint growth rate (world units of one pixel per
+// unit of distance: 2 * fov_tan / viewport height). A primary ray passes
+// it; a shadow ray passes 0.0, keeping shadow traversal exact. When it is
+// positive and the current interior node is at most one pixel wide at its
+// entry distance, the walk stops there and shades the node's stored mip
+// average instead of descending: the same voxels, summarized, so distant
+// geometry stays present at the cost of one lookup. A node holding
+// emissive material is never collapsed into a non-emissive average —
+// descending preserves the light panel.
 fn svo_stack_walk(
     ray_origin: vec3<f32>,
     ray_direction: vec3<f32>,
     chunk: RayChunk,
     interval: BoxHit,
     step_budget: u32,
+    lod_k: f32,
 ) -> SvoWalkResult {
     let voxel_size = chunk.voxel_depth.x;
     let depth = u32(chunk.voxel_depth.y);
@@ -257,10 +287,40 @@ fn svo_stack_walk(
                     payload,
                     color_or_mask,
                     light_word,
+                    voxel_size,
                     steps
                 );
             }
         } else {
+            // MIP LOD: this node is at most one pixel wide at its entry
+            // distance, so its stored average is the correct antialiased
+            // value for this ray. Stop here instead of descending.
+            if lod_k > 0.0 {
+                let node_size = bounds_max.x - bounds_min.x;
+                let node_entry = box_intersection(
+                    ray_origin,
+                    ray_direction,
+                    bounds_min,
+                    bounds_max
+                );
+                let t_entry = max(node_entry.entry, interval.entry);
+                if node_size <= lod_k * max(t_entry, 0.0) {
+                    let mip = mip_nodes[node_index];
+                    let emissive = bitcast<f32>(mip.z);
+                    if emissive <= 0.0 || authored_emission_strength(mip.y) > 0.0 {
+                        return SvoWalkResult(
+                            true,
+                            t_entry,
+                            node_entry.normal,
+                            mip.y,
+                            mip.x,
+                            0u,
+                            node_size,
+                            steps
+                        );
+                    }
+                }
+            }
             let center = (bounds_min + bounds_max) * 0.5;
             let child_x = select(0u, 1u, p.x >= center.x);
             let child_y = select(0u, 1u, p.y >= center.y);
@@ -328,7 +388,7 @@ fn svo_stack_walk(
             break;
         }
     }
-    return SvoWalkResult(false, 0.0, vec3<f32>(0.0), 0u, 0u, 0u, steps);
+    return SvoWalkResult(false, 0.0, vec3<f32>(0.0), 0u, 0u, 0u, 0.0, steps);
 }
 
 fn trace_chunk(
@@ -338,7 +398,11 @@ fn trace_chunk(
     interval: BoxHit,
 ) -> VoxelHit {
     let budget = clamp(frame.render_options.w, 1u, 4096u);
-    let walk = svo_stack_walk(ray_origin, ray_direction, chunk, interval, budget);
+    // One pixel's world size grows linearly with distance: 2 * fov_tan
+    // across the viewport height. This is the LOD growth rate the walk
+    // compares each node's size against.
+    let lod_k = 2.0 * frame.viewport_fov_start.z / max(frame.viewport_fov_start.y, 1.0);
+    let walk = svo_stack_walk(ray_origin, ray_direction, chunk, interval, budget, lod_k);
     if walk.found {
         return VoxelHit(
             true,
@@ -347,7 +411,7 @@ fn trace_chunk(
             walk.material,
             walk.color,
             walk.light_word,
-            chunk.voxel_depth.x
+            walk.voxel_size
         );
     }
     return VoxelHit(false, 0.0, vec3<f32>(0.0), 0u, 0u, 0u, 0.0);
@@ -366,7 +430,9 @@ fn trace_visibility_chunk_stack(
     interval: BoxHit,
     step_budget: u32,
 ) -> VisibilityTrace {
-    let walk = svo_stack_walk(ray_origin, ray_direction, chunk, interval, step_budget);
+    // Shadow rays stay exact: lod_k 0.0 disables the mip stop, so a light
+    // is never blocked by a collapsed node it would pass beside.
+    let walk = svo_stack_walk(ray_origin, ray_direction, chunk, interval, step_budget, 0.0);
     if walk.found {
         return VisibilityTrace(true, walk.steps);
     }
@@ -634,7 +700,7 @@ fn finite_segment_visible(
         return true;
     }
 
-    let chunk_count = min(ray_scene.chunk_count, 25u);
+    let chunk_count = min(ray_scene.chunk_count, 256u);
 
     for (var index = 0u; index < chunk_count; index += 1u) {
         if remaining_steps == 0u {
@@ -780,6 +846,39 @@ fn raymarch_analytic_direct(
     receiver_voxel_size: f32,
 ) -> vec3<f32> {
     var analytic_direct = vec3<f32>(0.0);
+    if ray_scene.light_grid_valid == 1u {
+        // The grid lookup visits every cell the [world ± reach] square
+        // overlaps, so every light within reach is visited and the exact
+        // cull inside evaluate_visible_scene_light stays the net: the
+        // visited set is a superset of the contributing set, and the
+        // result is identical to iterating every light.
+        let cell_count = ray_scene.light_grid_dims.x * ray_scene.light_grid_dims.y;
+        let indices_base = cell_count + 1u;
+        let min_cx = i32(floor((world.x - ray_scene.light_grid_reach - ray_scene.light_grid_origin.x) / ray_scene.light_grid_cell.x));
+        let max_cx = i32(floor((world.x + ray_scene.light_grid_reach - ray_scene.light_grid_origin.x) / ray_scene.light_grid_cell.x));
+        let min_cz = i32(floor((world.z - ray_scene.light_grid_reach - ray_scene.light_grid_origin.y) / ray_scene.light_grid_cell.y));
+        let max_cz = i32(floor((world.z + ray_scene.light_grid_reach - ray_scene.light_grid_origin.y) / ray_scene.light_grid_cell.y));
+        for (var cz = max(min_cz, 0); cz <= min(max_cz, i32(ray_scene.light_grid_dims.y) - 1); cz += 1) {
+            for (var cx = max(min_cx, 0); cx <= min(max_cx, i32(ray_scene.light_grid_dims.x) - 1); cx += 1) {
+                let cell = u32(cz * i32(ray_scene.light_grid_dims.x) + cx);
+                let start = light_grid[cell];
+                let end = light_grid[cell + 1u];
+                for (var k = start; k < end; k += 1u) {
+                    let light = lights[light_grid[indices_base + k]];
+                    if light.half_size_kind.w < 0.5 {
+                        continue;
+                    }
+                    analytic_direct += evaluate_visible_scene_light(
+                        world,
+                        normal,
+                        receiver_voxel_size,
+                        light
+                    );
+                }
+            }
+        }
+        return analytic_direct;
+    }
     for (var index = 0u; index < frame.render_options.x; index += 1u) {
         let light = lights[index];
         if light.half_size_kind.w < 0.5 {
@@ -842,7 +941,7 @@ fn raymarch_fragment(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f
             walk = chunk_grid_walk_step(walk);
         }
     } else {
-        let chunk_count = min(ray_scene.chunk_count, 25u);
+        let chunk_count = min(ray_scene.chunk_count, 256u);
         for (var index = 0u; index < chunk_count; index += 1u) {
             let result = consider_primary_chunk(
                 ray_chunks[index],

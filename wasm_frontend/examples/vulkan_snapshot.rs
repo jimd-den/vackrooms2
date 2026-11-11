@@ -36,9 +36,31 @@ use wasm_frontend::drivers::webgpu::pipelines::{
 
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const FOV_TAN: f32 = 0.767_327;
-const MAX_DRAW_DISTANCE: f32 = 48.0;
 const TRACE_BUDGET: u32 = 512;
 const FACE_BUDGET: u32 = 262_144;
+
+/// Draw distance for this run (`SNAPSHOT_DRAW_DISTANCE`, default 48).
+/// The engine validates 16..=256; anything else falls back to 48.
+fn draw_distance() -> f32 {
+    let requested = std::env::var("SNAPSHOT_DRAW_DISTANCE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(48.0);
+    if (16.0..=256.0).contains(&requested) {
+        requested
+    } else {
+        48.0
+    }
+}
+
+/// Chunk neighborhood radius (`SNAPSHOT_RADIUS`, default 1 -> 3x3).
+fn snapshot_radius() -> i32 {
+    std::env::var("SNAPSHOT_RADIUS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+        .clamp(1, 7)
+}
 
 struct LoadedWorld {
     payloads: Vec<(f32, f32, ChunkPayload)>,
@@ -70,7 +92,7 @@ fn main() {
         width,
         height,
         FOV_TAN,
-        MAX_DRAW_DISTANCE,
+        draw_distance(),
         TRACE_BUDGET,
         lights.len(),
         toggles,
@@ -86,7 +108,7 @@ fn main() {
         &device,
         TARGET_FORMAT,
         frame_resources.layout(),
-        MAX_DRAW_DISTANCE,
+        draw_distance(),
     );
     let surface_chunks: Vec<SurfaceChunk> = world
         .payloads
@@ -126,7 +148,7 @@ fn main() {
         &device,
         TARGET_FORMAT,
         frame_resources.layout(),
-        MAX_DRAW_DISTANCE,
+        draw_distance(),
         FACE_BUDGET,
     );
     splat.upload(&device, &surface_chunks);
@@ -160,7 +182,7 @@ fn main() {
         frame_resources.layout(),
         world.chunks.len(),
     );
-    raymarch.configure(RaymarchRuntimeOptions::new(MAX_DRAW_DISTANCE, true, 4));
+    raymarch.configure(RaymarchRuntimeOptions::new(draw_distance(), true, 4));
     raymarch.upload_atlas(&device, &world.atlas);
     let pixels = render_offscreen(
         &device,
@@ -186,7 +208,7 @@ fn main() {
     let mut cpu_present = CpuPresentPipeline::new(&device, TARGET_FORMAT, width, height);
     cpu_present.upload_atlas(&world.atlas);
     let cpu_settings = CpuRenderSettings {
-        max_draw_distance: MAX_DRAW_DISTANCE,
+        max_draw_distance: draw_distance(),
         shadows: CpuShadowMode::Off,
         fov_tan: FOV_TAN,
         toggles,
@@ -258,9 +280,10 @@ fn create_vulkan_device() -> (wgpu::Device, wgpu::Queue) {
     (device, queue)
 }
 
-/// Generates the 3x3 chunk neighborhood around the spawn corridor with the
+/// Generates the chunk neighborhood around the spawn corridor with the
 /// same source the browser workers use, and assembles the shared SVO atlas
-/// exactly like the streaming engine does.
+/// exactly like the streaming engine does. Radius comes from
+/// `SNAPSHOT_RADIUS` (default 1 -> 3x3).
 fn load_spawn_world(seed: u32) -> LoadedWorld {
     let config = GeneratorConfig::low_spec();
     // `SNAPSHOT_POS=x,z` (world units) frames somewhere other than spawn;
@@ -284,8 +307,9 @@ fn load_spawn_world(seed: u32) -> LoadedWorld {
     let source = LocalChunkSource::new(SimpleNoiseProvider::new(), seed, config);
 
     let mut payloads = Vec::new();
-    for dz in -1..=1 {
-        for dx in -1..=1 {
+    let radius = snapshot_radius();
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
             let x = origin_x + dx as f32 * config.chunk_size;
             let z = origin_z + dz as f32 * config.chunk_size;
             payloads.push((x, z, source.load(x, z, 0, 0)));
@@ -325,12 +349,19 @@ fn load_spawn_world(seed: u32) -> LoadedWorld {
         }
     }
 
+    // `SNAPSHOT_FOG=0` disables distance fog for one diagnostic view, so
+    // the far field can be judged on geometry alone: what renders through
+    // LOD versus what the fog was hiding.
+    let mut environment = Environment::interior();
+    if std::env::var("SNAPSHOT_FOG").as_deref() == Ok("0") {
+        environment.fog_density = 0.0;
+    }
     let frame = FrameParams {
         camera_pos: [spawn.x, 1.7, spawn.z],
         yaw,
         pitch: 0.0,
         scene_lights: unique_lights.into_values().collect(),
-        environment: Environment::interior(),
+        environment,
         ..FrameParams::default()
     };
 
