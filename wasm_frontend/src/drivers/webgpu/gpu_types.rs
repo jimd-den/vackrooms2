@@ -253,8 +253,49 @@ pub struct GpuRayScene {
     /// bit 2: direct-light visibility rays.
     pub policy_flags: u32,
     /// x: validated rectangle-light visibility sample count (1 or 4);
-    /// y: reserved.
+    /// y: 1 when the chunk-grid walk below is certified, 0 to fall back
+    /// to the per-chunk loop.
     pub reserved: [u32; 2],
+    /// Minimum corner of grid cell (0, 0); y is the chunk layer base.
+    pub grid_origin: [f32; 3],
+    /// SVO cube edge: every resident chunk shares one cube size, so the
+    /// grid layer is exactly this tall.
+    pub grid_cube_size: f32,
+    /// Lattice spacing in x and z (the streaming chunk size, which is
+    /// smaller than the cube size: cubes overlap, cells do not).
+    pub grid_cell: [f32; 2],
+    /// Grid dimensions in x and z cells.
+    pub grid_dims: [u32; 2],
+}
+
+/// Certified top-level structure over the resident chunks: a regular
+/// lattice in x/z, one layer in y. The shader walks the lattice with a
+/// 2D DDA instead of box-testing every chunk, so a trace visits only
+/// the chunks its ray actually crosses. The map is cell-major
+/// (index `z * dims[0] + x`); empty cells hold `u32::MAX`.
+#[derive(Debug, Clone)]
+pub struct ChunkGrid {
+    pub origin: [f32; 3],
+    pub cube_size: f32,
+    pub cell: [f32; 2],
+    pub dims: [u32; 2],
+    pub map: Vec<u32>,
+}
+
+impl ChunkGrid {
+    /// Largest grid the shader will walk; a sparser resident set falls
+    /// back to the per-chunk loop instead.
+    pub const MAX_CELLS: usize = 64;
+
+    pub fn invalid() -> Self {
+        Self {
+            origin: [0.0; 3],
+            cube_size: 0.0,
+            cell: [0.0; 2],
+            dims: [0; 2],
+            map: Vec::new(),
+        }
+    }
 }
 
 pub const RAY_POLICY_EMPTY_SPACE_SKIP: u32 = 1 << 0;
@@ -268,6 +309,7 @@ impl GpuRayScene {
         front_to_back: bool,
         direct_light_visibility: bool,
         area_light_visibility_samples: u8,
+        grid: Option<&ChunkGrid>,
     ) -> Self {
         let mut policy_flags = 0;
         if empty_space_skip {
@@ -279,13 +321,28 @@ impl GpuRayScene {
         if direct_light_visibility {
             policy_flags |= RAY_POLICY_DIRECT_LIGHT_VISIBILITY;
         }
+        let (grid_origin, grid_cube_size, grid_cell, grid_dims, grid_valid) =
+            match grid {
+                Some(grid) => (
+                    grid.origin,
+                    grid.cube_size,
+                    grid.cell,
+                    grid.dims,
+                    1u32,
+                ),
+                None => ([0.0; 3], 0.0, [0.0; 2], [0; 2], 0u32),
+            };
         Self {
             chunk_count,
             policy_flags,
             reserved: [
                 validated_area_light_visibility_samples(area_light_visibility_samples),
-                0,
+                grid_valid,
             ],
+            grid_origin,
+            grid_cube_size,
+            grid_cell,
+            grid_dims,
         }
     }
 }
@@ -328,7 +385,7 @@ mod tests {
         assert_eq!(size_of::<GpuPackedSurfaceVertex>(), 16);
         assert_eq!(size_of::<GpuPackedFace>(), 16);
         assert_eq!(size_of::<GpuRayChunk>(), 48);
-        assert_eq!(size_of::<GpuRayScene>(), 16);
+        assert_eq!(size_of::<GpuRayScene>(), 48);
         assert_eq!(size_of::<GpuSupplySprite>(), 16);
     }
 
@@ -359,7 +416,14 @@ mod tests {
 
     #[test]
     fn ray_policy_and_visibility_quality_fit_the_stable_scene_record() {
-        let scene = GpuRayScene::from_policy(7, true, true, true, 4);
+        let grid = ChunkGrid {
+            origin: [-10.0, 0.0, -10.0],
+            cube_size: 12.8,
+            cell: [10.0, 10.0],
+            dims: [3, 3],
+            map: vec![u32::MAX; 9],
+        };
+        let scene = GpuRayScene::from_policy(7, true, true, true, 4, Some(&grid));
         assert_eq!(scene.chunk_count, 7);
         assert_eq!(
             scene.policy_flags,
@@ -367,12 +431,18 @@ mod tests {
                 | RAY_POLICY_FRONT_TO_BACK
                 | RAY_POLICY_DIRECT_LIGHT_VISIBILITY
         );
-        assert_eq!(scene.reserved, [4, 0]);
+        assert_eq!(scene.reserved, [4, 1]);
+        assert_eq!(scene.grid_origin, [-10.0, 0.0, -10.0]);
+        assert_eq!(scene.grid_cube_size, 12.8);
+        assert_eq!(scene.grid_cell, [10.0, 10.0]);
+        assert_eq!(scene.grid_dims, [3, 3]);
 
-        let conservative = GpuRayScene::from_policy(2, false, false, false, 3);
+        let conservative = GpuRayScene::from_policy(2, false, false, false, 3, None);
         assert_eq!(conservative.policy_flags, 0);
         assert_eq!(conservative.reserved, [1, 0]);
-        assert_eq!(size_of::<GpuRayScene>(), 16);
+        assert_eq!(conservative.grid_origin, [0.0; 3]);
+        assert_eq!(conservative.grid_dims, [0; 2]);
+        assert_eq!(size_of::<GpuRayScene>(), 48);
     }
 
     #[test]

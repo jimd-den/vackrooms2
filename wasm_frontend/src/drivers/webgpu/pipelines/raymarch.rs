@@ -9,7 +9,7 @@ use crate::application::render_settings::RenderToggles;
 use crate::application::rendering::encode_display_color;
 
 use crate::drivers::webgpu::frame_resources::FrameResources;
-use crate::drivers::webgpu::gpu_types::{GpuRayChunk, GpuRayScene};
+use crate::drivers::webgpu::gpu_types::{ChunkGrid, GpuRayChunk, GpuRayScene};
 use crate::drivers::webgpu::shader::ShaderProgram;
 
 const ATLAS_TEXELS_PER_ROW: u64 = 1024;
@@ -60,6 +60,7 @@ pub struct RaymarchPipeline {
     scene_layout: wgpu::BindGroupLayout,
     atlas: wgpu::Buffer,
     chunks: wgpu::Buffer,
+    grid: wgpu::Buffer,
     scene: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     atlas_word_capacity: usize,
@@ -116,18 +117,25 @@ impl RaymarchPipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let grid = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("webgpu.raymarch.chunk-grid"),
+            size: (ChunkGrid::MAX_CELLS * size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let scene = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("webgpu.raymarch.scene"),
             size: size_of::<GpuRayScene>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_group = create_bind_group(device, &scene_layout, &atlas, &chunks, &scene);
+        let bind_group = create_bind_group(device, &scene_layout, &atlas, &chunks, &grid, &scene);
         Self {
             pipeline,
             scene_layout,
             atlas,
             chunks,
+            grid,
             scene,
             bind_group,
             atlas_word_capacity,
@@ -155,6 +163,7 @@ impl RaymarchPipeline {
             &self.scene_layout,
             &self.atlas,
             &self.chunks,
+            &self.grid,
             &self.scene,
         );
     }
@@ -209,6 +218,10 @@ impl RaymarchPipeline {
         if !chunks.is_empty() {
             queue.write_buffer(&self.chunks, 0, bytemuck::cast_slice(&chunks));
         }
+        let grid = derive_chunk_grid(&chunks);
+        if let Some(grid) = &grid {
+            queue.write_buffer(&self.grid, 0, bytemuck::cast_slice(&grid.map));
+        }
         queue.write_buffer(
             &self.scene,
             0,
@@ -221,6 +234,7 @@ impl RaymarchPipeline {
                     toggles.shadow_pass,
                 ),
                 self.runtime_options.area_light_visibility_samples,
+                grid.as_ref(),
             )),
         );
 
@@ -380,6 +394,16 @@ fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<u32>() as u64),
+                },
+                count: None,
+            },
         ],
     })
 }
@@ -397,6 +421,7 @@ fn create_bind_group(
     layout: &wgpu::BindGroupLayout,
     atlas: &wgpu::Buffer,
     chunks: &wgpu::Buffer,
+    grid: &wgpu::Buffer,
     scene: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -415,8 +440,113 @@ fn create_bind_group(
                 binding: 2,
                 resource: scene.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: grid.as_entire_binding(),
+            },
         ],
     })
+}
+
+/// Certifies the packed resident chunks as a regular lattice for the
+/// shader's top-level DDA walk: one chunk per (x, z) cell, one shared
+/// cube size, one y layer, every origin on the lattice. Anything else —
+/// mixed cube sizes, off-lattice origins, a second chunk in one cell,
+/// or a bounding box too sparse to map — returns `None` and the shader
+/// falls back to box-testing every chunk.
+fn derive_chunk_grid(chunks: &[GpuRayChunk]) -> Option<ChunkGrid> {
+    if chunks.is_empty() || chunks.len() > 25 {
+        return None;
+    }
+    let cube_size = chunks[0].origin_world_size[3];
+    if !cube_size.is_finite() || cube_size <= 0.0 {
+        return None;
+    }
+    if chunks.iter().any(|chunk| {
+        !chunk.origin_world_size[0].is_finite()
+            || !chunk.origin_world_size[1].is_finite()
+            || !chunk.origin_world_size[2].is_finite()
+            || chunk.origin_world_size[3] != cube_size
+    }) {
+        return None;
+    }
+    let origin_y = chunks[0].origin_world_size[1];
+    if chunks
+        .iter()
+        .any(|chunk| chunk.origin_world_size[1] != origin_y)
+    {
+        return None;
+    }
+    let cell_x = lattice_spacing(chunks.iter().map(|chunk| chunk.origin_world_size[0]))
+        .unwrap_or(cube_size);
+    let cell_z = lattice_spacing(chunks.iter().map(|chunk| chunk.origin_world_size[2]))
+        .unwrap_or(cube_size);
+    if !cell_x.is_finite() || cell_x <= 0.0 || !cell_z.is_finite() || cell_z <= 0.0 {
+        return None;
+    }
+    let min_x = chunks
+        .iter()
+        .map(|chunk| chunk.origin_world_size[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_x = chunks
+        .iter()
+        .map(|chunk| chunk.origin_world_size[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_z = chunks
+        .iter()
+        .map(|chunk| chunk.origin_world_size[2])
+        .fold(f32::INFINITY, f32::min);
+    let max_z = chunks
+        .iter()
+        .map(|chunk| chunk.origin_world_size[2])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let dims_x = ((max_x - min_x) / cell_x).round() as usize + 1;
+    let dims_z = ((max_z - min_z) / cell_z).round() as usize + 1;
+    if dims_x == 0 || dims_z == 0 || dims_x * dims_z > ChunkGrid::MAX_CELLS {
+        return None;
+    }
+    let mut map = vec![u32::MAX; dims_x * dims_z];
+    for (index, chunk) in chunks.iter().enumerate() {
+        let cell_x_index = ((chunk.origin_world_size[0] - min_x) / cell_x).round();
+        let cell_z_index = ((chunk.origin_world_size[2] - min_z) / cell_z).round();
+        if (cell_x_index - ((chunk.origin_world_size[0] - min_x) / cell_x)).abs() > 1e-3
+            || (cell_z_index - ((chunk.origin_world_size[2] - min_z) / cell_z)).abs() > 1e-3
+            || cell_x_index < 0.0
+            || cell_z_index < 0.0
+            || cell_x_index >= dims_x as f32
+            || cell_z_index >= dims_z as f32
+        {
+            return None;
+        }
+        let slot = cell_z_index as usize * dims_x + cell_x_index as usize;
+        if map[slot] != u32::MAX {
+            return None;
+        }
+        map[slot] = index as u32;
+    }
+    Some(ChunkGrid {
+        origin: [min_x, origin_y, min_z],
+        cube_size,
+        cell: [cell_x, cell_z],
+        dims: [dims_x as u32, dims_z as u32],
+        map,
+    })
+}
+
+/// Smallest positive gap between distinct coordinates, or `None` when
+/// there is only one distinct coordinate (a single column or row).
+fn lattice_spacing(values: impl Iterator<Item = f32>) -> Option<f32> {
+    let mut sorted: Vec<f32> = values.collect();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    sorted.dedup_by(|a, b| (*a - *b).abs() <= 1e-3);
+    let mut spacing: Option<f32> = None;
+    for pair in sorted.windows(2) {
+        let gap = pair[1] - pair[0];
+        if gap > 1e-3 && gap.is_finite() {
+            spacing = Some(spacing.map_or(gap, |best: f32| best.min(gap)));
+        }
+    }
+    spacing
 }
 
 #[cfg(test)]
@@ -565,21 +695,132 @@ mod tests {
         assert!(source.contains("chunk.indices.y < nearest_source_index"));
     }
 
-    /// The primary-ray loop must never trace a candidate chunk past the
-    /// closest hit already found for this pixel — provably safe (a farther
-    /// hit in that chunk could not win the nearest-hit comparison anyway),
-    /// and the same clip-to-known-distance pattern `finite_segment_visible`
-    /// already trusts for shadow rays against a light's own distance.
+    fn packed(origin: [f32; 3], world_size: f32) -> GpuRayChunk {
+        GpuRayChunk {
+            origin_world_size: [origin[0], origin[1], origin[2], world_size],
+            voxel_depth: [0.25, 6.0, 0.0, 0.0],
+            indices: [0, 0, 0, 0],
+        }
+    }
+
+    #[test]
+    fn chunk_grid_certifies_a_regular_lattice() {
+        let chunks: Vec<_> = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .map(|(dx, dz)| packed([dx as f32 * 10.0, 0.0, dz as f32 * 10.0], 12.8))
+            .collect();
+        let grid = derive_chunk_grid(&chunks).expect("3x3 lattice certifies");
+        assert_eq!(grid.origin, [-10.0, 0.0, -10.0]);
+        assert_eq!(grid.cube_size, 12.8);
+        assert_eq!(grid.cell, [10.0, 10.0]);
+        assert_eq!(grid.dims, [3, 3]);
+        assert_eq!(grid.map, (0..9).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn chunk_grid_leaves_a_hole_empty() {
+        let chunks: Vec<_> = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .filter(|(dx, dz)| !(*dx == 0 && *dz == 0))
+            .map(|(dx, dz)| packed([dx as f32 * 10.0, 0.0, dz as f32 * 10.0], 12.8))
+            .collect();
+        let grid = derive_chunk_grid(&chunks).expect("lattice with a hole certifies");
+        assert_eq!(grid.dims, [3, 3]);
+        assert_eq!(grid.map[4], u32::MAX);
+        assert_eq!(grid.map.iter().filter(|cell| **cell != u32::MAX).count(), 8);
+    }
+
+    #[test]
+    fn chunk_grid_single_chunk_uses_cube_as_cell() {
+        let grid = derive_chunk_grid(&[packed([4.0, 0.0, -6.0], 12.8)])
+            .expect("one chunk certifies");
+        assert_eq!(grid.origin, [4.0, 0.0, -6.0]);
+        assert_eq!(grid.cell, [12.8, 12.8]);
+        assert_eq!(grid.dims, [1, 1]);
+        assert_eq!(grid.map, vec![0]);
+    }
+
+    #[test]
+    fn chunk_grid_rejects_mixed_cube_sizes() {
+        let chunks = [
+            packed([0.0, 0.0, 0.0], 12.8),
+            packed([10.0, 0.0, 0.0], 6.4),
+        ];
+        assert!(derive_chunk_grid(&chunks).is_none());
+    }
+
+    #[test]
+    fn chunk_grid_rejects_off_lattice_origins() {
+        let chunks = [
+            packed([0.0, 0.0, 0.0], 12.8),
+            packed([10.0, 0.0, 0.0], 12.8),
+            packed([23.0, 0.0, 0.0], 12.8),
+        ];
+        assert!(derive_chunk_grid(&chunks).is_none());
+    }
+
+    #[test]
+    fn chunk_grid_rejects_a_second_chunk_in_one_cell() {
+        let chunks = [
+            packed([0.0, 0.0, 0.0], 12.8),
+            packed([0.0, 0.0, 0.0], 12.8),
+        ];
+        assert!(derive_chunk_grid(&chunks).is_none());
+    }
+
+    #[test]
+    fn chunk_grid_rejects_an_oversized_bounding_box() {
+        let mut chunks = Vec::new();
+        for index in 0..9 {
+            chunks.push(packed([index as f32, 0.0, 0.0], 12.8));
+        }
+        for index in 1..9 {
+            chunks.push(packed([0.0, 0.0, index as f32], 12.8));
+        }
+        assert!(derive_chunk_grid(&chunks).is_none());
+    }
+
+    #[test]
+    fn chunk_grid_rejects_an_empty_resident_set() {
+        assert!(derive_chunk_grid(&[]).is_none());
+    }
+
+    /// The primary-ray loop walks the chunk grid in ray order and still
+    /// never traces a candidate chunk past the closest hit already found
+    /// — the clip-to-known-distance reasoning is unchanged, it just lives
+    /// in the per-chunk helper the grid walk calls.
     #[test]
     fn primary_rays_clip_the_search_interval_to_the_closest_hit_so_far() {
         let source = include_str!("../shaders/raymarch.wgsl");
+        assert!(source.contains("fn chunk_grid_walk_init("));
+        assert!(source.contains("fn consider_primary_chunk("));
         let fragment = &source[source.find("@fragment").expect("fragment entry")..];
-        assert!(fragment.contains("min(interval.exit, nearest.distance)"));
-        assert!(
-            fragment.contains(
-                "let hit = trace_chunk(local_origin, direction, chunk, clipped_interval)"
-            )
-        );
+        assert!(fragment.contains("chunk_grid_walk_init("));
+        assert!(fragment.contains("consider_primary_chunk("));
+        let helper_start = source
+            .find("fn trace_primary_chunk(")
+            .expect("primary trace helper");
+        let helper_end = source[helper_start..]
+            .find("\n}\n")
+            .expect("helper end")
+            + helper_start;
+        let helper = &source[helper_start..helper_end];
+        assert!(helper.contains("min(interval.exit, clip_distance)"));
+        assert!(helper.contains(
+            "return trace_chunk(local_origin, ray_direction, chunk, clipped_interval);",
+        ));
+        let consider_start = source
+            .find("fn consider_primary_chunk(")
+            .expect("primary consider helper");
+        let consider_end = source[consider_start..]
+            .find("\n}\n")
+            .expect("helper end")
+            + consider_start;
+        let consider = &source[consider_start..consider_end];
+        assert!(consider.contains(
+            "trace_primary_chunk(chunk, ray_origin, ray_direction, nearest.distance)",
+        ));
+        assert!(consider.contains("chunk.indices.y < nearest_source_index"));
     }
 
     #[test]
@@ -598,9 +839,14 @@ mod tests {
         assert!(visibility.contains("svo_stack_walk("));
         assert!(visibility.contains("let biased_origin = receiver_world + receiver_normal"));
         assert!(visibility.contains("let maximum_distance = endpoint_distance - endpoint_bias"));
+        // Shadow rays walk the chunk grid in ray order; the per-chunk
+        // loop survives only as the fallback for an uncertified lattice.
+        assert!(visibility.contains("fn chunk_grid_walk_init("));
+        assert!(visibility.contains("fn test_visibility_chunk("));
         assert!(visibility.contains("for (var index = 0u; index < chunk_count; index += 1u)"));
         assert!(visibility.contains("let finite_exit = min(slab.exit, maximum_distance)"));
-        assert!(visibility.contains("if trace.blocked {\n            return false;"));
+        assert!(visibility.contains("let trace = test_visibility_chunk("));
+        assert!(visibility.contains("if trace.blocked {"));
 
         assert!(visibility.contains("point_light_sample_irradiance("));
         assert!(visibility.contains("rectangle_gauss_sample_position("));
@@ -617,5 +863,37 @@ mod tests {
         assert!(emissive_branch < visibility_branch);
         assert!(!fragment.contains("let radiance = select("));
         assert!(fragment.contains("surface_radiance_from_analytic_direct("));
+    }
+
+    /// Whole-light culling is exact: a light is skipped only when its
+    /// contribution is provably zero, so the per-sample gates below
+    /// stay reachable and no pixel can change.
+    #[test]
+    fn light_culling_skips_only_lights_that_contribute_nothing() {
+        let source = include_str!("../shaders/raymarch.wgsl");
+        assert!(source.contains("fn light_can_contribute("));
+        let light_start = source
+            .find("fn evaluate_visible_scene_light(")
+            .expect("light evaluator");
+        let light_end = source[light_start..]
+            .find("\n}\n")
+            .expect("evaluator end")
+            + light_start;
+        let evaluator = &source[light_start..light_end];
+        assert!(evaluator.contains("if !light_can_contribute(world, normal, light) {"));
+        assert!(evaluator.contains("if !has_positive_rgb(unoccluded)"));
+        let helper_start = source
+            .find("fn light_can_contribute(")
+            .expect("culling helper");
+        let helper_end = source[helper_start..]
+            .find("\n}\n")
+            .expect("helper end")
+            + helper_start;
+        let helper = &source[helper_start..helper_end];
+        assert!(helper.contains("if light.color_intensity.w <= 0.0"));
+        assert!(helper.contains("if dot(delta, delta) >= range * range"));
+        assert!(helper.contains("if dot(normal, delta) <= 0.0"));
+        assert!(helper.contains("if world.y >= light.position_radius.y"));
+        assert!(helper.contains("if dx * dx + dy * dy + dz * dz >= range * range"));
     }
 }
